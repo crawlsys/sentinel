@@ -2,6 +2,7 @@
 //!
 //! Parses hooks.toml and workflows.toml into domain types.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -69,8 +70,7 @@ struct PhaseToml {
     file: String,
     #[serde(default = "default_true")]
     required: bool,
-    #[serde(default = "default_judge_str")]
-    judge: String,
+    judge: Option<String>,
     #[serde(default)]
     description: String,
     /// Optional role-dyad requirement (Praetorian-inspired). Deserializes
@@ -81,10 +81,6 @@ struct PhaseToml {
 
 const fn default_true() -> bool {
     true
-}
-
-fn default_judge_str() -> String {
-    "sonnet".to_string()
 }
 
 /// Default config directory.
@@ -99,10 +95,7 @@ fn default_judge_str() -> String {
 /// enforcement, and sentinel loads it as the real config.
 #[must_use]
 pub fn config_dir() -> PathBuf {
-    crate::paths::home_root_or_fatal()
-        .join(".claude")
-        .join("sentinel")
-        .join("config")
+    crate::paths::sentinel_root().join("config")
 }
 
 /// Load hook specs from hooks.toml
@@ -167,24 +160,27 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
     let config: WorkflowsConfig =
         toml::from_str(&content).context("Failed to parse workflows.toml")?;
 
+    if config.workflows.is_empty() {
+        anyhow::bail!(
+            "workflows.toml must declare at least one [[workflows]] entry. \
+             An empty workflow catalog disables LangGraph workflow enforcement."
+        );
+    }
+
     let mut workflows: Vec<SkillWorkflow> = Vec::new();
     for w in config.workflows {
-        let phases: Vec<WorkflowPhase> = w
-            .phases
-            .into_iter()
-            .map(|p| WorkflowPhase {
+        let mut phases: Vec<WorkflowPhase> = Vec::new();
+        for p in w.phases {
+            let judge = parse_phase_judge(&w.skill, &p.id, p.judge.as_deref())?;
+            phases.push(WorkflowPhase {
                 id: p.id,
                 file: p.file,
                 required: p.required,
-                judge: match p.judge.as_str() {
-                    "opus" => JudgeModel::Opus,
-                    "codex" => JudgeModel::Codex,
-                    _ => JudgeModel::Sonnet,
-                },
+                judge,
                 description: p.description,
                 required_dyad: p.required_dyad,
-            })
-            .collect();
+            });
+        }
 
         // **Attack #181 fix**: Reject empty skill names.
         // An empty string key in the workflows HashMap creates state confusion
@@ -244,25 +240,38 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
     Ok(workflows)
 }
 
+fn parse_phase_judge(skill: &str, phase_id: &str, raw: Option<&str>) -> Result<JudgeModel> {
+    let Some(raw) = raw else {
+        anyhow::bail!(
+            "Workflow '{skill}' phase '{phase_id}' must declare an explicit judge tier \
+             (kimi, sonnet, opus, or codex)"
+        );
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "kimi" => Ok(JudgeModel::Kimi),
+        "sonnet" => Ok(JudgeModel::Sonnet),
+        "opus" => Ok(JudgeModel::Opus),
+        "codex" => Ok(JudgeModel::Codex),
+        other => anyhow::bail!(
+            "Workflow '{skill}' phase '{phase_id}' declares unknown judge tier '{other}'; \
+             supported tiers are kimi, sonnet, opus, codex"
+        ),
+    }
+}
+
 /// Raw TOML config for skill steps
 #[derive(Debug, Deserialize)]
 struct StepsConfig {
-    /// Federation version (M2.7). Defaults to "1" for pre-M2.7 configs.
+    /// Federation version (M2.7). Required for every enterprise step catalog.
     /// Bumped on breaking changes — see `SkillSteps::federation_version`.
-    #[serde(default = "default_federation_version_str")]
     federation_version: String,
     phases: Vec<StepsPhaseToml>,
-}
-
-fn default_federation_version_str() -> String {
-    "1".to_string()
 }
 
 #[derive(Debug, Deserialize)]
 struct StepsPhaseToml {
     id: String,
-    #[serde(default)]
-    steps: Vec<StepToml>,
+    steps: Option<Vec<StepToml>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,8 +281,7 @@ struct StepToml {
     #[serde(default)]
     blocker: bool,
     /// Cold-start baseline threshold (M1.8). See `WorkflowStep::baseline_threshold`.
-    /// Default 0 — enforce immediately. Existing TOML configs without this field
-    /// continue to load unchanged.
+    /// Default 0 means enforce immediately.
     #[serde(default)]
     baseline_threshold: u64,
     /// Per-step judge tier (#73). See `WorkflowStep::judge`. None = use the
@@ -338,10 +346,8 @@ fn toml_to_json(v: toml::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.into_iter().map(toml_to_json).collect())
         }
         toml::Value::Table(tbl) => {
-            let map: serde_json::Map<String, serde_json::Value> = tbl
-                .into_iter()
-                .map(|(k, v)| (k, toml_to_json(v)))
-                .collect();
+            let map: serde_json::Map<String, serde_json::Value> =
+                tbl.into_iter().map(|(k, v)| (k, toml_to_json(v))).collect();
             serde_json::Value::Object(map)
         }
     }
@@ -369,40 +375,116 @@ pub fn load_skill_steps(config_path: &Path, skill: &str) -> Result<Option<SkillS
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
-    let config: StepsConfig = toml::from_str(&content)
+    let raw_config: toml::Value = toml::from_str(&content)
         .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+    raw_config
+        .get("federation_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Step config {} must declare a non-empty federation_version",
+                toml_path.display()
+            )
+        })?;
+
+    let config: StepsConfig = raw_config
+        .try_into()
+        .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+    if config.phases.is_empty() {
+        anyhow::bail!(
+            "Step config {} must declare at least one [[phases]] entry",
+            toml_path.display()
+        );
+    }
+
+    let mut phase_ids = BTreeSet::new();
+    let mut phases = Vec::with_capacity(config.phases.len());
+    for p in config.phases {
+        if p.id.trim().is_empty() {
+            anyhow::bail!(
+                "Step config {} contains a phase with an empty id",
+                toml_path.display()
+            );
+        }
+        if !phase_ids.insert(p.id.clone()) {
+            anyhow::bail!(
+                "Step config {} declares duplicate phase id '{}'",
+                toml_path.display(),
+                p.id
+            );
+        }
+        let Some(raw_steps) = p.steps else {
+            anyhow::bail!(
+                "Step config {} phase '{}' must declare at least one [[phases.steps]] entry",
+                toml_path.display(),
+                p.id
+            );
+        };
+        if raw_steps.is_empty() {
+            anyhow::bail!(
+                "Step config {} phase '{}' must declare at least one [[phases.steps]] entry",
+                toml_path.display(),
+                p.id
+            );
+        }
+
+        let mut step_ids = BTreeSet::new();
+        let mut steps = Vec::with_capacity(raw_steps.len());
+        for s in raw_steps {
+            if s.id.trim().is_empty() {
+                anyhow::bail!(
+                    "Step config {} phase '{}' contains a step with an empty id",
+                    toml_path.display(),
+                    p.id
+                );
+            }
+            if s.description.trim().is_empty() {
+                anyhow::bail!(
+                    "Step config {} phase '{}' step '{}' must declare a non-empty description",
+                    toml_path.display(),
+                    p.id,
+                    s.id
+                );
+            }
+            if !step_ids.insert(s.id.clone()) {
+                anyhow::bail!(
+                    "Step config {} phase '{}' declares duplicate step id '{}'",
+                    toml_path.display(),
+                    p.id,
+                    s.id
+                );
+            }
+            steps.push(WorkflowStep {
+                id: s.id,
+                description: s.description,
+                blocker: s.blocker,
+                baseline_threshold: s.baseline_threshold,
+                judge: s.judge,
+                timeout_ms: s.timeout_ms,
+                retry_policy: s.retry_policy,
+                circuit_breaker: s.circuit_breaker,
+                provides: s.provides,
+                requires: s.requires,
+                external: s.external,
+                inaccessible: s.inaccessible,
+                deprecated: s.deprecated,
+                r#override: s.r#override,
+                extra: s.extra.map_or(serde_json::Value::Null, toml_to_json),
+            });
+        }
+
+        phases.push(PhaseSteps {
+            phase_id: p.id,
+            steps,
+        });
+    }
 
     let skill_steps = SkillSteps {
         skill: skill.to_string(),
         federation_version: config.federation_version,
-        phases: config
-            .phases
-            .into_iter()
-            .map(|p| PhaseSteps {
-                phase_id: p.id,
-                steps: p
-                    .steps
-                    .into_iter()
-                    .map(|s| WorkflowStep {
-                        id: s.id,
-                        description: s.description,
-                        blocker: s.blocker,
-                        baseline_threshold: s.baseline_threshold,
-                        judge: s.judge,
-                        timeout_ms: s.timeout_ms,
-                        retry_policy: s.retry_policy,
-                        circuit_breaker: s.circuit_breaker,
-                        provides: s.provides,
-                        requires: s.requires,
-                        external: s.external,
-                        inaccessible: s.inaccessible,
-                        deprecated: s.deprecated,
-                        r#override: s.r#override,
-                        extra: s.extra.map_or(serde_json::Value::Null, toml_to_json),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        phases,
     };
 
     Ok(Some(skill_steps))
@@ -503,6 +585,94 @@ description = "Cleanup"
     }
 
     #[test]
+    fn test_load_workflows_accepts_all_explicit_judge_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "judges"
+
+[[workflows.phases]]
+id = "kimi-phase"
+file = "kimi.md"
+required = true
+judge = "kimi"
+
+[[workflows.phases]]
+id = "sonnet-phase"
+file = "sonnet.md"
+required = true
+judge = "sonnet"
+
+[[workflows.phases]]
+id = "opus-phase"
+file = "opus.md"
+required = true
+judge = "opus"
+
+[[workflows.phases]]
+id = "codex-phase"
+file = "codex.md"
+required = true
+judge = "codex"
+"#;
+        std::fs::write(dir.path().join("workflows.toml"), workflows_toml).unwrap();
+
+        let workflows = load_workflows(dir.path()).unwrap();
+        let phases = &workflows[0].phases;
+
+        assert_eq!(phases[0].judge, JudgeModel::Kimi);
+        assert_eq!(phases[1].judge, JudgeModel::Sonnet);
+        assert_eq!(phases[2].judge, JudgeModel::Opus);
+        assert_eq!(phases[3].judge, JudgeModel::Codex);
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_unknown_judge_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "bad-judge"
+
+[[workflows.phases]]
+id = "phase1"
+file = "phase1.md"
+required = true
+judge = "haiku"
+description = "Unknown judge must not downgrade"
+"#;
+        std::fs::write(dir.path().join("workflows.toml"), workflows_toml).unwrap();
+
+        let err = load_workflows(dir.path()).unwrap_err().to_string();
+
+        assert!(err.contains("bad-judge"));
+        assert!(err.contains("phase1"));
+        assert!(err.contains("unknown judge tier"));
+        assert!(err.contains("haiku"));
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_missing_judge_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "missing-judge"
+
+[[workflows.phases]]
+id = "phase1"
+file = "phase1.md"
+required = true
+description = "Judge must be explicit"
+"#;
+        std::fs::write(dir.path().join("workflows.toml"), workflows_toml).unwrap();
+
+        let err = load_workflows(dir.path()).unwrap_err().to_string();
+
+        assert!(err.contains("missing-judge"));
+        assert!(err.contains("phase1"));
+        assert!(err.contains("must declare an explicit judge tier"));
+    }
+
+    #[test]
     fn test_load_workflows_rejects_zero_required_phases() {
         let dir = tempfile::tempdir().unwrap();
         let workflows_toml = r#"
@@ -531,6 +701,17 @@ description = "No required phases — zero enforcement"
             err.contains("sneaky"),
             "Expected skill name in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_empty_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("workflows.toml"), "workflows = []").unwrap();
+
+        let err = load_workflows(dir.path()).unwrap_err().to_string();
+
+        assert!(err.contains("at least one [[workflows]] entry"));
+        assert!(err.contains("disables LangGraph workflow enforcement"));
     }
 
     #[test]
@@ -593,6 +774,8 @@ description = "A phase"
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
 
         let steps_toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -646,13 +829,119 @@ description = "Get comments"
         assert!(result.is_none());
     }
 
+    #[test]
+    fn step_config_rejects_empty_phase_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "1"
+phases = []
+"#;
+        let path = dir.path().join("steps").join("empty.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let err = load_skill_steps(dir.path(), "empty").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("at least one [[phases]]"),
+            "empty phase catalog must fail closed: {err}"
+        );
+    }
+
+    #[test]
+    fn step_config_rejects_phase_without_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "1"
+
+[[phases]]
+id = "claim"
+"#;
+        let path = dir.path().join("steps").join("nosteps.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let err = load_skill_steps(dir.path(), "nosteps").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("at least one [[phases.steps]]"),
+            "phase without steps must fail closed: {err}"
+        );
+    }
+
+    #[test]
+    fn step_config_rejects_duplicate_phase_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "1"
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "2"
+description = "verify"
+"#;
+        let path = dir.path().join("steps").join("dupphase.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let err = load_skill_steps(dir.path(), "dupphase").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("duplicate phase id 'claim'"),
+            "duplicate phase ids must fail closed: {err}"
+        );
+    }
+
+    #[test]
+    fn step_config_rejects_duplicate_step_ids_within_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steps")).unwrap();
+        let toml = r#"
+federation_version = "1"
+
+[[phases]]
+id = "claim"
+
+[[phases.steps]]
+id = "1"
+description = "fetch"
+
+[[phases.steps]]
+id = "1"
+description = "verify"
+"#;
+        let path = dir.path().join("steps").join("dupstep.toml");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+        let err = load_skill_steps(dir.path(), "dupstep").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("duplicate step id '1'"),
+            "duplicate step ids must fail closed: {err}"
+        );
+    }
+
     // ─── M2.7 federation_version tests ─────────────────────────────────
 
     #[test]
-    fn federation_version_defaults_to_one_when_omitted() {
-        // Pre-M2.7 configs (no federation_version field) must continue
-        // to load. Serde's #[serde(default)] fills in "1" so downstream
-        // code can always assume the field is populated.
+    fn federation_version_is_required() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
@@ -668,8 +957,12 @@ description = "fetch"
             .unwrap()
             .write_all(toml.as_bytes())
             .unwrap();
-        let result = load_skill_steps(dir.path(), "legacy").unwrap().unwrap();
-        assert_eq!(result.federation_version, "1");
+        let err = load_skill_steps(dir.path(), "legacy").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("federation_version"),
+            "missing federation_version must be a hard schema error: {err}"
+        );
     }
 
     #[test]
@@ -723,30 +1016,25 @@ description = "fetch"
             .write_all(toml.as_bytes())
             .unwrap();
         let result = load_skill_steps(dir.path(), "dated").unwrap().unwrap();
-        assert_eq!(
-            result.federation_version,
-            "2026-05-06-pre-deploy-cutover",
-        );
+        assert_eq!(result.federation_version, "2026-05-06-pre-deploy-cutover",);
     }
 
     // ─── M2.5 federation directives tests ─────────────────────────────
     //
     // These cover the four directive fields added in M2.5:
     // `provides`, `requires`, `external`, and `inaccessible`. The loader
-    // must (1) accept legacy configs that don't declare them (empty
-    // defaults), (2) preserve declared values verbatim, and (3) round-
-    // trip the boolean flag. Federation compose (M2.4) consumes these
-    // values to validate cross-skill contracts.
+    // must preserve declared values verbatim and keep neutral defaults for
+    // optional directives that are not part of a step's contract.
 
     #[test]
     fn federation_directives_default_to_empty_when_omitted() {
-        // Pre-M2.5 configs without any directive fields load with empty
-        // Vec defaults and inaccessible=false. This is the backwards-
-        // compat safety net — every existing skill TOML in the repo
-        // must continue to load unchanged.
+        // Optional directive fields load with neutral defaults when the step
+        // intentionally has no cross-skill federation contract.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -779,6 +1067,8 @@ description = "fetch"
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "open_pr"
 
@@ -799,10 +1089,7 @@ external = ["linear.claim.3"]
             .unwrap();
         let step = &result.phases[0].steps[0];
         assert_eq!(step.provides, vec!["git.pr_url", "git.pr_number"]);
-        assert_eq!(
-            step.requires,
-            vec!["linear.ticket_id", "git.branch_name"]
-        );
+        assert_eq!(step.requires, vec!["linear.ticket_id", "git.branch_name"]);
         assert_eq!(step.external, vec!["linear.claim.3"]);
         assert!(!step.inaccessible);
     }
@@ -817,6 +1104,8 @@ external = ["linear.claim.3"]
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "internal"
 
@@ -850,12 +1139,12 @@ inaccessible = true
 
     #[test]
     fn deprecation_fields_default_to_none_when_omitted() {
-        // Pre-M2.6 configs that don't declare the fields load with
-        // `None` for both. This is the backwards-compat invariant —
-        // adding M2.6 must not break any existing skill TOML.
+        // Optional migration fields load with `None` when the step is current.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -882,6 +1171,8 @@ description = "fetch"
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -911,6 +1202,8 @@ deprecated = "Use claim.2 — fetches by ID, not URL"
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -947,11 +1240,13 @@ override = "claim.old"
 
     #[test]
     fn extra_field_defaults_to_null_when_omitted() {
-        // Pre-M2.9 configs that don't declare `extra` load with
-        // `serde_json::Value::Null`. Backwards-compat invariant.
+        // Optional plugin metadata loads as `serde_json::Value::Null` when a
+        // step does not expose extension metadata.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -977,6 +1272,8 @@ description = "fetch"
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("steps")).unwrap();
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "review"
 
@@ -1048,10 +1345,7 @@ skip = true
         ]);
         let arr = toml::Value::Array(vec![toml::Value::Table(inner)]);
         let json = toml_to_json(arr);
-        assert_eq!(
-            json.pointer("/0/name").and_then(|v| v.as_str()),
-            Some("a"),
-        );
+        assert_eq!(json.pointer("/0/name").and_then(|v| v.as_str()), Some("a"),);
         assert_eq!(
             json.pointer("/0/score").and_then(serde_json::Value::as_i64),
             Some(10),

@@ -1,7 +1,7 @@
 //! Per-call hook telemetry.
 //!
 //! Each hook invocation appends a single JSON line to
-//! `~/.claude/sentinel/metrics/hook-invocations.jsonl` so the dashboard can
+//! `~/.claude/sentinel/metrics/hook-invocations.jsonl` so local clients can
 //! show:
 //!   - which hooks fired and when
 //!   - which hooks blocked tool calls and why
@@ -51,7 +51,7 @@ pub struct HookInvocation {
 }
 
 /// Outcome classes recorded in the `outcome` column. Keep these stable —
-/// the dashboard groups by string value.
+/// local clients group by string value.
 pub enum Outcome {
     /// Hook returned without injecting context or blocking. The vast
     /// majority of calls.
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_outcome_strings_are_stable() {
-        // Dashboard groups by these literal strings — changing them is
+        // Report groups by these literal strings — changing them is
         // a breaking change. Pin them here so a refactor can't silently
         // rename "allow" → "Allow" etc.
         assert_eq!(Outcome::Allow.as_str(), "allow");

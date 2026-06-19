@@ -166,7 +166,12 @@ fn pointer_text(dest: &Path) -> String {
 /// pointer. Best-effort: returns `Ok(())` only when the destination write
 /// succeeds (the pointer write is non-fatal — the canonical copy is what
 /// matters). `src == dest` is a no-op success.
-fn move_plan(fs: &dyn FileSystemPort, src: &Path, dest: &Path, content: &str) -> anyhow::Result<()> {
+fn move_plan(
+    fs: &dyn FileSystemPort,
+    src: &Path,
+    dest: &Path,
+    content: &str,
+) -> anyhow::Result<()> {
     if src == dest {
         return Ok(());
     }
@@ -313,10 +318,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         "project".to_string(),
         serde_json::Value::String(project.clone()),
     );
-    meta.insert(
-        "slug".to_string(),
-        serde_json::Value::String(slug.clone()),
-    );
+    meta.insert("slug".to_string(), serde_json::Value::String(slug.clone()));
     meta.insert(
         "organized_path".to_string(),
         serde_json::Value::String(target_path.display().to_string()),
@@ -485,16 +487,31 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             std::fs::read_dir(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -505,10 +522,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -576,16 +600,29 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 None
             }
-            fn read_to_string(&self, _: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            fn read_to_string(
+                &self,
+                _: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 unreachable!("find_repo_root only calls exists")
             }
-            fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 unreachable!("find_repo_root only calls exists")
             }
-            fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 unreachable!("find_repo_root only calls exists")
             }
-            fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 unreachable!("find_repo_root only calls exists")
             }
             fn exists(&self, _: &Path) -> bool {
@@ -594,10 +631,18 @@ mod tests {
             fn is_dir(&self, _: &Path) -> bool {
                 false
             }
-            fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                _: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 unreachable!("find_repo_root only calls exists")
             }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 unreachable!("find_repo_root only calls exists")
             }
         }
@@ -709,10 +754,7 @@ mod tests {
         std::fs::write(&src, "# Real Name\nbody").unwrap();
 
         move_plan(&RealFs, &src, &dest, "# Real Name\nbody").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&dest).unwrap(),
-            "# Real Name\nbody"
-        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "# Real Name\nbody");
         // Original now holds a pointer.
         let ptr = std::fs::read_to_string(&src).unwrap();
         assert!(is_pointer(&ptr), "src should be a pointer: {ptr}");
@@ -782,19 +824,35 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 Some(self.home.clone())
             }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn read_to_string(
+                &self,
+                p: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                p: &Path,
+                c: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 if let Some(par) = p.parent() {
-                    std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                    std::fs::create_dir_all(par)
+                        .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
                 }
                 std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn create_dir_all(
+                &self,
+                p: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                std::fs::create_dir_all(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                p: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 std::fs::read_dir(p)
                     .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                     .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -805,10 +863,18 @@ mod tests {
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                p: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }

@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use sentinel_domain::ports::{SpecChallengeStoreError, SpecChallengeStorePort};
 use sentinel_domain::spec_challenge::{SpecChallenge, WorkId};
@@ -42,13 +42,7 @@ impl FilesystemSpecChallengeStore {
     /// Construct with the default path
     /// (`~/.claude/sentinel/state/spec-challenges/`).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let base_dir = home
-            .join(".claude")
-            .join("sentinel")
-            .join("state")
-            .join("spec-challenges");
+        let base_dir = crate::state_store::state_dir().join("spec-challenges");
         Ok(Self::at_dir(base_dir))
     }
 
@@ -84,10 +78,7 @@ impl SpecChallengeStorePort for FilesystemSpecChallengeStore {
         })?;
 
         fs::write(&tmp_path, json).map_err(|e| {
-            SpecChallengeStoreError::StoreUnavailable(format!(
-                "write {}: {e}",
-                tmp_path.display()
-            ))
+            SpecChallengeStoreError::StoreUnavailable(format!("write {}: {e}", tmp_path.display()))
         })?;
 
         fs::rename(&tmp_path, &final_path).map_err(|e| {
@@ -100,10 +91,7 @@ impl SpecChallengeStorePort for FilesystemSpecChallengeStore {
         Ok(())
     }
 
-    fn load(
-        &self,
-        work_id: &WorkId,
-    ) -> Result<Option<SpecChallenge>, SpecChallengeStoreError> {
+    fn load(&self, work_id: &WorkId) -> Result<Option<SpecChallenge>, SpecChallengeStoreError> {
         let path = self.challenge_path(work_id);
         let bytes = match fs::read(&path) {
             Ok(b) => b,
@@ -132,8 +120,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use sentinel_domain::reversibility::ReversibilityClass;
     use sentinel_domain::spec_challenge::{
-        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory,
-        GapResolution, SpecChallenge, SpecGap, SpecReference, WorkId,
+        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory, GapResolution,
+        SpecChallenge, SpecGap, SpecReference, WorkId,
     };
     use tempfile::TempDir;
 

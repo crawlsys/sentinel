@@ -94,7 +94,8 @@ fn decode_pull_request(action: Option<&str>, body: &Value) -> Option<String> {
         Some("closed") if merged => {
             let sha = pr
                 .get("merge_commit_sha")
-                .and_then(Value::as_str).map_or_else(|| "?".to_string(), short_sha);
+                .and_then(Value::as_str)
+                .map_or_else(|| "?".to_string(), short_sha);
             let base_ref = pr
                 .pointer("/base/ref")
                 .and_then(Value::as_str)
@@ -129,7 +130,8 @@ fn decode_pull_request(action: Option<&str>, body: &Value) -> Option<String> {
         Some("synchronize") => {
             let sha = pr
                 .pointer("/head/sha")
-                .and_then(Value::as_str).map_or_else(|| "?".to_string(), short_sha);
+                .and_then(Value::as_str)
+                .map_or_else(|| "?".to_string(), short_sha);
             Some(format!("PR #{number} updated (new head {sha}) in {repo}"))
         }
         Some(other) => Some(format!(

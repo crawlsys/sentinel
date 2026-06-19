@@ -157,7 +157,12 @@ mod tests {
     #[test]
     fn recall_detail_shape() {
         let hits = vec![
-            ("a1".to_string(), Some("e1".to_string()), "user/likes=rust".to_string(), 0.91),
+            (
+                "a1".to_string(),
+                Some("e1".to_string()),
+                "user/likes=rust".to_string(),
+                0.91,
+            ),
             ("a2".to_string(), None, "proj/uses=qdrant".to_string(), 0.77),
         ];
         let ev = MemoryEvent {

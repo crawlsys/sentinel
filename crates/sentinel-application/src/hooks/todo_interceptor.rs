@@ -18,7 +18,7 @@ use chrono::Utc;
 use regex::Regex;
 use sentinel_domain::events::{HookInput, HookOutput};
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// Tool names we intercept
 const TASK_CREATE: &str = "TaskCreate";
@@ -198,6 +198,10 @@ fn handle_task_create(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
+    let Some(session_id) = concrete_input_session_id(input) else {
+        return HookOutput::allow();
+    };
+
     // Combine subject + description for metadata parsing
     let raw_content = if description.is_empty() {
         subject.to_string()
@@ -205,7 +209,6 @@ fn handle_task_create(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         format!("{subject}: {description}")
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let timestamp = Utc::now().to_rfc3339();
     let proj_hash = project_hash(cwd);
@@ -268,6 +271,10 @@ fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
+    let Some(session_id) = concrete_input_session_id(input) else {
+        return HookOutput::allow();
+    };
+
     let base_dir = match todos_base_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
@@ -283,9 +290,9 @@ fn handle_task_update(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Find by position (task IDs are 1-based indices in Claude Code)
     // Also try matching by content substring as fallback
-    let idx = active_todos
-        .iter()
-        .position(|t| t.id.ends_with(task_id) || t.task_id == task_id);
+    let idx = active_todos.iter().position(|t| {
+        t.session_id == session_id && (t.id.ends_with(task_id) || t.task_id == task_id)
+    });
 
     if let Some(idx) = idx {
         let mut todo = active_todos.remove(idx);
@@ -333,6 +340,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_allows_non_task_tool() {
@@ -451,19 +459,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &std::path::Path) -> bool {
@@ -472,10 +493,17 @@ mod tests {
         fn is_dir(&self, p: &std::path::Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
@@ -485,6 +513,115 @@ mod tests {
                 .append(true)
                 .open(p)?;
             Ok(f.write_all(c)?)
+        }
+    }
+
+    struct TempHomeFs {
+        home: PathBuf,
+    }
+
+    impl FileSystemPort for TempHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(vec![])
+        }
+
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
+            Ok(f.write_all(c)?)
+        }
+    }
+
+    fn ctx_with_fs(fs: &'static dyn FileSystemPort) -> HookContext<'static> {
+        let base = crate::hooks::test_support::stub_ctx();
+        HookContext { fs, ..base }
+    }
+
+    fn task_create_input(session_id: Option<&str>) -> HookInput {
+        HookInput {
+            tool_name: Some("TaskCreate".to_string()),
+            tool_input: Some(serde_json::json!({
+                "subject": "[P1] AUTH-01: Fix #auth login bug",
+                "description": "The login flow fails on mobile"
+            })),
+            cwd: Some("/tmp/test-project".to_string()),
+            session_id: session_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn todo_for_session(session_id: &str, suffix: &str) -> RichTodo {
+        RichTodo {
+            id: format!("todo_{suffix}"),
+            content: "Fix auth bug".to_string(),
+            raw_content: "AUTH-01: Fix auth bug".to_string(),
+            priority: 1,
+            tags: vec!["auth".to_string()],
+            status: "pending".to_string(),
+            task_id: "AUTH-01".to_string(),
+            session_id: session_id.to_string(),
+            project: "/tmp/test".to_string(),
+            project_hash: "abcd1234".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
         }
     }
 
@@ -560,5 +697,135 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn task_create_without_concrete_session_does_not_persist_unknown_todo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs: &'static TempHomeFs = Box::leak(Box::new(TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let input = task_create_input(None);
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn task_create_with_unknown_session_does_not_persist_unknown_todo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs: &'static TempHomeFs = Box::leak(Box::new(TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let input = task_create_input(Some("unknown"));
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn task_create_with_default_session_does_not_persist_todo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs: &'static TempHomeFs = Box::leak(Box::new(TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let input = task_create_input(Some("default"));
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn task_create_with_concrete_session_persists_session_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs: &'static TempHomeFs = Box::leak(Box::new(TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let session_id = "todo-real-session";
+        let input = task_create_input(Some(session_id));
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let active_path = tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl");
+        let todos = read_existing_todos(fs, &active_path);
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].session_id, session_id);
+    }
+
+    #[test]
+    fn task_update_only_updates_matching_session_todo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs: &'static TempHomeFs = Box::leak(Box::new(TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        let active_path = tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl");
+        let completed_path = tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("completed.jsonl");
+        write_todos(
+            fs,
+            &active_path,
+            &[
+                todo_for_session("todo-session-a", "a"),
+                todo_for_session("todo-session-b", "b"),
+            ],
+        );
+        let input = HookInput {
+            tool_name: Some("TaskUpdate".to_string()),
+            tool_input: Some(serde_json::json!({
+                "taskId": "AUTH-01",
+                "status": "completed"
+            })),
+            cwd: Some("/tmp/test-project".to_string()),
+            session_id: Some("todo-session-b".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let active = read_existing_todos(fs, &active_path);
+        let completed = read_existing_todos(fs, &completed_path);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].session_id, "todo-session-a");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].session_id, "todo-session-b");
     }
 }

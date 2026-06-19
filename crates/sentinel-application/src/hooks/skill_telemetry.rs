@@ -18,6 +18,28 @@ fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(dir)
 }
 
+fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id == "unknown"
+        || session_id == "default"
+        || session_id.len() > 128
+    {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(session_id)
+}
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
+}
+
 /// Detect project language from well-known manifest files in `dir`.
 fn detect_language(fs: &dyn FileSystemPort, dir: &Path) -> &'static str {
     if fs.exists(&dir.join("package.json")) {
@@ -40,7 +62,9 @@ fn detect_language(fs: &dyn FileSystemPort, dir: &Path) -> &'static str {
 
 /// Directory for telemetry state files — must match `skill_router::telemetry_dir()`.
 fn telemetry_state_dir(fs: &dyn FileSystemPort) -> PathBuf {
-    fs.home_dir().map_or_else(std::env::temp_dir, |h| h.join(".claude").join("sentinel").join("telemetry"))
+    fs.home_dir().map_or_else(std::env::temp_dir, |h| {
+        h.join(".claude").join("sentinel").join("telemetry")
+    })
 }
 
 /// Read the current skill from the telemetry state file written by skill-router.
@@ -121,7 +145,11 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
         b.get("count")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
-            .cmp(&a.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0))
+            .cmp(
+                &a.get("count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
     });
 
     let mut langs_by_usage: Vec<serde_json::Value> = lang_counts
@@ -132,7 +160,11 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
         b.get("count")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
-            .cmp(&a.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0))
+            .cmp(
+                &a.get("count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
     });
 
     let avg_durations: Vec<serde_json::Value> = skill_durations
@@ -166,6 +198,10 @@ fn regenerate_summary(fs: &dyn FileSystemPort, telemetry_path: &Path, summary_pa
 
 /// Process the skill-telemetry hook event (Stop).
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
+
     let current_skill = read_current_skill(ctx.fs);
 
     let metrics = match metrics_dir(ctx.fs) {
@@ -173,14 +209,12 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         None => return HookOutput::allow(),
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
     let cwd = Path::new(cwd_str);
 
     let run_id = read_run_id(ctx.fs).unwrap_or_default();
     let start_time = read_start_time(ctx.fs);
-    let duration_ms = start_time
-        .map_or(0, |st| chrono::Utc::now().timestamp_millis() - st);
+    let duration_ms = start_time.map_or(0, |st| chrono::Utc::now().timestamp_millis() - st);
 
     let language = detect_language(ctx.fs, cwd);
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -242,6 +276,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use std::collections::HashMap as StdMap;
 
     /// Test FS that tracks exists() calls via a set of paths.
@@ -273,23 +308,36 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             self.files
                 .get(p)
                 .cloned()
                 .ok_or_else(|| sentinel_domain::port_errors::FileSystemError::backend("not found"))
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.written
                 .lock()
                 .unwrap()
                 .insert(p.to_path_buf(), c.to_vec());
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &Path) -> bool {
@@ -298,10 +346,17 @@ mod tests {
         fn is_dir(&self, _: &Path) -> bool {
             false
         }
-        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            _: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Err(sentinel_domain::port_errors::FileSystemError::backend("no"))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -342,6 +397,93 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_skill_telemetry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let telemetry = metrics_dir(&fs)
+            .expect("metrics dir")
+            .join("skill-telemetry.jsonl");
+        let _ = std::fs::remove_file(&telemetry);
+
+        let output = process(&HookInput::default(), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !telemetry.exists(),
+            "missing session must not append skill telemetry under unknown"
+        );
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_skill_telemetry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let telemetry = metrics_dir(&fs)
+            .expect("metrics dir")
+            .join("skill-telemetry.jsonl");
+        let _ = std::fs::remove_file(&telemetry);
+
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !telemetry.exists(),
+            "synthetic unknown session must not append skill telemetry"
+        );
+    }
+
+    #[test]
+    fn concrete_session_writes_skill_telemetry_and_routing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let telemetry_state = telemetry_state_dir(&fs);
+        std::fs::create_dir_all(&telemetry_state).unwrap();
+        std::fs::write(telemetry_state.join("claude-current-skill"), "linear").unwrap();
+        std::fs::write(telemetry_state.join("claude-skill-run-id"), "run-123").unwrap();
+        let metrics = metrics_dir(&fs).expect("metrics dir");
+        let telemetry = metrics.join("skill-telemetry.jsonl");
+        let routing = metrics.join("routing.jsonl");
+        let _ = std::fs::remove_file(&telemetry);
+        let _ = std::fs::remove_file(&routing);
+
+        let input = HookInput {
+            session_id: Some("skill-telemetry-real".to_string()),
+            cwd: Some(tmp.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+        let telemetry_row: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&telemetry)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let routing_row: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&routing)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(output.blocked.is_none());
+        assert_eq!(telemetry_row["session_id"], "skill-telemetry-real");
+        assert_eq!(telemetry_row["skill"], "linear");
+        assert_eq!(routing_row["session_id"], "skill-telemetry-real");
+        assert_eq!(routing_row["run_id"], "run-123");
     }
 
     #[test]

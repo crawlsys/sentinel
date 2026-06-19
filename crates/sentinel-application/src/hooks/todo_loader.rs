@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// A single todo entry from active.jsonl
 #[derive(Debug, serde::Deserialize)]
@@ -27,11 +27,7 @@ struct TodoEntry {
 }
 
 fn todos_file(fs: &dyn FileSystemPort) -> PathBuf {
-    fs.home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("todos")
-        .join("active.jsonl")
+    fs.claude_dir().join("todos").join("active.jsonl")
 }
 
 fn session_marker(session_id: &str) -> PathBuf {
@@ -74,10 +70,10 @@ fn filter_project_todos<'a>(todos: &'a [TodoEntry], cwd: &str) -> Vec<&'a TodoEn
 /// Process the todo-loader hook event
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let session_id = concrete_input_session_id(input);
 
     // Check session marker — only load once per session
-    if session_id != "unknown" {
+    if let Some(session_id) = session_id {
         let marker = session_marker(session_id);
         if ctx.fs.exists(&marker) {
             return HookOutput::allow();
@@ -151,8 +147,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
 }
 
-fn write_session_marker(fs: &dyn FileSystemPort, session_id: &str) {
-    if session_id != "unknown" {
+fn write_session_marker(fs: &dyn FileSystemPort, session_id: Option<&str>) {
+    if let Some(session_id) = session_id {
         let _ = fs.write(&session_marker(session_id), b"1");
     }
 }
@@ -160,6 +156,7 @@ fn write_session_marker(fs: &dyn FileSystemPort, session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
 
     fn make_todo(content: &str, status: &str, priority: u8, project: &str) -> String {
         format!(
@@ -231,6 +228,61 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let unknown_marker = session_marker("unknown");
+        let _ = std::fs::remove_file(&unknown_marker);
+
+        let input = HookInput::default();
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!unknown_marker.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let raw_marker = session_marker(" unknown ");
+        let trimmed_marker = session_marker("unknown");
+        let _ = std::fs::remove_file(&raw_marker);
+        let _ = std::fs::remove_file(&trimmed_marker);
+
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!raw_marker.exists());
+        assert!(!trimmed_marker.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let marker = session_marker("todo-session-123");
+        let _ = std::fs::remove_file(&marker);
+
+        let input = HookInput {
+            session_id: Some("todo-session-123".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(marker.exists());
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

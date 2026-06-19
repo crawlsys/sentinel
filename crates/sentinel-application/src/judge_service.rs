@@ -1,8 +1,9 @@
 //! AI Judge Service
 //!
 //! Orchestrates AI evaluation of phase evidence.
-//! Routes to Cerebras (fast), `OpenAI` (normal), or Anthropic (critical)
-//! via the `MultiModelJudge` in infrastructure.
+//! Production dispatch is implemented by infrastructure's `MultiModelJudge`,
+//! which routes every judge tier through the standardized OpenRouter gateway
+//! and preserves model-family identity for multi-judge disagreement analysis.
 
 use anyhow::{bail, Result};
 
@@ -31,7 +32,7 @@ pub trait JudgeService: Send + Sync {
     ///
     /// **Default impl** synthesizes a step-shaped objective string and
     /// delegates to `evaluate()`. This keeps existing implementers
-    /// (`FallbackJudge`, `MultiModelJudge`) compiling without changes —
+    /// (`UnavailableJudge`, `MultiModelJudge`) compiling without changes —
     /// they get step-level evaluation for free, just routed through the
     /// phase-level prompting they already do. Implementers that want
     /// step-specific prompting (richer evidence framing, per-step rubrics,
@@ -129,12 +130,12 @@ pub trait JudgeService: Send + Sync {
     }
 }
 
-/// Blocking fallback — hard-fails when no AI providers are configured.
+/// Fail-closed judge — hard-fails when no AI providers are configured.
 /// This ensures phases are NEVER auto-passed without real AI evaluation.
-pub struct FallbackJudge;
+pub struct UnavailableJudge;
 
 #[async_trait::async_trait]
-impl JudgeService for FallbackJudge {
+impl JudgeService for UnavailableJudge {
     async fn evaluate(
         &self,
         _skill: &str,
@@ -145,8 +146,7 @@ impl JudgeService for FallbackJudge {
     ) -> Result<JudgeVerdict> {
         bail!(
             "AI judge unavailable — no API keys configured. \
-             Phase cannot be verified. Set ANTHROPIC_API_KEY, \
-             OPENAI_API_KEY, or CEREBRAS_API_KEY."
+             Phase cannot be verified. Set OPENROUTER_API_KEY."
         )
     }
 }
@@ -346,13 +346,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_judge_still_errors_on_single_evaluate() {
-        // Back-compat: the original FallbackJudge contract is unchanged.
-        let judge = FallbackJudge;
+    async fn unavailable_judge_errors_on_single_evaluate() {
+        let judge = UnavailableJudge;
         let err = judge
             .evaluate("x", "y", "z", &Evidence::default(), JudgeModel::Kimi)
             .await
-            .expect_err("FallbackJudge must keep erroring");
+            .expect_err("UnavailableJudge must keep erroring");
         assert!(err.to_string().contains("AI judge unavailable"));
     }
 }

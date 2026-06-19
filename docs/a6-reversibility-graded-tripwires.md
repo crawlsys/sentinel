@@ -40,7 +40,7 @@ The result:
 - **No single dial to tune** — when sentinel feels too aggressive in one area or too permissive in another, there's no shared concept to adjust.
 - **No place for A3's trigger logic** — A3 needs to know "is this action irreversible?"; without a shared classifier, A3 has to roll its own, duplicating work.
 
-A6 introduces a single axis — reversibility — that every gate can consult. The axis is grounded in Bostrom-class reasoning (which is the framing that survives Goodhart, per R3): we care about whether a mistake can be undone, not whether the action is unusual.
+A6 introduces a single axis — reversibility — that every gate can query. The axis is grounded in Bostrom-class reasoning (which is the framing that survives Goodhart, per R3): we care about whether a mistake can be undone, not whether the action is unusual.
 
 ---
 
@@ -340,7 +340,7 @@ let coverage_required = class.at_least(ReversibilityClass::Irreversible);
 
 ### `git_hygiene` (existing — could be extended)
 
-Future: the existing `git_hygiene` hook can consult the classifier for git operations rather than maintaining its own pattern list. Out of scope for this ADR; flagged as a cleanup opportunity.
+Future: the existing `git_hygiene` hook can query the classifier for git operations rather than maintaining its own pattern list. Out of scope for this ADR; flagged as a cleanup opportunity.
 
 ---
 

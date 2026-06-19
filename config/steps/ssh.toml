@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # SSH Skill — Step Definitions
 # Remote server connection and command execution
 #

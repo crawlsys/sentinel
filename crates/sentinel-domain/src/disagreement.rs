@@ -30,12 +30,16 @@
 //!   substituting a `StepProof`'s `combined_hash` for a
 //!   `DisagreementMarker`'s (and vice versa) — distinct hash domains
 //!   per entry kind.
+//! - `signature` = Ed25519 signature over `combined_hash`. Authoritative
+//!   verification rejects unsigned markers.
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::multi_judge::MultiJudgeVerdict;
+use crate::step_proof::SignatureError;
 
 /// A chain entry recording multi-judge disagreement on a step's
 /// verdict.
@@ -73,6 +77,15 @@ pub struct DisagreementMarker {
     /// with a `DisagreementMarker`'s `combined_hash` even if every
     /// other field happened to match.
     pub combined_hash: String,
+
+    // ── Ed25519 attestation ───────────────────────────────────────
+    /// Hex-encoded Ed25519 signature over `combined_hash`.
+    ///
+    /// Authoritative verification rejects `None`. The option exists only so
+    /// unsigned marker material can deserialize and produce a precise
+    /// `SignatureError::Missing` instead of hiding behind a parse failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 
     /// When the disagreement was recorded (RFC3339 UTC).
     pub recorded_at: DateTime<Utc>,
@@ -149,8 +162,37 @@ impl DisagreementMarker {
             previous_hash,
             multi_judge_hash,
             combined_hash,
+            signature: None,
             recorded_at: Utc::now(),
         }
+    }
+
+    /// Sign this marker's `combined_hash` with an Ed25519 key.
+    pub fn sign_with(&mut self, key: &SigningKey) {
+        let signature: Signature = key.sign(self.combined_hash.as_bytes());
+        self.signature = Some(hex::encode(signature.to_bytes()));
+    }
+
+    /// Verify this marker's signature against a public key.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — signature is present and valid for this `combined_hash`
+    /// - `Err(SignatureError)` — signature is absent, malformed, wrong length,
+    ///   or doesn't verify against the supplied key
+    pub fn verify_signature(&self, key: &VerifyingKey) -> Result<bool, SignatureError> {
+        let Some(sig_hex) = &self.signature else {
+            return Err(SignatureError::Missing);
+        };
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| SignatureError::InvalidEncoding)?;
+        if sig_bytes.len() != ed25519_dalek::SIGNATURE_LENGTH {
+            return Err(SignatureError::InvalidLength);
+        }
+        let mut sig_array = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+        sig_array.copy_from_slice(&sig_bytes);
+        let signature = Signature::from_bytes(&sig_array);
+        key.verify(self.combined_hash.as_bytes(), &signature)
+            .map(|()| true)
+            .map_err(|_| SignatureError::VerificationFailed)
     }
 
     /// Verify both internal hashes match recomputed values. Used by
@@ -277,6 +319,36 @@ mod tests {
         assert_eq!(back.step_id, "claim.3");
         assert_eq!(back.multi_judge.tier, JudgeTrustTier::Critical);
         assert!(back.multi_judge.disagreement);
+    }
+
+    #[test]
+    fn sign_then_verify_succeeds_with_matching_key() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let public = key.verifying_key();
+        let v = sample_disagreement();
+        let mut m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
+
+        assert!(m.signature.is_none(), "fresh marker has no signature");
+        m.sign_with(&key);
+        assert!(m.signature.is_some(), "sign_with must populate signature");
+        assert!(
+            m.verify_signature(&public)
+                .expect("valid marker signature should verify"),
+            "valid marker signature must verify"
+        );
+    }
+
+    #[test]
+    fn unsigned_marker_signature_verification_fails_closed() {
+        let public = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let v = sample_disagreement();
+        let m = DisagreementMarker::new("linear", "sess-1", "claim.3", "claim", v, "abc123");
+
+        assert_eq!(
+            m.verify_signature(&public),
+            Err(SignatureError::Missing),
+            "unsigned disagreement markers must fail authoritative verification"
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
-//! Master Enterprise Factory Dashboard — SEN-19.
+//! Enterprise operational summary — SEN-19.
 //!
 //! Single integration point that reads every shipped sentinel summary
 //! file and combines them into one rendered structure
-//! (`master-dashboard-summary.json`) that the Next.js dashboard's
-//! master organism can pull in one fetch. The point is to amortise the
-//! per-file IO cost across organisms and provide a frozen "as-of"
-//! snapshot the UI can render deterministically.
+//! (`operational-summary.json`) that local API and future cloud control
+//! plane consumers can pull in one fetch. The point is to amortise the
+//! per-file IO cost across consumers and provide a frozen "as-of"
+//! snapshot for deterministic rendering.
 //!
 //! Reads (all optional — missing files surface as `None`):
 //!
@@ -23,7 +23,7 @@
 //! | `cache-efficiency-summary.json` | SEN-14 |
 //! | `pr-review-summary.json` | SEN-18 |
 //!
-//! Writes: `master-dashboard-summary.json`.
+//! Writes: `operational-summary.json`.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -39,8 +39,8 @@ use crate::lead_time::LeadTimeSummary;
 use crate::throughput::{FtpSummary, ThroughputSummary};
 
 /// One section's load result. `Some` carries the parsed summary; `None`
-/// means the source file was absent or unparseable — the dashboard
-/// renders that section as "no data".
+/// means the source file was absent or unparseable — consumers render
+/// that section as "no data".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
     pub source: String,
@@ -59,8 +59,8 @@ impl<T> Section<T> {
 }
 
 /// Pass-through wrapper for summaries that this module doesn't have a
-/// strong type for (SEN-13, SEN-14, SEN-15, SEN-18). The dashboard's TS
-/// types deserialize them directly from the embedded `Value`.
+/// strong type for (SEN-13, SEN-14, SEN-15, SEN-18). Consumers can
+/// deserialize them directly from the embedded `Value`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawSection {
     pub source: String,
@@ -78,9 +78,9 @@ impl RawSection {
     }
 }
 
-/// Top-level rendered structure written to `master-dashboard-summary.json`.
+/// Top-level rendered structure written to `operational-summary.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MasterDashboardSummary {
+pub struct OperationalSummary {
     pub generated_at: String,
     pub sections_loaded: u8,
     pub sections_total: u8,
@@ -96,8 +96,8 @@ pub struct MasterDashboardSummary {
     pub throughput: Section<ThroughputSummary>,
     pub first_time_pass: Section<FtpSummary>,
 
-    // Economics + review — passed through as JSON values since the
-    // dashboard owns those schemas.
+    // Economics + review — passed through as JSON values because this
+    // summary does not own those schemas.
     pub cost_per_point: RawSection,
     pub roi: RawSection,
     pub cache_efficiency: RawSection,
@@ -114,7 +114,7 @@ pub fn build_at(
     metrics_dir: &Path,
     summary_path: &Path,
     now: DateTime<Utc>,
-) -> Result<MasterDashboardSummary> {
+) -> Result<OperationalSummary> {
     let deploys = load_section::<DeploySummary>(metrics_dir, "deploys-summary.json");
     let lead_times = load_section::<LeadTimeSummary>(metrics_dir, "lead-times-summary.json");
     let change_failure =
@@ -143,7 +143,7 @@ pub fn build_at(
         + u8::from(cache_efficiency.loaded)
         + u8::from(pr_review.loaded);
 
-    let summary = MasterDashboardSummary {
+    let summary = OperationalSummary {
         generated_at: now.to_rfc3339(),
         sections_loaded: loaded_count,
         sections_total: 11,
@@ -173,7 +173,7 @@ pub fn build_at(
 ///
 /// # Errors
 /// Same as [`build_at`].
-pub fn build(metrics_dir: &Path, summary_path: &Path) -> Result<MasterDashboardSummary> {
+pub fn build(metrics_dir: &Path, summary_path: &Path) -> Result<OperationalSummary> {
     build_at(metrics_dir, summary_path, Utc::now())
 }
 
@@ -191,7 +191,7 @@ fn load_section<T: serde::de::DeserializeOwned>(dir: &Path, name: &str) -> Secti
             summary: Some(s),
         },
         Err(e) => {
-            tracing::warn!(file = %path.display(), error = %e, "master_dashboard: parse failure; skipping");
+            tracing::warn!(file = %path.display(), error = %e, "operational_summary: parse failure; skipping");
             Section::empty(name)
         }
     }
@@ -211,7 +211,7 @@ fn load_raw(dir: &Path, name: &str) -> RawSection {
             raw: Some(v),
         },
         Err(e) => {
-            tracing::warn!(file = %path.display(), error = %e, "master_dashboard: raw parse failure; skipping");
+            tracing::warn!(file = %path.display(), error = %e, "operational_summary: raw parse failure; skipping");
             RawSection::empty(name)
         }
     }
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn build_empty_metrics_dir_produces_all_unloaded_sections() {
         let tmp = tempfile::tempdir().unwrap();
-        let out = tmp.path().join("master.json");
+        let out = tmp.path().join("operational.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         assert_eq!(s.sections_loaded, 0);
         assert_eq!(s.sections_total, 11);
@@ -267,7 +267,7 @@ mod tests {
             serde_json::to_string(&throughput).unwrap(),
         )
         .unwrap();
-        let out = tmp.path().join("master.json");
+        let out = tmp.path().join("operational.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         assert_eq!(s.sections_loaded, 1);
         assert!(s.throughput.loaded);
@@ -280,7 +280,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let roi_path = tmp.path().join("roi-summary.json");
         fs::write(&roi_path, r#"{"window_days":30,"roi_ratio":3.5}"#).unwrap();
-        let out = tmp.path().join("master.json");
+        let out = tmp.path().join("operational.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         assert!(s.roi.loaded);
         assert_eq!(s.roi.raw.unwrap()["roi_ratio"].as_f64().unwrap(), 3.5);
@@ -291,7 +291,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bad_path = tmp.path().join("roi-summary.json");
         fs::write(&bad_path, "{not-json").unwrap();
-        let out = tmp.path().join("master.json");
+        let out = tmp.path().join("operational.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         // Malformed file → section not loaded; build still succeeds.
         assert!(!s.roi.loaded);
@@ -305,7 +305,7 @@ mod tests {
         fs::write(tmp.path().join("roi-summary.json"), "{}").unwrap();
         fs::write(tmp.path().join("cost-per-point-summary.json"), "{}").unwrap();
         fs::write(tmp.path().join("pr-review-summary.json"), "{}").unwrap();
-        let out = tmp.path().join("master.json");
+        let out = tmp.path().join("operational.json");
         let s = build_at(tmp.path(), &out, fixed_now()).unwrap();
         assert_eq!(s.sections_loaded, 3);
     }
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(s.generated_at, now.to_rfc3339());
         // And the file round-trips through deserialization.
         let raw = fs::read_to_string(&out).unwrap();
-        let reread: MasterDashboardSummary = serde_json::from_str(&raw).unwrap();
+        let reread: OperationalSummary = serde_json::from_str(&raw).unwrap();
         assert_eq!(reread.generated_at, now.to_rfc3339());
         assert_eq!(reread.sections_total, 11);
     }

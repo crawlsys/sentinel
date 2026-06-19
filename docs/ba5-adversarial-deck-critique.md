@@ -9,7 +9,7 @@
 - `docs/a3-dry-run-then-commit.md` (A3) — BA5 specializes A3's auditor pattern for BA-vertical outputs; A3 supplies the substrate, BA5 supplies the BA-domain critique axes
 - `docs/ba6-connector-layer-scoping.md` (BA6) — BA5 depends on BA6 for citation provenance; BA1's `ArtifactReference` shape is what critique can verify against
 - `docs/policy-replay-mining-quarantine.md` (R5) — BA5 must hold under the R5 quarantine; critique pass/fail traces must not become an auto-training signal
-- Consul ADR-017 (Artifact + Requirement Metadata Extensions) — defines `ArtifactReference` + `RequirementRef`; BA5 reads both during critique
+- Legatus AI ADR-017 (Artifact + Requirement Metadata Extensions) — defines `ArtifactReference` + `RequirementRef`; BA5 reads both during critique
 - Memory: `architecture-hexagonal-ddd`
 
 ---
@@ -32,7 +32,7 @@ From the source brief (recommendation BA5):
 
 Operationally, the rule is:
 
-1. **Every BA-vertical output destined for a human reader** triggers BA5 — decks, briefs, memos, exec summaries, written recommendations, dashboard rollups generated for human consumption.
+1. **Every BA-vertical output destined for a human reader** triggers BA5 — decks, briefs, memos, exec summaries, written recommendations, report rollups generated for human consumption.
 2. **The artifact passes through a separate-model-family critique agent** (A3's auditor seat, with BA-vertical critique axes) before it is rendered or delivered.
 3. **The critique becomes a structured artifact** attached to the output. It is not optional metadata; it is a sibling document.
 4. **The human reader is shown both** side-by-side. The presentation layer must not surface the artifact without the critique.
@@ -57,7 +57,7 @@ Critique still attaches, but is lightweight — single-pass, no human acknowledg
 ### 2.2 Decision-shaping artifacts (BA-substantial class)
 
 - Recommendations, briefs, memos written for a stakeholder who will act on them.
-- Dashboards generated for a recurring review cycle.
+- reports generated for a recurring review cycle.
 - Written analyses cited in other artifacts.
 
 Critique is full-pass. Human reviewer (the operator, before forwarding) sees both. Operator can override (with audit) if the critique is mistaken.
@@ -166,7 +166,7 @@ The presentation layer (web UI, CLI, exported PDF, voice briefing) must render t
 
 - **PDF / slide export**: each slide carries an inline marginal annotation linking to the critique finding(s) for that slide. The critique itself is appended as a final section.
 - **Web UI**: split view with artifact on left and critique on right; collapsible but never default-hidden.
-- **Voice briefing** (per BA5's intersection with consul's voice supervision): critique findings of Warn-class or higher are spoken; Info-class are summarized; the operator can ask "tell me the critique" at any point.
+- **Voice briefing** (per BA5's intersection with Legatus AI's voice supervision): critique findings of Warn-class or higher are spoken; Info-class are summarized; the operator can ask "tell me the critique" at any point.
 - **Email / chat delivery**: the critique appears in-line before the artifact, not as an attachment that can be ignored.
 
 The rule is: **a critique that the human did not see is the same failure as a critique that did not happen.** Presentation discipline is part of the safety guarantee.
@@ -179,10 +179,10 @@ For exec-facing decks, board materials, customer-facing recommendations: the ope
 
 1. BA-orchestrator generates artifact.
 2. Sentinel triggers BA5; critique produced.
-3. Artifact + critique routed to operator via consul.
+3. Artifact + critique routed to operator via Legatus AI.
 4. Operator reads both. If critique surfaced Block-class findings, operator must either:
    - Accept the critique → BA-orchestrator reworks and returns to step 2.
-   - Override the critique with explicit reason → audit-logged override, signed by operator's consul session.
+   - Override the critique with explicit reason → audit-logged override, signed by operator's Legatus AI session.
 5. Artifact delivered.
 
 This is the same `hygiene_override` pattern A3 uses for catastrophic-class actions. The override is always available; the override is always audited; the audit makes "I knowingly shipped this with the critique flagging X" legible after the fact.
@@ -287,7 +287,7 @@ pub fn process(
     input: &HookInput,
     fs: &dyn FileSystemPort,
     critic: &dyn BaCriticPort,
-    consul: &dyn ConsulPort,
+    Legatus AI: &dyn LegatusAiPort,
 ) -> HookOutput {
     // Step 1: Is this tool call producing a BA artifact destined for a human?
     let Some(artifact) = ba_artifact::extract(input) else {
@@ -317,7 +317,7 @@ pub fn process(
         }
         (BaArtifactClass::Catastrophic, _) => {
             // Two-eyes: always route to operator for explicit acknowledgment
-            consul.request_operator_acknowledgment(&artifact, &critique)?;
+            Legatus AI.request_operator_acknowledgment(&artifact, &critique)?;
             HookOutput::pending_human_acknowledgment()
         }
         (_, CritiqueDisposition::BlockForRework) => {
@@ -338,7 +338,7 @@ The shape is small. The critique-axis logic in `sentinel-domain/src/ba/critique.
 - **Citation-presence test**: artifact with N citations / N claims; critic axis 3.1 score matches expected.
 - **Stale-citation test**: artifact citing a `content_hash` that no longer matches the source; axis 3.1 produces Warn-class finding.
 - **Tonal-spin test**: artifact with confident claims and weak citations; axis 3.4 produces Warn-class finding.
-- **Two-eyes integration test**: catastrophic-class artifact + critique with Block finding → consul receives operator-acknowledgment request → operator accepts → action proceeds with audit entry showing the override.
+- **Two-eyes integration test**: catastrophic-class artifact + critique with Block finding → Legatus AI receives operator-acknowledgment request → operator accepts → action proceeds with audit entry showing the override.
 - **Presentation-layer contract test**: assert that rendered artifact + critique are both present in output; assert that critique is not in a collapsed-by-default state.
 
 ---
@@ -353,7 +353,7 @@ The shape is small. The critique-axis logic in `sentinel-domain/src/ba/critique.
 
 4. **Critique caching.** If the artifact hasn't changed, can the critique be reused without re-running? Recommend yes for the artifact content_hash + critic model + auditor model triple; cache invalidation on any change.
 
-5. **Voice-rendered critique structure.** When consul reads the critique aloud during a voice briefing, what's the format? Recommend: severity-sorted, Block first, then Warn, Info only on request. Out of scope for design doc; UX detail.
+5. **Voice-rendered critique structure.** When Legatus AI reads the critique aloud during a voice briefing, what's the format? Recommend: severity-sorted, Block first, then Warn, Info only on request. Out of scope for design doc; UX detail.
 
 ---
 

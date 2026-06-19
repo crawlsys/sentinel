@@ -4,7 +4,7 @@
 //! this hook NEVER writes or auto-changes task status). On each Stop it can
 //! emit up to three kinds of reminder:
 //!
-//! 1. **Uncommitted-but-untracked** (original behavior): there are uncommitted
+//! 1. **Uncommitted-but-untracked**: there are uncommitted
 //!    file changes but NO `in_progress` task — work is happening off-book.
 //!
 //! 2. **Done-signal nudge**: there is ≥1 `in_progress` task AND this turn
@@ -16,8 +16,9 @@
 //!    consecutive Stop events without leaving the in-progress set. Prompts the
 //!    agent to update status or confirm the task is still active.
 //!
-//! **Fail-open contract**: any error reading tasks, git, or state silently
-//! returns [`HookOutput::allow`]. This hook must never block Stop.
+//! **Fail-visible contract**: task/git/state read failures inject explicit
+//! `[Sentinel-Authority]` context. This hook still never blocks Stop, but it
+//! does not accept unknown coverage state.
 //!
 //! **Reminder only**: all signals route through [`HookOutput::inject_context`]
 //! so the *agent* decides whether to call `TaskUpdate`. Sentinel does not write
@@ -35,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// Number of consecutive Stop events an `in_progress` task may persist
 /// (unchanged) before the stale nudge fires.
@@ -53,61 +54,57 @@ struct Task {
     status: String,
 }
 
-/// Find the active session task dir (`~/.claude/tasks/{session_id}/`).
+fn authority_context(message: impl Into<String>) -> HookOutput {
+    HookOutput::inject_context(
+        HookEvent::Stop,
+        format!(
+            "{}[Task Coverage] {}",
+            HookOutput::SENTINEL_AUTHORITY_PREFIX,
+            message.into()
+        ),
+    )
+}
+
+/// Read all tasks from the active session task dir
+/// (`~/.claude/tasks/{session_id}/`).
 ///
 /// Strictly session-scoped — mirrors `task_persist::find_active_task_dir` so
-/// the two hooks read the exact same set of task files. Returns `None` when the
-/// dir is absent or has no `.json` task files.
-fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
-    let home = fs.home_dir()?;
+/// the two hooks read the exact same set of task files. An absent task dir is a
+/// valid empty set; unreadable or malformed task files are reported.
+fn read_active_tasks(fs: &dyn FileSystemPort, session_id: &str) -> Result<Vec<Task>, String> {
+    let home = fs
+        .home_dir()
+        .ok_or_else(|| "cannot determine home directory for task lookup".to_string())?;
     let session_dir = super::session_task_dir(fs, &home, session_id);
-    if fs.is_dir(&session_dir) && has_task_files(fs, &session_dir) {
-        Some(session_dir)
-    } else {
-        None
+    if !fs.is_dir(&session_dir) {
+        return Ok(Vec::new());
     }
-}
 
-/// Does the dir contain at least one `.json` task file (ignoring dotfiles)?
-fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
-    fs.read_dir(dir).is_ok_and(|entries| {
-        entries.iter().any(|p| {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            Path::new(&name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                && !name.starts_with('.')
-        })
-    })
-}
-
-/// Read all tasks from the active session dir.
-fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
+    let entries = fs
+        .read_dir(&session_dir)
+        .map_err(|err| format!("failed to list task dir {}: {err}", session_dir.display()))?;
     let mut tasks = Vec::new();
-    if let Ok(entries) = fs.read_dir(dir) {
-        for path in entries {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !Path::new(&name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                || name.starts_with('.')
-            {
-                continue;
-            }
-            if let Ok(content) = fs.read_to_string(&path) {
-                if let Ok(task) = serde_json::from_str::<Task>(&content) {
-                    tasks.push(task);
-                }
-            }
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            || name.starts_with('.')
+        {
+            continue;
         }
+
+        let content = fs
+            .read_to_string(&path)
+            .map_err(|err| format!("failed to read task file {}: {err}", path.display()))?;
+        let task = serde_json::from_str::<Task>(&content)
+            .map_err(|err| format!("failed to parse task file {}: {err}", path.display()))?;
+        tasks.push(task);
     }
-    tasks
+    Ok(tasks)
 }
 
 /// Per-session state dir: `~/.claude/sentinel/state`.
@@ -126,62 +123,106 @@ fn inprogress_marker(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBu
     Some(state_dir(fs)?.join(format!("coverage-inprogress-{session_id}")))
 }
 
-/// Read the previously-recorded HEAD SHA for this session (trimmed). `None` on
-/// any read error or empty file — treated as "no prior SHA seen".
-fn read_prev_head_sha(fs: &dyn FileSystemPort, session_id: &str) -> Option<String> {
-    let path = head_sha_marker(fs, session_id)?;
-    let content = fs.read_to_string(&path).ok()?;
+/// Read the previously-recorded HEAD SHA for this session (trimmed). Empty or
+/// absent file means "no prior SHA seen"; read failures are reported.
+fn read_prev_head_sha(fs: &dyn FileSystemPort, session_id: &str) -> Result<Option<String>, String> {
+    let path = head_sha_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage HEAD marker".to_string())?;
+    if !fs.exists(&path) {
+        return Ok(None);
+    }
+    let content = fs.read_to_string(&path).map_err(|err| {
+        format!(
+            "failed to read coverage HEAD marker {}: {err}",
+            path.display()
+        )
+    })?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(trimmed.to_string())
+        Ok(Some(trimmed.to_string()))
     }
 }
 
-/// Persist the current HEAD SHA for this session. Best-effort; errors ignored.
-fn write_head_sha(fs: &dyn FileSystemPort, session_id: &str, sha: &str) {
-    let Some(path) = head_sha_marker(fs, session_id) else {
-        return;
-    };
+/// Persist the current HEAD SHA for this session.
+fn write_head_sha(fs: &dyn FileSystemPort, session_id: &str, sha: &str) -> Result<(), String> {
+    let path = head_sha_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage HEAD marker".to_string())?;
     if let Some(parent) = path.parent() {
-        let _ = fs.create_dir_all(parent);
+        fs.create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create coverage state dir {}: {err}",
+                parent.display()
+            )
+        })?;
     }
-    let _ = fs.write(&path, sha.as_bytes());
+    fs.write(&path, sha.as_bytes()).map_err(|err| {
+        format!(
+            "failed to write coverage HEAD marker {}: {err}",
+            path.display()
+        )
+    })
 }
 
 /// Read the `id -> consecutive-stop-count` map for in-progress tasks. Stored as
-/// `id=count` lines so it stays trivially parseable and never fails-closed on a
-/// malformed entry (bad lines are skipped).
-fn read_inprogress_counts(fs: &dyn FileSystemPort, session_id: &str) -> BTreeMap<String, u32> {
+/// `id=count` lines so it stays trivially parseable. Malformed entries are
+/// reported instead of ignored.
+fn read_inprogress_counts(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> Result<BTreeMap<String, u32>, String> {
     let mut map = BTreeMap::new();
-    let Some(path) = inprogress_marker(fs, session_id) else {
-        return map;
-    };
-    let Ok(content) = fs.read_to_string(&path) else {
-        return map;
-    };
-    for line in content.lines() {
+    let path = inprogress_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage in-progress marker".to_string())?;
+    if !fs.exists(&path) {
+        return Ok(map);
+    }
+    let content = fs.read_to_string(&path).map_err(|err| {
+        format!(
+            "failed to read coverage in-progress marker {}: {err}",
+            path.display()
+        )
+    })?;
+    for (idx, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some((id, count)) = line.split_once('=') {
-            if let Ok(n) = count.trim().parse::<u32>() {
-                map.insert(id.trim().to_string(), n);
-            }
-        }
+        let (id, count) = line.split_once('=').ok_or_else(|| {
+            format!(
+                "malformed coverage in-progress marker {} line {}",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        let n = count.trim().parse::<u32>().map_err(|err| {
+            format!(
+                "invalid stop count in coverage marker {} line {}: {err}",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        map.insert(id.trim().to_string(), n);
     }
-    map
+    Ok(map)
 }
 
-/// Persist the in-progress stop-count map. Best-effort; errors ignored.
-fn write_inprogress_counts(fs: &dyn FileSystemPort, session_id: &str, map: &BTreeMap<String, u32>) {
-    let Some(path) = inprogress_marker(fs, session_id) else {
-        return;
-    };
+/// Persist the in-progress stop-count map.
+fn write_inprogress_counts(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+    map: &BTreeMap<String, u32>,
+) -> Result<(), String> {
+    let path = inprogress_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage in-progress marker".to_string())?;
     if let Some(parent) = path.parent() {
-        let _ = fs.create_dir_all(parent);
+        fs.create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create coverage state dir {}: {err}",
+                parent.display()
+            )
+        })?;
     }
     let mut body = String::new();
     for (id, count) in map {
@@ -190,7 +231,12 @@ fn write_inprogress_counts(fs: &dyn FileSystemPort, session_id: &str, map: &BTre
         body.push_str(&count.to_string());
         body.push('\n');
     }
-    let _ = fs.write(&path, body.as_bytes());
+    fs.write(&path, body.as_bytes()).map_err(|err| {
+        format!(
+            "failed to write coverage in-progress marker {}: {err}",
+            path.display()
+        )
+    })
 }
 
 /// Detect a non-commit "done" signal in the last assistant message: a PR
@@ -244,23 +290,27 @@ fn format_task_refs(tasks: &[&Task]) -> String {
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    // Fail-open: session_id is required for all state-keyed behavior.
-    let session_id = match input.session_id.as_deref() {
-        Some(id) if !id.is_empty() => id,
-        _ => return HookOutput::allow(),
+    let Some(session_id) = concrete_input_session_id(input) else {
+        return authority_context(
+            "Stop event did not include a concrete session_id; task coverage state cannot be verified.",
+        );
     };
 
     // ---- Read the task list (same source as task_persist) ----------------
-    let tasks = find_active_task_dir(ctx.fs, session_id)
-        .map(|dir| read_tasks(ctx.fs, &dir))
-        .unwrap_or_default();
+    let tasks = match read_active_tasks(ctx.fs, session_id) {
+        Ok(tasks) => tasks,
+        Err(err) => return authority_context(err),
+    };
 
     let in_progress: Vec<&Task> = tasks.iter().filter(|t| t.status == "in_progress").collect();
 
     // ---- Commit signal: did HEAD move since the last Stop? ---------------
     // Read the prior SHA *before* overwriting it; the marker is the source of
     // truth for "new commit this turn".
-    let prev_sha = read_prev_head_sha(ctx.fs, session_id);
+    let prev_sha = match read_prev_head_sha(ctx.fs, session_id) {
+        Ok(prev) => prev,
+        Err(err) => return authority_context(err),
+    };
     let cur_sha = ctx.git.head_sha(cwd);
     let head_changed = match (&prev_sha, &cur_sha) {
         (Some(prev), Some(cur)) => prev != cur,
@@ -270,13 +320,18 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     };
     // Always refresh the marker so the next Stop compares against this turn.
     if let Some(cur) = &cur_sha {
-        write_head_sha(ctx.fs, session_id, cur);
+        if let Err(err) = write_head_sha(ctx.fs, session_id, cur) {
+            return authority_context(err);
+        }
     }
 
     // ---- Stale tracking: bump/reset per-task stop counts -----------------
     // The map only ever holds currently-in_progress ids. Tasks that leave
     // in_progress are dropped (their count resets implicitly on re-entry).
-    let prev_counts = read_inprogress_counts(ctx.fs, session_id);
+    let prev_counts = match read_inprogress_counts(ctx.fs, session_id) {
+        Ok(counts) => counts,
+        Err(err) => return authority_context(err),
+    };
     let mut new_counts: BTreeMap<String, u32> = BTreeMap::new();
     for t in &in_progress {
         if t.id.is_empty() {
@@ -285,19 +340,23 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         let next = prev_counts.get(&t.id).copied().unwrap_or(0) + 1;
         new_counts.insert(t.id.clone(), next);
     }
-    write_inprogress_counts(ctx.fs, session_id, &new_counts);
+    if let Err(err) = write_inprogress_counts(ctx.fs, session_id, &new_counts) {
+        return authority_context(err);
+    }
 
     // ---- Decide which reminder (if any) to inject ------------------------
 
-    // No in_progress task: fall back to the original uncommitted-work warning.
+    // No in_progress task: uncommitted work is happening off-book.
     if in_progress.is_empty() {
-        let has_changes = ctx.git.has_uncommitted_changes(cwd).unwrap_or(false);
+        let has_changes = match ctx.git.has_uncommitted_changes(cwd) {
+            Ok(has_changes) => has_changes,
+            Err(err) => {
+                return authority_context(format!(
+                    "failed to inspect git worktree changes for task coverage: {err}"
+                ));
+            }
+        };
         if !has_changes {
-            return HookOutput::allow();
-        }
-        // Preserve the legacy temp-file active-marker escape hatch.
-        let active_marker = std::env::temp_dir().join(format!("claude-task-active-{session_id}"));
-        if ctx.fs.exists(&active_marker) {
             return HookOutput::allow();
         }
         let context = "[Task Coverage] WARNING: Uncommitted file changes detected but no task is \
@@ -362,19 +421,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -385,15 +457,22 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
 
-    /// FS whose every read fails — used to exercise the fail-open path.
+    /// FS whose every read fails — used to exercise visible authority errors.
     struct UnreadableFs {
         home: PathBuf,
     }
@@ -401,17 +480,38 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, _: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn read_to_string(
+            &self,
+            _: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
-        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn write(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn create_dir_all(
+            &self,
+            _: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
         fn exists(&self, _: &Path) -> bool {
             false
@@ -420,11 +520,22 @@ mod tests {
             // Claim the tasks dir exists so read_dir gets exercised and fails.
             true
         }
-        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn metadata(
+            &self,
+            _: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("boom"))
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "boom",
+            ))
         }
     }
 
@@ -434,19 +545,31 @@ mod tests {
         uncommitted: bool,
     }
     impl GitStatusPort for FakeGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.uncommitted)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -459,6 +582,9 @@ mod tests {
             None
         }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
@@ -533,7 +659,7 @@ mod tests {
 
         let fs = ScopedHomeFs { home: home.clone() };
         // Pre-seed the prior HEAD marker with an OLD sha; current differs.
-        write_head_sha(&fs, sid, "oldsha111");
+        write_head_sha(&fs, sid, "oldsha111").unwrap();
         let git = FakeGit {
             head: RefCell::new(Some("newsha222".to_string())),
             uncommitted: true,
@@ -561,7 +687,7 @@ mod tests {
 
         let fs = ScopedHomeFs { home: home.clone() };
         // Same HEAD both times → no commit signal; rely on PR text.
-        write_head_sha(&fs, sid, "samesha");
+        write_head_sha(&fs, sid, "samesha").unwrap();
         let git = FakeGit {
             head: RefCell::new(Some("samesha".to_string())),
             uncommitted: false,
@@ -632,7 +758,11 @@ mod tests {
         let env = StubEnv::new();
         let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
 
-        let input = input_for(sid, home.to_str().unwrap(), Some("done with a commit pushed"));
+        let input = input_for(
+            sid,
+            home.to_str().unwrap(),
+            Some("done with a commit pushed"),
+        );
         let out = process(&input, &ctx);
         assert!(
             injected_text(&out).is_none(),
@@ -641,10 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn no_in_progress_but_uncommitted_keeps_legacy_warning() {
+    fn no_in_progress_but_uncommitted_injects_off_book_warning() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
-        let sid = "sess-legacy";
+        let sid = "sess-off-book";
         seed_tasks(&home, sid, &[("1", "pending")]);
 
         let fs = ScopedHomeFs { home: home.clone() };
@@ -659,13 +789,42 @@ mod tests {
 
         let input = input_for(sid, home.to_str().unwrap(), None);
         let out = process(&input, &ctx);
-        let msg = injected_text(&out).expect("legacy uncommitted warning must still fire");
+        let msg = injected_text(&out).expect("off-book uncommitted warning must fire");
         assert!(msg.contains("no task is"));
         assert!(msg.contains("in_progress"));
     }
 
     #[test]
-    fn fail_open_on_unreadable_state() {
+    fn temp_active_marker_does_not_suppress_off_book_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let sid = "sess-no-temp-bypass";
+        seed_tasks(&home, sid, &[("1", "pending")]);
+
+        let active_marker = std::env::temp_dir().join(format!("claude-task-active-{sid}"));
+        std::fs::write(&active_marker, b"old marker").unwrap();
+
+        let fs = ScopedHomeFs { home: home.clone() };
+        let git = FakeGit {
+            head: RefCell::new(Some("x".to_string())),
+            uncommitted: true,
+        };
+        let proc_stub = StubProcess;
+        let mem = StubMemoryMcp;
+        let env = StubEnv::new();
+        let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
+
+        let input = input_for(sid, home.to_str().unwrap(), None);
+        let out = process(&input, &ctx);
+        let _ = std::fs::remove_file(&active_marker);
+
+        let msg = injected_text(&out).expect("off-book warning must ignore temp marker");
+        assert!(msg.contains("Uncommitted file changes detected"));
+        assert!(msg.contains("in_progress"));
+    }
+
+    #[test]
+    fn unreadable_state_injects_authority_context() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         let sid = "sess-broken";
@@ -681,13 +840,15 @@ mod tests {
         let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
 
         let input = input_for(sid, "/tmp/whatever", Some("anything"));
-        // Must not panic and must not block — fail open.
         let out = process(&input, &ctx);
+        let msg = injected_text(&out).expect("unreadable state must be visible");
+        assert!(msg.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(msg.contains("failed to list task dir"));
         assert!(out.blocked.is_none());
     }
 
     #[test]
-    fn no_session_id_fails_open() {
+    fn no_session_id_injects_authority_context() {
         let ctx = crate::hooks::test_support::stub_ctx();
         let input = HookInput {
             session_id: None,
@@ -695,7 +856,48 @@ mod tests {
             ..Default::default()
         };
         let out = process(&input, &ctx);
-        assert!(injected_text(&out).is_none());
+        let msg = injected_text(&out).expect("missing session id must be visible");
+        assert!(msg.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(msg.contains("session_id"));
+        assert!(out.blocked.is_none());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_injects_authority_context_without_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+
+        let fs = ScopedHomeFs { home: home.clone() };
+        let git = FakeGit {
+            head: RefCell::new(Some("headsha".to_string())),
+            uncommitted: false,
+        };
+        let proc_stub = StubProcess;
+        let mem = StubMemoryMcp;
+        let env = StubEnv::new();
+        let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
+
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some(home.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let out = process(&input, &ctx);
+        let msg = injected_text(&out).expect("synthetic session id must be visible");
+        assert!(msg.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(msg.contains("concrete session_id"));
+        assert!(!home
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("coverage-headsha- unknown ")
+            .exists());
+        assert!(!home
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("coverage-headsha-unknown")
+            .exists());
         assert!(out.blocked.is_none());
     }
 

@@ -88,15 +88,8 @@ impl JsonlAppraisalStore {
 
     /// Construct with the default path
     /// (`~/.claude/sentinel/state/appraisal/records.jsonl`).
-    /// Returns an error if `dirs::home_dir()` fails (typically only on
-    /// misconfigured systems).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let path = home
-            .join(".claude")
-            .join("sentinel")
-            .join("state")
+        let path = crate::state_store::state_dir()
             .join("appraisal")
             .join("records.jsonl");
         Ok(Self::at_path(path))
@@ -201,9 +194,8 @@ impl JsonlAppraisalStore {
     /// deterministic writes without truncation side effects.
     fn append_raw(&self, record: &AppraisalRecord) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create appraisal dir {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create appraisal dir {}", parent.display()))?;
         }
         let line = serde_json::to_string(record)
             .context("failed to serialize appraisal record to JSON")?;
@@ -214,7 +206,9 @@ impl JsonlAppraisalStore {
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         file.write_all(line.as_bytes())
             .and_then(|()| file.write_all(b"\n"))
-            .with_context(|| format!("failed to write appraisal line to {}", self.path.display()))?;
+            .with_context(|| {
+                format!("failed to write appraisal line to {}", self.path.display())
+            })?;
         Ok(())
     }
 }
@@ -222,7 +216,10 @@ impl JsonlAppraisalStore {
 impl AppraisalStorePort for JsonlAppraisalStore {
     fn record(&self, record: AppraisalRecord) {
         if let Err(err) = self.append_raw(&record) {
-            tracing::warn!(?err, "failed to persist appraisal record; dropping silently");
+            tracing::warn!(
+                ?err,
+                "failed to persist appraisal record; dropping silently"
+            );
         }
         self.maybe_truncate();
     }
@@ -256,7 +253,10 @@ fn apply_window(records: Vec<AppraisalRecord>, window: AppraisalWindow) -> Vec<A
         }
         AppraisalWindow::LastHours(hours) => {
             let cutoff: DateTime<Utc> = Utc::now() - Duration::hours(i64::from(hours));
-            records.into_iter().filter(|r| r.timestamp >= cutoff).collect()
+            records
+                .into_iter()
+                .filter(|r| r.timestamp >= cutoff)
+                .collect()
         }
     }
 }
@@ -309,7 +309,11 @@ mod tests {
     fn missing_file_returns_empty_aggregate() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir);
-        let agg = s.aggregate(&agent("kimi"), &sig("deadbeef00000000"), AppraisalWindow::All);
+        let agg = s.aggregate(
+            &agent("kimi"),
+            &sig("deadbeef00000000"),
+            AppraisalWindow::All,
+        );
         assert!(!agg.has_data());
     }
 
@@ -340,7 +344,10 @@ mod tests {
             AppraisalOutcome::Success,
             0.01,
         ));
-        assert!(nested.exists(), "store should auto-create parent directories");
+        assert!(
+            nested.exists(),
+            "store should auto-create parent directories"
+        );
     }
 
     // ---- Segregation ----
@@ -350,8 +357,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let s = store(&dir);
         let g = sig("aaaaaaaaaaaaaaaa");
-        s.record(record_with(&agent("kimi"), &g, AppraisalOutcome::Success, 0.01));
-        s.record(record_with(&agent("opus"), &g, AppraisalOutcome::Failure, 0.10));
+        s.record(record_with(
+            &agent("kimi"),
+            &g,
+            AppraisalOutcome::Success,
+            0.01,
+        ));
+        s.record(record_with(
+            &agent("opus"),
+            &g,
+            AppraisalOutcome::Failure,
+            0.10,
+        ));
         let k = s.aggregate(&agent("kimi"), &g, AppraisalWindow::All);
         let o = s.aggregate(&agent("opus"), &g, AppraisalWindow::All);
         assert!((k.success_rate - 1.0).abs() < 1e-5);
@@ -445,7 +462,10 @@ mod tests {
             .unwrap();
         s.record(record_with(&a, &g, AppraisalOutcome::Success, 0.02));
         let agg = s.aggregate(&a, &g, AppraisalWindow::All);
-        assert_eq!(agg.cohort_size, 2, "valid records still counted despite corrupt line");
+        assert_eq!(
+            agg.cohort_size, 2,
+            "valid records still counted despite corrupt line"
+        );
     }
 
     // ---- Auto-truncation ----
@@ -482,7 +502,10 @@ mod tests {
         );
         // Verify some records still readable post-truncate.
         let agg = s.aggregate(&a, &g, AppraisalWindow::All);
-        assert!(agg.cohort_size > 0, "post-truncate aggregate should still have records");
+        assert!(
+            agg.cohort_size > 0,
+            "post-truncate aggregate should still have records"
+        );
     }
 
     // ---- Path semantics ----

@@ -48,8 +48,8 @@ crates/
 │   ├── proof_store.rs       Proof chain storage
 │   ├── git.rs               Git operations
 │   ├── stdin.rs / stdout.rs Hook IO (Claude Code protocol)
-│   ├── rig_judge.rs         AI judge adapter (Cerebras/OpenAI/Anthropic)
-│   ├── anthropic.rs         Anthropic API client
+│   ├── rig_judge.rs         OpenRouter AI judge adapter
+│   ├── openrouter_llm.rs    Standardized LLM port
 │   ├── mcp_transport.rs     MCP stdio transport
 │   ├── activity_log.rs      Activity logging
 │   ├── error_log.rs         Error logging
@@ -59,9 +59,7 @@ crates/
 ├── sentinel-cli             CLI binary (`sentinel`)
 │   ├── main.rs              CLI subcommands
 │   ├── mcp_cmd.rs           In-repo MCP host (`sentinel mcp`, stdio)
-│   └── api/                 Dashboard REST API (axum)
-│
-├── sentinel-legatus         Legatus integration (consul peers, federation client)
+│   └── api/                 Local REST API (axum)
 │
 ├── sentinel-git-interceptor Git shim that routes commits through sentinel gates
 │
@@ -75,13 +73,13 @@ crates/
 ## CLI Commands
 
 ```
-sentinel daemon                Start MCP server + hook listener + dashboard API
-sentinel hook --event <Event>  Process a hook event (thin client or standalone)
+sentinel daemon                Start MCP server + hook listener + local API
+sentinel hook --event <Event>  Process a hook event through the LangGraph authority path
 sentinel verify --session <id> Verify a session's proof chain
 sentinel mcp                   MCP server over stdio (Claude Code connects here)
 sentinel scan                  Scan marketplace, output JSON snapshot
 sentinel stats                 Hook execution statistics
-sentinel steel-test            Manage Steel browser test state (record/check)
+sentinel browser-test          Manage browser test state (record/check)
 ```
 
 ### Scanner Flags
@@ -95,7 +93,7 @@ sentinel scan --dry-run        Preview changes without writing (with --sync-coun
 sentinel scan --dir <path>     Override marketplace root directory
 ```
 
-### Dashboard API
+### Local API
 
 The `sentinel daemon` exposes a REST API on port 3001:
 
@@ -121,7 +119,7 @@ The categories below are **representative, not exhaustive** — a sampling of ea
 | Category | Hooks (representative) |
 |----------|-------|
 | **Blocking** | `phase_gate`, `pre_push_browser_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `wrangler_guard`, `spec_challenge_gate`, `db_ops_gate`, `pr_merge_gate` |
-| **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `evidence_collector`, `context_monitor` |
+| **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `context_monitor`, `good_citizen_observer` |
 | **Reality-check** | `claim_reality_check`, `step_anomaly`, `requirements_traceability_gate`, `provenance_validate`, `good_citizen_observer` |
 | **Routing** | `skill_router` (with activation banners), `skill_telemetry` |
 | **Session** | `session_init`, `pre_compact`, `activity_tracker`, `execution_log` |
@@ -137,11 +135,40 @@ config/
 └── steps/           Per-skill step configs (49 skills)
 ```
 
+### LangGraph Checkpoints
+
+Sentinel uses LangGraph Rust checkpoints as workflow authority. Local runs use
+SQLite by default; production can opt into Postgres explicitly. If Postgres is
+selected and its URL is missing or unusable, Sentinel fails closed instead of
+switching back to SQLite.
+
+Phase/workflow graph:
+
+```bash
+SENTINEL_PHASE_GRAPH_CHECKPOINTER=postgres
+SENTINEL_PHASE_GRAPH_POSTGRES_URL=postgres://user:pass@host/db
+SENTINEL_PHASE_GRAPH_POSTGRES_SCHEMA=sentinel_phase_graph
+```
+
+Infrastructure decision graphs:
+
+```bash
+SENTINEL_DECISION_GRAPH_CHECKPOINTER=postgres
+SENTINEL_DECISION_GRAPH_POSTGRES_URL=postgres://user:pass@host/db
+SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA=sentinel_decision_graph
+```
+
+Graph topology emitted by CLI, MCP, and API surfaces includes sanitized
+checkpoint evidence: `checkpointer_backend` (`sqlite` or `postgres`) and
+`checkpointer_scope` (`database_path:...` for SQLite, `schema:...` for
+Postgres). Database URLs are never exposed through topology.
+
 ## Key Dependencies
 
 - **tokio** — async runtime
 - **clap** — CLI framework
-- **axum** — dashboard API server (with WebSocket)
+- **axum** — local API server (with WebSocket)
+- **langgraph-core** — durable workflow and decision graphs
 - **rig-core** — multi-model AI judge (Cerebras, OpenAI, Anthropic)
 - **sha2 + hmac** — cryptographic proof chains
 - **petgraph** — dependency graphs

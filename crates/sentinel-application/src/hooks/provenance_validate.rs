@@ -54,6 +54,8 @@ use sentinel_domain::ba::{ArtifactReference, ProvenanceCheck, ProvenanceFinding,
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::ProvenancePort;
 
+use super::concrete_input_session_id;
+
 /// Default cross-session lookback window per spec §2.2: a retrieval
 /// older than 24h fails the `WithinSession` check.
 pub const DEFAULT_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
@@ -100,6 +102,19 @@ impl ValidationMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProvenanceValidationEvaluation {
+    pub checks: Vec<ProvenanceCheck>,
+    pub mode: ValidationMode,
+    pub would_block: bool,
+    pub should_block: bool,
+}
+
+#[must_use]
+pub fn is_ba1_signal(input: &HookInput) -> bool {
+    parse_citations(input).is_some()
+}
+
 /// Process a ``PreToolUse`` event through the BA1 provenance gate.
 ///
 /// `provenance` reads the audit chain; `mode` drives warn-vs-block.
@@ -122,35 +137,69 @@ pub fn process_with_lookback(
     mode: ValidationMode,
     lookback: Duration,
 ) -> HookOutput {
+    let Some(evaluation) = evaluate_with_lookback(input, provenance, mode, lookback) else {
+        return HookOutput::allow();
+    };
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(
+    input: &HookInput,
+    provenance: &dyn ProvenancePort,
+    mode: ValidationMode,
+) -> Option<ProvenanceValidationEvaluation> {
+    evaluate_with_lookback(input, provenance, mode, DEFAULT_LOOKBACK)
+}
+
+#[must_use]
+pub fn evaluate_with_lookback(
+    input: &HookInput,
+    provenance: &dyn ProvenancePort,
+    mode: ValidationMode,
+    lookback: Duration,
+) -> Option<ProvenanceValidationEvaluation> {
     let Some(citations) = parse_citations(input) else {
         // Either no `artifacts` field at all, or it's empty / malformed.
         // BA flows that don't assert citations go through here unchanged.
-        return HookOutput::allow();
+        return None;
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("");
+    let session_id = concrete_input_session_id(input);
     let now = Utc::now();
     let lookback_cutoff =
         now - chrono::Duration::from_std(lookback).unwrap_or_else(|_| chrono::Duration::hours(24));
 
     let mut checks: Vec<ProvenanceCheck> = Vec::with_capacity(citations.len());
-    let mut any_block = false;
+    let mut would_block = false;
 
     for citation in citations {
         let history = provenance.query_artifact_history(&citation.artifact_id);
         let history = match history {
             Ok(h) => h,
             Err(err) => {
-                // Port unavailable. Per spec §8.1: this is a
-                // soft-warn, not a hard block — the operator should
-                // see why but the tool call shouldn't be blocked on
-                // audit-log availability.
                 tracing::warn!(
                     artifact = %citation.artifact_id,
                     error = %err,
-                    "provenance_validate: port query failed; treating as soft-warn"
+                    "provenance_validate: port query failed; blocking because citation cannot be validated"
                 );
-                checks.push(ProvenanceCheck::passing(citation));
+                let finding = match err {
+                    sentinel_domain::ports::ProvenanceError::StoreUnavailable(reason) => {
+                        ProvenanceFinding::StoreUnavailable {
+                            artifact_id: citation.artifact_id.clone(),
+                            reason,
+                        }
+                    }
+                    sentinel_domain::ports::ProvenanceError::Malformed(reason) => {
+                        ProvenanceFinding::StoreMalformed {
+                            artifact_id: citation.artifact_id.clone(),
+                            reason,
+                        }
+                    }
+                };
+                let check = ProvenanceCheck::passing(citation).with_finding(finding);
+                would_block |= check.has_block();
+                checks.push(check);
                 continue;
             }
         };
@@ -161,7 +210,7 @@ pub fn process_with_lookback(
             check = check.with_finding(ProvenanceFinding::Existence {
                 artifact_id: citation.artifact_id.clone(),
             });
-            any_block |= check.has_block();
+            would_block |= check.has_block();
             checks.push(check);
             continue;
         };
@@ -176,7 +225,7 @@ pub fn process_with_lookback(
                 is_blocking,
             });
             if is_blocking {
-                any_block = true;
+                would_block = true;
             }
         }
 
@@ -190,7 +239,7 @@ pub fn process_with_lookback(
         }
 
         // (4) WithinSession — Block in StrictBlocking, warn otherwise.
-        if latest.session_id != session_id && latest.retrieved_at < lookback_cutoff {
+        if session_id != Some(latest.session_id.as_str()) && latest.retrieved_at < lookback_cutoff {
             let is_blocking = mode.within_session_blocks();
             check = check.with_finding(ProvenanceFinding::WithinSession {
                 artifact_id: citation.artifact_id.clone(),
@@ -199,21 +248,32 @@ pub fn process_with_lookback(
                 is_blocking,
             });
             if is_blocking {
-                any_block = true;
+                would_block = true;
             }
         }
 
         checks.push(check);
     }
 
-    if mode.allows_blocking() && any_block {
-        HookOutput::deny(format_block_message(&checks))
+    let should_block = mode.allows_blocking() && would_block;
+    Some(ProvenanceValidationEvaluation {
+        checks,
+        mode,
+        would_block,
+        should_block,
+    })
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &ProvenanceValidationEvaluation) -> HookOutput {
+    if evaluation.should_block {
+        HookOutput::deny(format_block_message(&evaluation.checks))
     } else {
-        if any_block && !mode.allows_blocking() {
+        if evaluation.would_block && !evaluation.mode.allows_blocking() {
             // ObserveOnly: would have blocked, but mode forbids it.
             // Surface in operator log for ratchet-up calibration.
             tracing::warn!(
-                citations = checks.len(),
+                citations = evaluation.checks.len(),
                 "provenance_validate: ObserveOnly mode suppressed a would-be Block; \
                  flip to DefaultBlocking when telemetry shows the connector layer \
                  reliably emits audit events"
@@ -314,6 +374,20 @@ fn describe_finding(f: &ProvenanceFinding) -> String {
             "WithinSession: `{artifact_id}` last retrieved at {retrieved_at} is older than the \
              lookback cutoff {cutoff} and not from the current session."
         ),
+        ProvenanceFinding::StoreUnavailable {
+            artifact_id,
+            reason,
+        } => format!(
+            "StoreUnavailable: provenance store could not be read for `{artifact_id}` \
+             ({reason}); citation cannot be validated."
+        ),
+        ProvenanceFinding::StoreMalformed {
+            artifact_id,
+            reason,
+        } => format!(
+            "StoreMalformed: provenance store returned malformed data for `{artifact_id}` \
+             ({reason}); citation cannot be validated."
+        ),
     }
 }
 
@@ -366,6 +440,14 @@ mod tests {
             }
             Ok(self.histories.get(artifact_id).cloned().unwrap_or_default())
         }
+    }
+
+    fn deny_reason(output: &HookOutput) -> String {
+        output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.clone())
+            .unwrap_or_default()
     }
 
     fn record(
@@ -448,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_when_port_errors() {
+    fn blocks_when_store_unavailable() {
         let port =
             StubPort::new().with_next_error(ProvenanceError::StoreUnavailable("disk full".into()));
         let input = input_with_citations(
@@ -456,10 +538,20 @@ mod tests {
             vec![citation("FIR-1", "h1", ProvenanceClass::SystemOfRecord)],
         );
         let output = process(&input, &port, ValidationMode::DefaultBlocking);
-        assert_eq!(
-            output.blocked, None,
-            "port failure is a soft-warn, not a block — operator log only"
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("StoreUnavailable"));
+    }
+
+    #[test]
+    fn blocks_when_store_malformed() {
+        let port = StubPort::new().with_next_error(ProvenanceError::Malformed("bad json".into()));
+        let input = input_with_citations(
+            "s1",
+            vec![citation("FIR-1", "h1", ProvenanceClass::SystemOfRecord)],
         );
+        let output = process(&input, &port, ValidationMode::DefaultBlocking);
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("StoreMalformed"));
     }
 
     // ---- Happy path ----
@@ -661,6 +753,62 @@ mod tests {
             .and_then(|h| h.permission_decision_reason.clone())
             .unwrap_or_default();
         assert!(reason.contains("WithinSession"));
+    }
+
+    #[test]
+    fn missing_session_does_not_match_empty_retrieval_session() {
+        let two_days_ago = Utc::now() - ChronoDuration::hours(48);
+        let port = StubPort::new().with(
+            "FIR-1",
+            vec![record(
+                "FIR-1",
+                "h1",
+                ProvenanceClass::SystemOfRecord,
+                "",
+                two_days_ago,
+            )],
+        );
+        let json = serde_json::to_value(vec![citation(
+            "FIR-1",
+            "h1",
+            ProvenanceClass::SystemOfRecord,
+        )])
+        .unwrap();
+        let mut extra = serde_json::Map::new();
+        extra.insert("artifacts".to_string(), json);
+        let input = HookInput {
+            extra,
+            ..Default::default()
+        };
+
+        let output = process(&input, &port, ValidationMode::StrictBlocking);
+
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("WithinSession"));
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_match_unknown_retrieval_session() {
+        let two_days_ago = Utc::now() - ChronoDuration::hours(48);
+        let port = StubPort::new().with(
+            "FIR-1",
+            vec![record(
+                "FIR-1",
+                "h1",
+                ProvenanceClass::SystemOfRecord,
+                "unknown",
+                two_days_ago,
+            )],
+        );
+        let input = input_with_citations(
+            " unknown ",
+            vec![citation("FIR-1", "h1", ProvenanceClass::SystemOfRecord)],
+        );
+
+        let output = process(&input, &port, ValidationMode::StrictBlocking);
+
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("WithinSession"));
     }
 
     #[test]

@@ -7,9 +7,10 @@
 //! against these rules and injects a `CronCreate`/loop suggestion.
 //!
 //! Design notes:
-//! - **Fail-open**: the shipped defaults are compiled in and always parse; a
-//!   missing, unreadable, or corrupt operator overlay is ignored (defaults are
-//!   kept), never a panic. A broken overlay must not disable monitoring.
+//! - **Fail-open for overlays only**: the shipped defaults are compiled in and
+//!   always parse; a missing, unreadable, or corrupt operator overlay is ignored
+//!   (defaults are kept), never a panic. Path resolution itself fails closed so
+//!   Sentinel never treats the current working directory as a fake home.
 //! - **Merge-by-id**: an overlay rule whose `id` matches a shipped rule fully
 //!   replaces it (whole-rule replace, no partial-field inheritance — keeps the
 //!   merge trivial and predictable). A new `id` is appended. `enabled = false`
@@ -17,24 +18,16 @@
 //! - Mirrors the `capability_router.rs` precedent (`include_str!` default +
 //!   `config_dir()` overlay).
 
-use std::path::PathBuf;
-
 use serde::Deserialize;
 
 /// The shipped autocron ruleset, compiled into the engine.
 pub const SHIPPED_AUTOCRON_DEFAULTS: &str = include_str!("../../../config/autocron-defaults.toml");
 
 /// `~/.claude/sentinel/config` — the operator config dir. Resolved directly via
-/// `dirs::home_dir()`: the application crate cannot depend on
-/// sentinel-infrastructure (where `config_dir()` lives) without a dependency
-/// cycle, since infrastructure already depends on application. Falls back to `.`
-/// only when HOME is unset, which simply means no overlay is found (fail-open).
-fn config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("sentinel")
-        .join("config")
+/// the application-layer Claude dir resolver so missing home / empty override
+/// fails closed instead of falling back to CWD.
+fn config_dir() -> std::path::PathBuf {
+    crate::paths::claude_dir().join("sentinel").join("config")
 }
 
 /// One declarative event→cron/loop rule. See `config/autocron-defaults.toml`
@@ -157,7 +150,10 @@ mod tests {
             "task_started_stale_watch",
             "ci_run_watch",
         ] {
-            assert!(rules.iter().any(|r| r.id == id), "missing shipped rule {id}");
+            assert!(
+                rules.iter().any(|r| r.id == id),
+                "missing shipped rule {id}"
+            );
         }
     }
 
@@ -172,7 +168,10 @@ mod tests {
         let push = rules.iter().find(|r| r.id == "pr_branch_push").unwrap();
         assert_eq!(push.match_kind.as_deref(), Some("git_push_branch"));
 
-        let linear = rules.iter().find(|r| r.id == "linear_state_change").unwrap();
+        let linear = rules
+            .iter()
+            .find(|r| r.id == "linear_state_change")
+            .unwrap();
         assert!(!linear.terminal, "linear lifecycle rule is perpetual");
         assert_eq!(linear.safety_cap_ticks, 0);
     }

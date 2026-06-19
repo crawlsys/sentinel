@@ -65,9 +65,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use sentinel_application::evidence_adapters::EvidenceAdapter;
-use sentinel_domain::evidence_adapter::{
-    AdapterError, EvidenceClaim, EvidenceReceipt,
-};
+use sentinel_domain::evidence_adapter::{AdapterError, EvidenceClaim, EvidenceReceipt};
 
 /// Adapter name, surfaced in `EvidenceReceipt::adapter_name` and the
 /// provenance hash.
@@ -293,15 +291,25 @@ mod tests {
         let receipt = a.fetch(&claim).await.unwrap();
         assert!(receipt.verified);
         assert_eq!(
-            receipt.payload.get("screenshot_count").and_then(|v| v.as_u64()),
+            receipt
+                .payload
+                .get("screenshot_count")
+                .and_then(|v| v.as_u64()),
             Some(4)
         );
         assert_eq!(
-            receipt.payload.get("recording_url").and_then(|v| v.as_str()),
+            receipt
+                .payload
+                .get("recording_url")
+                .and_then(|v| v.as_str()),
             Some("https://browserbase.com/sessions/bb_sess_002")
         );
         assert_eq!(
-            receipt.payload.get("artifacts").and_then(|v| v.as_array()).map(Vec::len),
+            receipt
+                .payload
+                .get("artifacts")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
             Some(2)
         );
     }
@@ -310,7 +318,10 @@ mod tests {
     async fn session_observed_missing_session_id_errors() {
         let a = BrowserbaseAdapter::new();
         let claim = claim_with(CLAIM_SESSION_OBSERVED, serde_json::json!({}));
-        let err = a.fetch(&claim).await.expect_err("must error on missing session_id");
+        let err = a
+            .fetch(&claim)
+            .await
+            .expect_err("must error on missing session_id");
         let msg = err.to_string();
         assert!(
             msg.contains("session_id"),
@@ -339,15 +350,30 @@ mod tests {
                 "screenshot_count": 3,
                 "console_errors": 0,
                 "recording_url": "https://browserbase.com/sessions/bb_sess_003",
-                "assertions": ["login succeeds", "dashboard renders"]
+                "assertions": ["login succeeds", "main view renders"]
             }),
         );
         let receipt = a.fetch(&claim).await.unwrap();
         assert!(receipt.verified);
         let predicates = receipt.payload.get("predicates").unwrap();
-        assert_eq!(predicates.get("session_id_present").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(predicates.get("at_least_one_screenshot").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(predicates.get("zero_console_errors").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            predicates
+                .get("session_id_present")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            predicates
+                .get("at_least_one_screenshot")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            predicates
+                .get("zero_console_errors")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -371,12 +397,17 @@ mod tests {
         );
         let predicates = receipt.payload.get("predicates").unwrap();
         assert_eq!(
-            predicates.get("zero_console_errors").and_then(|v| v.as_bool()),
+            predicates
+                .get("zero_console_errors")
+                .and_then(|v| v.as_bool()),
             Some(false),
             "predicate breakdown surfaces which check failed"
         );
         assert_eq!(
-            receipt.payload.get("console_errors").and_then(|v| v.as_u64()),
+            receipt
+                .payload
+                .get("console_errors")
+                .and_then(|v| v.as_u64()),
             Some(3)
         );
     }

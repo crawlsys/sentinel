@@ -3,7 +3,7 @@
 //! Persistent, append-only security event log for sentinel.
 //! Events: `hmac_failure`, `rate_limited`, `tamper_detected`, `caller_rejected`, `state_regression`
 //!
-//! Format: one JSON line per event in `~/.claude/sentinel/security.jsonl`.
+//! Format: one JSON line per event in Sentinel's security log root.
 //! Auto-truncates to the last 500KB when the file exceeds 1MB.
 
 use std::io::Write;
@@ -30,10 +30,7 @@ struct SecurityEvent<'a> {
 
 /// Directory for security log files.
 fn security_log_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory")
-        .join(".claude")
-        .join("sentinel")
+    crate::paths::sentinel_root()
 }
 
 /// Full path to the security audit log.
@@ -41,7 +38,7 @@ fn security_log_path() -> PathBuf {
     security_log_dir().join("security.jsonl")
 }
 
-/// Log a security-relevant event to `~/.claude/sentinel/security.jsonl`.
+/// Log a security-relevant event to Sentinel's security log.
 ///
 /// Events:
 /// - `hmac_failure` — HMAC verification failed on a state file

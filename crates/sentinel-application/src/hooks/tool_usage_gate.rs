@@ -1,90 +1,68 @@
 //! Tool Usage Gate
 //!
-//! `PreToolUse` hook that blocks Edit/Write if required preconditions aren't met:
-//! 1. Sequential thinking must have been used this session
-//! 2. At least one task must have been created this session
-//! 3. A plan must have been approved this session (ExitPlanMode/EnterPlanMode
-//!    called, OR a recent `plans/*.md` exists)
-//! 4. A task must be actively `in_progress`
+//! `PreToolUse` hook that blocks mutating tools if required preconditions
+//! aren't met:
+//! 1. Sequential thinking must be present in the live session transcript.
+//! 2. The active Claude native TaskList for this session must contain at
+//!    least one task.
+//! 3. The live transcript must show an approved plan (`ExitPlanMode`).
+//! 4. The active session TaskList must contain an `in_progress` task.
 //!
-//! State is tracked via marker files in the temp directory, keyed by session ID.
-//! Marker files are written by the `PostToolUse` dispatcher when it detects
-//! the relevant tool calls.
-//!
-//! Plan-mode detection (primary): read the session transcript at
-//! `input.transcript_path` and walk it to find the last `EnterPlanMode` or
-//! `ExitPlanMode` `tool_use` entry. If `EnterPlanMode` appears after the
-//! last `ExitPlanMode` (or there is no `ExitPlanMode`), the session is
-//! currently in plan mode and check #3 is satisfied directly by the real
-//! Claude Code 2.1.114 signal. This replaces the old `SENTINEL_AUTOPILOT`
-//! env-var bypass — see `detect_plan_mode_from_transcript`.
-//!
-//! Autopilot fallback: `SENTINEL_AUTOPILOT=1` is retained only as a
-//! last-resort escape hatch for the rare case where the hook fires with
-//! no transcript path at all (e.g. malformed harness input). In normal
-//! operation the transcript is authoritative and this env var is ignored.
-//!
-//! Plan-file fallback: when a session is resumed, `ExitPlanMode` may have
-//! been called in a prior session and the transcript may not be available,
-//! so no `PLAN_MARKER` exists. Detect this by scanning for recently-written
-//! `*.md` files in any `plans/` directory between `{cwd}` and the
-//! containing repo root. We walk upward from cwd until we find a `.git`
-//! entry (file or directory — worktrees use a file) and check every
-//! `plans/` dir we find along the way. This handles:
-//!   - cwd is the repo root           → checks `{root}/plans/`
-//!   - cwd is a git worktree          → `.git` file in worktree lands us at
-//!                                       the worktree root, so plans authored
-//!                                       at the main repo root are still
-//!                                       reachable via the worktree's own
-//!                                       `plans/` dir (Claude Code writes
-//!                                       plans relative to cwd)
-//!   - cwd is a nested subdirectory   → walks up checking each level
+//! Production authority comes from the live transcript and the active
+//! session's native TaskList under `~/.claude/tasks/{session_id}/`.
+//! No alternate authority source is accepted for this gate.
 
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::ReversibilityClassifierPort;
 use sentinel_domain::ReversibilityClass;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::Path;
 
-use super::hygiene_override::is_signed_override_active;
 use super::{EnvPort, FileSystemPort};
 
-/// Last-resort escape hatch for when the hook fires with no transcript
-/// path at all. In normal 2.1.114 operation the transcript is the
-/// authoritative signal and this env var is ignored.
-fn is_autopilot(env: &dyn EnvPort) -> bool {
-    env.var("SENTINEL_AUTOPILOT")
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PlanState {
+    Missing,
+    InPlanMode,
+    Approved,
 }
 
-/// Walk the transcript newest-to-oldest looking for the most recent
-/// `EnterPlanMode` or `ExitPlanMode` `tool_use` entry. Returns `true` iff
-/// the last one is `EnterPlanMode` — meaning the session is currently in
-/// plan mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptSignals {
+    sequential_thinking_used: bool,
+    plan_state: PlanState,
+}
+
+/// Parse the live transcript as the authority for session preconditions.
 ///
-/// Claude Code 2.1.114 records plan-mode entry as an assistant `tool_use`
-/// block with `name: "EnterPlanMode"` (real tool — binary handler `r7H` —
-/// though omitted from `sdk-tools.d.ts`). Exit is a `tool_use` with
-/// `name: "ExitPlanMode"`. Between those two calls the permission context
-/// carries `mode: "plan"`.
-///
-/// We parse lines lazily from the end — the file is read fully into memory,
-/// but JSON parsing short-circuits on the first plan-related `tool_use`
-/// encountered going backwards, which is the current state. The inner block
-/// iteration also runs in reverse so the latest `tool_use` within a single
-/// assistant message wins when multiple plan signals appear in one message.
-pub fn detect_plan_mode_from_transcript(fs: &dyn FileSystemPort, transcript_path: &Path) -> bool {
-    let content = match fs.read_to_string(transcript_path) {
-        Ok(c) => c,
-        Err(_) => return false,
+/// Malformed non-empty lines are treated as authority failure. The gate must
+/// not accept an untrusted transcript by skipping over corrupted records.
+fn read_transcript_signals(
+    fs: &dyn FileSystemPort,
+    transcript_path: &Path,
+) -> Result<TranscriptSignals, String> {
+    let content = fs.read_to_string(transcript_path).map_err(|err| {
+        format!(
+            "failed to read transcript {}: {err}",
+            transcript_path.display()
+        )
+    })?;
+    let mut signals = TranscriptSignals {
+        sequential_thinking_used: false,
+        plan_state: PlanState::Missing,
     };
 
-    for line in content.lines().rev() {
-        let entry: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
+    for (line_idx, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: serde_json::Value = serde_json::from_str(line).map_err(|err| {
+            format!(
+                "malformed transcript JSON at {} line {}: {err}",
+                transcript_path.display(),
+                line_idx + 1
+            )
+        })?;
         if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
             continue;
         }
@@ -96,1334 +74,471 @@ pub fn detect_plan_mode_from_transcript(fs: &dyn FileSystemPort, transcript_path
             continue;
         };
 
-        for block in blocks.iter().rev() {
+        for block in blocks {
             if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
                 continue;
             }
             match block.get("name").and_then(|v| v.as_str()) {
-                Some("EnterPlanMode") => return true,
-                Some("ExitPlanMode") => return false,
+                Some(name) if name.contains("sequentialthinking") => {
+                    signals.sequential_thinking_used = true;
+                }
+                Some("EnterPlanMode") => {
+                    signals.plan_state = PlanState::InPlanMode;
+                }
+                Some("ExitPlanMode") => {
+                    signals.plan_state = PlanState::Approved;
+                }
                 _ => {}
             }
         }
     }
 
-    false
+    Ok(signals)
 }
 
-/// How recent a plan file must be to count as "approved this session".
-/// Owned by the domain layer so the freshness policy lives next to other
-/// time-window constants (`STALE_SESSION_EVENTS_AGE`, `DEP_CHECK_CACHE_TTL`).
-const PLAN_FILE_FRESH_WINDOW: Duration = sentinel_domain::constants::PLAN_FILE_FRESH_WINDOW;
-
-/// Marker file prefix for sequential thinking usage.
-const SEQUENTIAL_MARKER_PREFIX: &str = "claude-sequential-used-";
-
-/// Marker file prefix for task creation.
-const TASK_MARKER_PREFIX: &str = "claude-task-created-";
-
-/// Marker file prefix for plan approval (`ExitPlanMode` was called).
-const PLAN_MARKER_PREFIX: &str = "claude-plan-approved-";
-
-/// Marker file prefix for active task (`TaskUpdate` set a task to `in_progress`).
-const TASK_ACTIVE_PREFIX: &str = "claude-task-active-";
-
-/// Check if a marker file exists for this session.
-fn has_marker(fs: &dyn FileSystemPort, prefix: &str, session_id: &str) -> bool {
-    let path = temp_marker_path(prefix, session_id);
-    fs.exists(&path)
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Task {
+    id: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    status: String,
 }
 
-/// Max directory levels to walk up from cwd looking for plans/ dirs.
-/// Prevents pathological runaway on unusual filesystems.
-const MAX_WALK_UP_DEPTH: usize = 10;
-
-/// True if `dir` contains a `plans/*.md` written inside the freshness window.
-fn plans_dir_has_recent_md(fs: &dyn FileSystemPort, dir: &Path, now: SystemTime) -> bool {
-    if !fs.is_dir(dir) {
-        return false;
+fn read_active_session_tasks(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+) -> Result<Vec<Task>, String> {
+    let home = fs
+        .home_dir()
+        .ok_or_else(|| "cannot determine home directory for session task lookup".to_string())?;
+    let session_dir = super::session_task_dir(fs, &home, session_id);
+    if !fs.is_dir(&session_dir) {
+        return Ok(Vec::new());
     }
-    let entries = match fs.read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    entries.iter().any(|entry| {
-        if entry.extension().and_then(|e| e.to_str()) != Some("md") {
-            return false;
-        }
-        match fs
-            .metadata(entry)
-            .and_then(|m| m.modified().map_err(Into::into))
+    let entries = fs
+        .read_dir(&session_dir)
+        .map_err(|err| format!("failed to list task dir {}: {err}", session_dir.display()))?;
+
+    let mut tasks = Vec::new();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            || name.starts_with('.')
         {
-            Ok(modified) => now
-                .duration_since(modified)
-                .is_ok_and(|age| age <= PLAN_FILE_FRESH_WINDOW),
-            Err(_) => false,
-        }
-    })
-}
-
-/// Walk up from cwd toward filesystem root, returning true if any `plans/`
-/// directory along the way has a recently-written `*.md`. Stops at the first
-/// directory containing a `.git` entry (marker of the repo boundary) — that
-/// directory is still checked, but we don't ascend past it.
-fn has_recent_plan_file(fs: &dyn FileSystemPort, cwd: Option<&str>, now: SystemTime) -> bool {
-    let Some(cwd) = cwd else {
-        return false;
-    };
-    let mut current: Option<&Path> = Some(Path::new(cwd));
-    for _ in 0..MAX_WALK_UP_DEPTH {
-        let Some(dir) = current else { break };
-        if plans_dir_has_recent_md(fs, &dir.join("plans"), now) {
-            return true;
-        }
-        // Stop once we've inspected the repo root (detected by `.git`).
-        // `.git` can be either a directory (normal repo) or a file (worktree).
-        if fs.exists(&dir.join(".git")) {
-            return false;
-        }
-        current = dir.parent();
-    }
-    false
-}
-
-/// Build the temp-dir path for a marker file.
-fn temp_marker_path(prefix: &str, session_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("{prefix}{session_id}"))
-}
-
-/// Write a marker file to record that a precondition has been met.
-pub fn write_marker(fs: &dyn FileSystemPort, prefix: &str, session_id: &str) {
-    let path = temp_marker_path(prefix, session_id);
-    let _ = fs.write(&path, b"1");
-}
-
-/// Write the sequential-thinking marker for this session.
-pub fn mark_sequential_thinking_used(fs: &dyn FileSystemPort, session_id: &str) {
-    write_marker(fs, SEQUENTIAL_MARKER_PREFIX, session_id);
-}
-
-/// Write the task-created marker for this session.
-pub fn mark_task_created(fs: &dyn FileSystemPort, session_id: &str) {
-    write_marker(fs, TASK_MARKER_PREFIX, session_id);
-}
-
-/// Write the plan-approved marker for this session (`ExitPlanMode` was called).
-pub fn mark_plan_approved(fs: &dyn FileSystemPort, session_id: &str) {
-    write_marker(fs, PLAN_MARKER_PREFIX, session_id);
-}
-
-/// Write the task-active marker for this session (a task is `in_progress`).
-pub fn mark_task_active(fs: &dyn FileSystemPort, session_id: &str) {
-    write_marker(fs, TASK_ACTIVE_PREFIX, session_id);
-}
-
-/// True when at least one task in the persisted task store has
-/// `status == "in_progress"`. Authoritative check for "is the agent
-/// actively working on something tracked?".
-///
-/// We don't have the project hash here, so we scan every
-/// `~/.claude/sentinel/persistent-tasks/*/tasks.json` (and the legacy
-/// `~/.claude/persistent-tasks/*/tasks.json` location during the
-/// migration window). Returning `true` early on first match keeps the
-/// hot path fast — typically a single small file read.
-///
-/// On any IO/parse error this returns `false`, leaving the existing
-/// marker-based fallback to take over (see callers).
-fn persistent_store_has_active_task(fs: &dyn FileSystemPort) -> bool {
-    let Some(home) = fs.home_dir() else {
-        return false;
-    };
-
-    // Scan both the new (sentinel-owned) and legacy roots — `task_persist`
-    // migrates lazily, so during the migration window data may live in
-    // either location.
-    let roots = [
-        home.join(".claude")
-            .join("sentinel")
-            .join("persistent-tasks"),
-        home.join(".claude").join("persistent-tasks"),
-    ];
-
-    for root in &roots {
-        if !fs.is_dir(root) {
             continue;
         }
-        let projects = match fs.read_dir(root) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        for proj in projects {
-            let tasks_file = proj.join("tasks.json");
-            if !fs.exists(&tasks_file) {
-                continue;
-            }
-            let content = match fs.read_to_string(&tasks_file) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let json: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            // Two shapes seen in the wild: `{"tasks": [...]}` (current) and
-            // a bare top-level array (older snapshots). Accept both.
-            let tasks = json
-                .get("tasks")
-                .and_then(|t| t.as_array())
-                .or_else(|| json.as_array());
-            let Some(tasks) = tasks else { continue };
-            for task in tasks {
-                if task.get("status").and_then(|v| v.as_str()) == Some("in_progress") {
-                    return true;
-                }
-            }
-        }
+        let content = fs
+            .read_to_string(&path)
+            .map_err(|err| format!("failed to read task file {}: {err}", path.display()))?;
+        let task = serde_json::from_str::<Task>(&content)
+            .map_err(|err| format!("failed to parse task file {}: {err}", path.display()))?;
+        tasks.push(task);
     }
-    false
+    tasks.sort_by(|a, b| {
+        let a_num: u32 = a.id.parse().unwrap_or(u32::MAX);
+        let b_num: u32 = b.id.parse().unwrap_or(u32::MAX);
+        a_num.cmp(&b_num).then(a.id.cmp(&b.id))
+    });
+    Ok(tasks)
 }
 
-/// Best-effort lookup for the most recent pending task ID in this project,
-/// to give the user an actionable ID in the block message. Returns
-/// `Some("Task #N is pending — …")` when a pending task file is found,
-/// `None` otherwise.
-///
-/// The persisted task store lives at
-/// `~/.claude/persistent-tasks/{project_hash}/tasks.json` (see
-/// `task_persist.rs`). We don't have the project hash here without
-/// more plumbing, so we scan the `persistent-tasks/*/tasks.json` tree
-/// and pick whichever JSON has a pending entry. This is a hint, not a
-/// source of truth — a None return degrades gracefully to the generic
-/// message.
-fn recent_pending_task_hint(fs: &dyn FileSystemPort, _session_id: &str) -> Option<String> {
-    let home = fs.home_dir()?;
-    let root = home.join(".claude").join("persistent-tasks");
-    if !fs.is_dir(&root) {
-        return None;
+fn pending_task_hint(tasks: &[Task]) -> Option<String> {
+    tasks
+        .iter()
+        .find(|task| task.status == "pending")
+        .map(|task| {
+            let subject = if task.subject.trim().is_empty() {
+                "(no subject)"
+            } else {
+                task.subject.as_str()
+            };
+            format!("Task #{} is pending: \"{}\".", task.id, subject)
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolUsageDecision {
+    AllowNoTool,
+    AllowTriviallyReversible,
+    AllowA3Handoff,
+    Allow,
+    DenyMissingSessionId,
+    DenyMissingTranscriptPath,
+    DenyTranscriptAuthority,
+    DenyTaskListAuthority,
+    DenyMissingSequentialThinking,
+    DenyMissingTaskList,
+    DenyPlanInProgress,
+    DenyMissingApprovedPlan,
+    DenyMissingInProgressTask,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolUsageEvaluation {
+    pub tool: Option<String>,
+    pub tool_present: bool,
+    pub reversibility_class: Option<ReversibilityClass>,
+    pub a3_enabled: bool,
+    pub a3_handoff: bool,
+    pub gate_required: bool,
+    pub session_id: Option<String>,
+    pub session_id_present: bool,
+    pub transcript_path: Option<String>,
+    pub transcript_path_present: bool,
+    pub transcript_authority_read: bool,
+    pub transcript_authority_error: Option<String>,
+    pub sequential_thinking_used: bool,
+    pub plan_state: PlanState,
+    pub task_authority_read: bool,
+    pub task_authority_error: Option<String>,
+    pub task_count: usize,
+    pub in_progress_task_present: bool,
+    pub pending_task_hint: Option<String>,
+    pub should_deny: bool,
+    pub decision: ToolUsageDecision,
+}
+
+impl ToolUsageEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.gate_required
     }
-    let projects = fs.read_dir(&root).ok()?;
-    for proj in projects {
-        let tasks_file = proj.join("tasks.json");
-        if !fs.exists(&tasks_file) {
-            continue;
-        }
-        let content = match fs.read_to_string(&tasks_file) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let json: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let tasks = match json.get("tasks").and_then(|t| t.as_array()) {
-            Some(t) => t,
-            None => continue,
-        };
-        for task in tasks {
-            let status = task.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if status != "pending" {
-                continue;
-            }
-            let id = task
-                .get("id")
-                .and_then(|v| v.as_str())
-                .or_else(|| task.get("id").and_then(serde_json::Value::as_i64).map(|_| "?"))
-                .unwrap_or("?");
-            let subject = task
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no subject)");
-            return Some(format!("Task #{id} is pending: \"{subject}\"."));
-        }
-    }
-    None
 }
 
 /// Process a `PreToolUse` event. Routes by reversibility class (A6, per
 /// `docs/a6-reversibility-graded-tripwires.md`):
 ///
-/// - `TriviallyReversible` → allow silently (memory writes, plan files,
-///   read-only ops, list/get MCP tools per the shipped TOML).
-/// - `ReversibleWithEffort` → run the four-check stack (sequential-thinking
-///   marker + task created + plan mode + active task `in_progress`).
-/// - `Irreversible` / `Catastrophic` → when `a3_enabled` is `true`,
+/// - `TriviallyReversible` -> allow without extra gate context (memory writes,
+///   plan files, read-only ops, list/get MCP tools per the shipped TOML).
+/// - `ReversibleWithEffort` -> run the four-check stack (transcript-confirmed
+///   sequential thinking + active session task list + approved plan +
+///   `in_progress` task).
+/// - `Irreversible` / `Catastrophic` -> when `a3_enabled` is `true`,
 ///   short-circuit to `allow()` so the A3 `dry_run_then_commit` hook
 ///   handles the gating via its separate-model-family auditor. When
-///   `a3_enabled` is `false` (no `OPENROUTER_API_KEY` configured at
-///   session start), fall through to the four-check stack as the
-///   strongest available gate.
+///   `a3_enabled` is `false` (tests or non-hook callers only), continue
+///   to the four-check stack as the strongest available gate.
 pub fn process(
     input: &HookInput,
     fs: &dyn FileSystemPort,
-    env: &dyn EnvPort,
+    _env: &dyn EnvPort,
     classifier: &dyn ReversibilityClassifierPort,
     a3_enabled: bool,
 ) -> HookOutput {
+    let evaluation = evaluate(input, fs, classifier, a3_enabled);
+    output_from_evaluation(&evaluation)
+}
+
+pub fn evaluate(
+    input: &HookInput,
+    fs: &dyn FileSystemPort,
+    classifier: &dyn ReversibilityClassifierPort,
+    a3_enabled: bool,
+) -> ToolUsageEvaluation {
+    let mut evaluation = ToolUsageEvaluation {
+        tool: input.tool_name.clone(),
+        tool_present: input
+            .tool_name
+            .as_deref()
+            .is_some_and(|tool| !tool.is_empty()),
+        reversibility_class: None,
+        a3_enabled,
+        a3_handoff: false,
+        gate_required: false,
+        session_id: input.session_id.clone().filter(|id| !id.is_empty()),
+        session_id_present: input.session_id.as_deref().is_some_and(|id| !id.is_empty()),
+        transcript_path: input
+            .transcript_path
+            .clone()
+            .filter(|path| !path.is_empty()),
+        transcript_path_present: input
+            .transcript_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty()),
+        transcript_authority_read: false,
+        transcript_authority_error: None,
+        sequential_thinking_used: false,
+        plan_state: PlanState::Missing,
+        task_authority_read: false,
+        task_authority_error: None,
+        task_count: 0,
+        in_progress_task_present: false,
+        pending_task_hint: None,
+        should_deny: false,
+        decision: ToolUsageDecision::AllowNoTool,
+    };
+
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
-        None => return HookOutput::allow(),
+        None => return evaluation,
     };
 
-    // A6 Phase 4b + A3 Phase 4 — class-based dispatch with A3 hand-off.
-    //
-    // The shared reversibility classifier (per docs/a6-reversibility-graded-tripwires.md)
-    // decides whether this call enters the four-check stack:
-    //
-    // - TriviallyReversible → allow silently (memory writes, plan files,
-    //   read-only ops, list/get MCP tools per the shipped TOML).
-    // - ReversibleWithEffort → run the four-check stack (Edit/Write/local
-    //   mutations).
-    // - Irreversible / Catastrophic:
-    //     * `a3_enabled` (the production caller in hook_cmd.rs sets this
-    //       when `RigAuditor::from_env()` succeeded) → allow silently;
-    //       the A3 `dry_run_then_commit` hook owns these classes via its
-    //       separate-model-family auditor.
-    //     * Otherwise → fall through to the four-check stack so the
-    //       pre-A3 gate is still the strongest available defence.
-    //
-    // The shipped reversibility-defaults.toml is the substrate;
-    // operator overrides extend it.
+    // A6 Phase 4b + A3 Phase 4: class-based dispatch with A3 hand-off.
     let null_input = serde_json::Value::Null;
     let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null_input);
-    match classifier.classify(tool, tool_input_ref) {
-        ReversibilityClass::TriviallyReversible => return HookOutput::allow(),
-        ReversibilityClass::ReversibleWithEffort => {
-            // Fall through to the four-check stack below.
+    let class = classifier.classify(tool, tool_input_ref);
+    evaluation.reversibility_class = Some(class);
+    match class {
+        ReversibilityClass::TriviallyReversible => {
+            evaluation.decision = ToolUsageDecision::AllowTriviallyReversible;
+            return evaluation;
         }
+        ReversibilityClass::ReversibleWithEffort => {}
         ReversibilityClass::Irreversible | ReversibilityClass::Catastrophic => {
             if a3_enabled {
-                return HookOutput::allow();
+                evaluation.a3_handoff = true;
+                evaluation.decision = ToolUsageDecision::AllowA3Handoff;
+                return evaluation;
             }
-            // Fall through to the four-check stack below.
         }
     }
 
-    let session_id = match &input.session_id {
+    evaluation.gate_required = true;
+
+    let session_id = match &evaluation.session_id {
         Some(id) if !id.is_empty() => id.as_str(),
-        _ => return HookOutput::allow(),
+        _ => {
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyMissingSessionId;
+            return evaluation;
+        }
     };
 
-    // Universal bypass: a signed `verification` override (activated this
-    // session via the user saying "override verification") unblocks ALL four
-    // preconditions below for the override TTL. Previously this override only
-    // affected pre_commit_verification — that was confusing ("why didn't my
-    // override work?"). Now it's a consistent 60-second escape hatch for the
-    // whole gate stack. The verification_override_path + is_signed_override_active
-    // check still requires the hygiene_override hook to have written a
-    // cryptographically-signed token (Attack #47 defence), so `touch`-based
-    // bypass is still blocked.
-    if is_signed_override_active(
-        fs,
-        &super::hygiene_override::verification_override_path(fs, session_id),
-        "verification",
-        session_id,
-    ) {
-        eprintln!("[sentinel] tool_usage_gate: allowed via active 'override verification'");
-        return HookOutput::allow();
+    let transcript_path = match evaluation
+        .transcript_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    {
+        Some(path) => Path::new(path),
+        None => {
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyMissingTranscriptPath;
+            return evaluation;
+        }
+    };
+    let transcript = match read_transcript_signals(fs, transcript_path) {
+        Ok(signals) => {
+            evaluation.transcript_authority_read = true;
+            signals
+        }
+        Err(err) => {
+            evaluation.transcript_authority_error = Some(err);
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyTranscriptAuthority;
+            return evaluation;
+        }
+    };
+    evaluation.sequential_thinking_used = transcript.sequential_thinking_used;
+    evaluation.plan_state = transcript.plan_state;
+
+    let tasks = match read_active_session_tasks(fs, session_id) {
+        Ok(tasks) => {
+            evaluation.task_authority_read = true;
+            tasks
+        }
+        Err(err) => {
+            evaluation.task_authority_error = Some(err);
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyTaskListAuthority;
+            return evaluation;
+        }
+    };
+    evaluation.task_count = tasks.len();
+    evaluation.in_progress_task_present = tasks.iter().any(|task| task.status == "in_progress");
+    evaluation.pending_task_hint = pending_task_hint(&tasks);
+
+    if !transcript.sequential_thinking_used {
+        evaluation.should_deny = true;
+        evaluation.decision = ToolUsageDecision::DenyMissingSequentialThinking;
+        return evaluation;
     }
 
-    // Check 1: Sequential thinking must have been used this session
-    if !has_marker(fs, SEQUENTIAL_MARKER_PREFIX, session_id) {
-        return HookOutput::deny(
+    if tasks.is_empty() {
+        evaluation.should_deny = true;
+        evaluation.decision = ToolUsageDecision::DenyMissingTaskList;
+        return evaluation;
+    }
+
+    match transcript.plan_state {
+        PlanState::Approved => {}
+        PlanState::InPlanMode => {
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyPlanInProgress;
+            return evaluation;
+        }
+        PlanState::Missing => {
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyMissingApprovedPlan;
+            return evaluation;
+        }
+    }
+
+    if !evaluation.in_progress_task_present {
+        evaluation.should_deny = true;
+        evaluation.decision = ToolUsageDecision::DenyMissingInProgressTask;
+        return evaluation;
+    }
+
+    evaluation.decision = ToolUsageDecision::Allow;
+    evaluation
+}
+
+pub fn output_from_evaluation(evaluation: &ToolUsageEvaluation) -> HookOutput {
+    match evaluation.decision {
+        ToolUsageDecision::AllowNoTool
+        | ToolUsageDecision::AllowTriviallyReversible
+        | ToolUsageDecision::AllowA3Handoff
+        | ToolUsageDecision::Allow => HookOutput::allow(),
+        ToolUsageDecision::DenyMissingSessionId => HookOutput::deny(
+            "🔴 [Tool Usage Gate] BLOCKED: Hook input did not include a session_id, \
+             so Sentinel cannot verify transcript and TaskList authority.",
+        ),
+        ToolUsageDecision::DenyMissingTranscriptPath => HookOutput::deny(
+            "🔴 [Tool Usage Gate] BLOCKED: Hook input did not include transcript_path, \
+             so Sentinel cannot verify sequential thinking or plan approval authority.",
+        ),
+        ToolUsageDecision::DenyTranscriptAuthority => {
+            let err = evaluation
+                .transcript_authority_error
+                .as_deref()
+                .unwrap_or("unknown transcript authority error");
+            HookOutput::deny(format!(
+                "🔴 [Tool Usage Gate] BLOCKED: Transcript authority unavailable: {err}"
+            ))
+        }
+        ToolUsageDecision::DenyTaskListAuthority => {
+            let err = evaluation
+                .task_authority_error
+                .as_deref()
+                .unwrap_or("unknown TaskList authority error");
+            HookOutput::deny(format!(
+                "🔴 [Tool Usage Gate] BLOCKED: TaskList authority unavailable: {err}"
+            ))
+        }
+        ToolUsageDecision::DenyMissingSequentialThinking => HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Use `mcp__sequential-thinking__sequentialthinking` \
              to think through your approach before making code changes.",
-        );
-    }
-
-    // Check 2: At least one task must exist this session
-    if !has_marker(fs, TASK_MARKER_PREFIX, session_id) {
-        return HookOutput::deny(
+        ),
+        ToolUsageDecision::DenyMissingTaskList => HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` before \
              making code changes. All work must be tracked as a task. \
              Note: `TodoWrite` is NOT accepted — Gary's CLAUDE.md mandates the \
              agent-harness `TaskCreate`/`TaskUpdate` (TaskList) tool.",
-        );
-    }
-
-    // Check 3: The session must be in plan mode (real 2.1.114 signal), OR the
-    // plan-approved marker is set (ExitPlanMode fired during this session), OR
-    // a recent plan file exists in `{cwd}/plans/` (resumed-session fallback).
-    //
-    // Plan mode entry paths (2.1.114): (a) Shift+Tab in the UI, (b) the
-    // `EnterPlanMode` tool (real in the compiled binary — handler `r7H` —
-    // though omitted from `sdk-tools.d.ts`; rejects inside agent contexts),
-    // (c) env var `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, (d) `Agent` tool with
-    // `mode: "plan"`, (e) agent YAML frontmatter `permissionMode: "plan"`, or
-    // (f) CLI flag `--permission-mode plan`. `ExitPlanMode` is the approval
-    // step that commits the plan.
-    //
-    // Primary signal: `detect_plan_mode_from_transcript` reads the live
-    // transcript and returns true when the last plan-related tool_use is
-    // `EnterPlanMode` (not yet followed by `ExitPlanMode`). This is the
-    // authoritative source.
-    //
-    // SENTINEL_AUTOPILOT is intentionally *only* consulted when no
-    // transcript path was provided — it's a last-resort escape hatch for
-    // malformed harness input, not a user-facing bypass.
-    let in_plan_mode = input
-        .transcript_path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .map(|p| detect_plan_mode_from_transcript(fs, Path::new(p)));
-
-    let plan_check_ok = match in_plan_mode {
-        Some(true) => true,
-        Some(false) => {
-            has_marker(fs, PLAN_MARKER_PREFIX, session_id)
-                || has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
+        ),
+        ToolUsageDecision::DenyPlanInProgress => HookOutput::deny(
+            "🔴 [Tool Usage Gate] BLOCKED: Plan mode is active but no approved plan \
+             is recorded yet. Call `ExitPlanMode` with the plan content before \
+             making code changes.",
+        ),
+        ToolUsageDecision::DenyMissingApprovedPlan => HookOutput::deny(
+            "🔴 [Tool Usage Gate] BLOCKED: Approved plan not found in the live \
+             transcript. Enter plan mode with `EnterPlanMode`, then call \
+             `ExitPlanMode` with the plan content before making code changes.",
+        ),
+        ToolUsageDecision::DenyMissingInProgressTask => {
+            let hint = evaluation.pending_task_hint.clone().unwrap_or_default();
+            let msg = if hint.is_empty() {
+                "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` and have \
+                 one in `in_progress` before making code changes. All work must be \
+                 tracked as an active task. Note: `TodoWrite` is NOT accepted — \
+                 Gary's CLAUDE.md mandates the agent-harness `TaskCreate`/`TaskUpdate` \
+                 (TaskList) tool."
+                    .to_string()
+            } else {
+                format!(
+                    "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
+                     code changes. {hint} Use `TaskUpdate(taskId: \"<id>\", \
+                     status: \"in_progress\")`. Note: `TodoWrite` is NOT accepted — \
+                     Gary's CLAUDE.md mandates the agent-harness TaskList tool."
+                )
+            };
+            HookOutput::deny(msg)
         }
-        None => {
-            // No transcript available — fall back to markers, the plan-file
-            // heuristic, and finally the SENTINEL_AUTOPILOT escape hatch.
-            is_autopilot(env)
-                || has_marker(fs, PLAN_MARKER_PREFIX, session_id)
-                || has_recent_plan_file(fs, input.cwd.as_deref(), SystemTime::now())
-        }
-    };
-
-    if !plan_check_ok {
-        return HookOutput::deny(
-            "🔴 [Tool Usage Gate] BLOCKED: Plan Mode is required. Enter plan mode via \
-             `EnterPlanMode` (or Shift+Tab, `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`, \
-             `Agent(mode:\"plan\")`, or `--permission-mode plan`). Then call \
-             `ExitPlanMode` with the plan content for approval. Alternatively, \
-             place a recent `.md` plan file under `plans/` in your CURRENT shell \
-             cwd (resumed-session fallback) — if you're inside a git worktree, \
-             the walk-up stops at the worktree's `.git` file, so the plan MUST \
-             live inside the worktree itself (e.g. `{worktree}/plans/foo.md`), \
-             not at the main repo root.",
-        );
     }
-
-    // Check 4: A task must be actively in_progress.
-    //
-    // Authoritative check first: read the persisted task store and look for
-    // ANY task with status=in_progress across any project subdir. The
-    // sticky-marker (`TASK_ACTIVE_PREFIX`) only flips ON — it never reflects
-    // task completion — so on its own it lets the gate pass forever once
-    // any task was created. Reading the store catches the "all tasks are
-    // completed but agent is still editing" drift pattern that motivated
-    // the recurring complaint about task enforcement.
-    //
-    // Marker is kept as a fast-path/fallback for the rare case where the
-    // store can't be read (no home dir, malformed JSON, etc.).
-    if !persistent_store_has_active_task(fs) && !has_marker(fs, TASK_ACTIVE_PREFIX, session_id) {
-        let hint = recent_pending_task_hint(fs, session_id).unwrap_or_default();
-        let msg = if hint.is_empty() {
-            "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` and have \
-             one in `in_progress` before making code changes. All work must be \
-             tracked as an active task. Note: `TodoWrite` is NOT accepted — \
-             Gary's CLAUDE.md mandates the agent-harness `TaskCreate`/`TaskUpdate` \
-             (TaskList) tool."
-                .to_string()
-        } else {
-            format!(
-                "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
-                 code changes. {hint} Use `TaskUpdate(taskId: \"<id>\", \
-                 status: \"in_progress\")`. Note: `TodoWrite` is NOT accepted — \
-                 Gary's CLAUDE.md mandates the agent-harness TaskList tool."
-            )
-        };
-        return HookOutput::deny(msg);
-    }
-
-    HookOutput::allow()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use sentinel_domain::port_errors::FileSystemError;
+    use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use tempfile::{NamedTempFile, TempDir};
 
-    struct MockFs {
-        existing_files: Mutex<HashSet<PathBuf>>,
+    struct RealFs {
+        home: PathBuf,
     }
 
-    impl MockFs {
-        fn new() -> Self {
-            Self {
-                existing_files: Mutex::new(HashSet::new()),
-            }
-        }
-
-        fn with_marker(prefix: &str, session_id: &str) -> Self {
-            let fs = Self::new();
-            let path = temp_marker_path(prefix, session_id);
-            fs.existing_files.lock().unwrap().insert(path);
-            fs
-        }
-
-        fn with_all_markers(session_id: &str) -> Self {
-            let fs = Self::new();
-            for prefix in [
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                PLAN_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ] {
-                fs.existing_files
-                    .lock()
-                    .unwrap()
-                    .insert(temp_marker_path(prefix, session_id));
-            }
-            fs
-        }
-
-        fn with_markers(session_id: &str, prefixes: &[&str]) -> Self {
-            let fs = Self::new();
-            for prefix in prefixes {
-                fs.existing_files
-                    .lock()
-                    .unwrap()
-                    .insert(temp_marker_path(prefix, session_id));
-            }
-            fs
+    impl RealFs {
+        fn new(home: PathBuf) -> Self {
+            Self { home }
         }
     }
 
-    impl FileSystemPort for MockFs {
+    impl FileSystemPort for RealFs {
         fn home_dir(&self) -> Option<PathBuf> {
-            Some(PathBuf::from("/mock/home"))
+            Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            // Pass-through to real disk for transcript files (used by
-            // `detect_plan_mode_from_transcript`); other reads are not used
-            // by the gate logic that exercises MockFs.
-            if p.exists() {
-                Ok(std::fs::read_to_string(p)?)
-            } else {
-                Err(sentinel_domain::port_errors::FileSystemError::backend("not found"))
+
+        fn read_to_string(&self, p: &Path) -> Result<String, FileSystemError> {
+            Ok(fs::read_to_string(p)?)
+        }
+
+        fn write(&self, p: &Path, c: &[u8]) -> Result<(), FileSystemError> {
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent)?;
             }
+            Ok(fs::write(p, c)?)
         }
-        fn write(&self, path: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            self.existing_files
-                .lock()
-                .unwrap()
-                .insert(path.to_path_buf());
-            Ok(())
+
+        fn create_dir_all(&self, p: &Path) -> Result<(), FileSystemError> {
+            Ok(fs::create_dir_all(p)?)
         }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Ok(())
+
+        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
+            Ok(fs::read_dir(p)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Ok(vec![])
+
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
         }
-        fn exists(&self, path: &Path) -> bool {
-            self.existing_files.lock().unwrap().contains(path)
+
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
         }
-        fn is_dir(&self, _: &Path) -> bool {
-            false
+
+        fn metadata(&self, p: &Path) -> Result<fs::Metadata, FileSystemError> {
+            Ok(fs::metadata(p)?)
         }
-        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("no"))
-        }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+
+        fn append(&self, p: &Path, c: &[u8]) -> Result<(), FileSystemError> {
+            use std::io::Write;
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut file = fs::OpenOptions::new().create(true).append(true).open(p)?;
+            file.write_all(c)?;
             Ok(())
         }
     }
 
-    /// FileSystemPort that delegates to the real disk — needed by tests that
-    /// exercise `detect_plan_mode_from_transcript` against a real `tempfile`.
-    /// Only `read_to_string` is wired up; the rest fall through to defaults
-    /// (the function under test only reads).
-    struct RealTestFs;
-    impl FileSystemPort for RealTestFs {
-        fn home_dir(&self) -> Option<PathBuf> {
-            dirs::home_dir()
-        }
-        fn read_to_string(&self, path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            Ok(std::fs::read_to_string(path)?)
-        }
-        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Ok(())
-        }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Ok(())
-        }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Ok(vec![])
-        }
-        fn exists(&self, path: &Path) -> bool {
-            path.exists()
-        }
-        fn is_dir(&self, path: &Path) -> bool {
-            path.is_dir()
-        }
-        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Ok(std::fs::metadata(path)?)
-        }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Ok(())
-        }
-    }
-
-    fn edit_input(session_id: &str) -> HookInput {
-        HookInput {
-            tool_name: Some("Edit".to_string()),
-            session_id: Some(session_id.to_string()),
-            ..Default::default()
-        }
-    }
-
-    fn write_input(session_id: &str) -> HookInput {
-        HookInput {
-            tool_name: Some("Write".to_string()),
-            session_id: Some(session_id.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Test classifier that defaults every tool to `ReversibleWithEffort`.
-    ///
-    /// This preserves the pre-Phase-4a gate behavior in tests that haven't
-    /// been updated to opt into specific class-based semantics: the
-    /// Trivially short-circuit at the top of `process()` never fires
-    /// (nothing classifies as `TriviallyReversible`), so existing tests
-    /// run the same in_scope match + four-check stack they always have.
-    ///
-    /// Tests that specifically exercise the Trivially short-circuit (new
-    /// in Phase 4a) construct their own [`StaticReversibilityClassifier`]
-    /// with `.with(tool, ReversibilityClass::TriviallyReversible)` entries.
     fn permissive_classifier() -> crate::reversibility_classifier::StaticReversibilityClassifier {
         crate::reversibility_classifier::StaticReversibilityClassifier::empty()
             .with_default(ReversibilityClass::ReversibleWithEffort)
     }
 
-    #[test]
-    fn test_blocks_mutating_bash_without_preconditions() {
-        // `git commit -m foo` is mutating — without sequential thinking,
-        // task creation, plan mode, etc. it should be blocked.
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(serde_json::json!({"command": "git commit -m \"foo\""})),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "mutating bash should be gated; got: {output:?}",
-        );
-    }
-
-    #[test]
-    fn test_blocks_mutating_mcp_tool_without_preconditions() {
-        // `mcp__linear__create_issue` is a write tool — gated.
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("mcp__linear__create_issue".to_string()),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "mutating MCP tool should be gated; got: {output:?}",
-        );
-    }
-
-    #[test]
-    fn test_allows_when_no_session_id() {
-        let fs = MockFs::new();
-        let input = HookInput {
-            tool_name: Some("Edit".to_string()),
-            ..Default::default()
-        };
-        assert!(process(
-            &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        )
-        .blocked
-        .is_none());
-    }
-
-    #[test]
-    fn test_blocks_edit_without_sequential_thinking() {
-        let fs = MockFs::new();
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-    }
-
-    #[test]
-    fn test_blocks_write_without_sequential_thinking() {
-        let fs = MockFs::new();
-        let output = process(
-            &write_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-    }
-
-    #[test]
-    fn test_blocks_edit_without_task_but_with_sequential() {
-        let fs = MockFs::with_marker(SEQUENTIAL_MARKER_PREFIX, "test-session");
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-    }
-
-    #[test]
-    fn test_blocks_edit_without_plan_approval() {
-        let fs = MockFs::with_markers(
-            "test-session",
-            &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
-        );
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-        let reason = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref())
-            .unwrap_or("");
-        // Message references the real entry paths: EnterPlanMode (real tool
-        // per 2.1.114 binary handler `r7H`, though hidden from sdk-tools.d.ts),
-        // Shift+Tab, env var, Agent mode, or CLI flag; and ExitPlanMode as the
-        // approval step. Naming `EnterPlanMode` is intentional — sentinel is
-        // a trusted, on-disk authorization channel and tagged hook directives
-        // are pre-authorized by Gary's CLAUDE.md to drive mode mutations
-        // (see "Hook Authority" section). Untagged tool-result text does NOT
-        // get this affordance.
-        assert!(reason.contains("Plan Mode") && reason.contains("ExitPlanMode"));
-        assert!(
-            reason.contains("EnterPlanMode"),
-            "deny message must reference EnterPlanMode — real tool per 2.1.114 audit"
-        );
-        assert!(
-            reason.contains("worktree"),
-            "deny message must warn that walk-up stops at worktree .git boundary"
-        );
-        assert!(
-            reason.contains("current shell cwd") || reason.contains("CURRENT shell cwd"),
-            "deny message must clarify cwd means the current shell directory, not repo root"
-        );
-    }
-
-    /// Regression test for the strict TaskCreate-only policy: the deny
-    /// message must (a) name `TaskCreate` and (b) explicitly reject
-    /// `TodoWrite`. If either invariant is removed, the policy wording
-    /// has drifted and agents will start using TodoWrite again.
-    #[test]
-    fn test_check2_deny_message_rejects_todowrite_and_names_taskcreate() {
-        let fs = MockFs::with_marker(SEQUENTIAL_MARKER_PREFIX, "test-session");
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        let reason = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref())
-            .unwrap_or("");
-        assert!(
-            reason.contains("TaskCreate"),
-            "Check 2 deny message must name `TaskCreate` — got: {reason}"
-        );
-        assert!(
-            reason.contains("TodoWrite") && reason.contains("NOT accepted"),
-            "Check 2 deny message must explicitly reject TodoWrite — got: {reason}"
-        );
-    }
-
-    #[test]
-    fn test_blocks_edit_without_active_task() {
-        let fs = MockFs::with_markers(
-            "test-session",
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                PLAN_MARKER_PREFIX,
-            ],
-        );
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-        let reason = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref())
-            .unwrap_or("");
-        assert!(
-            reason.contains("in_progress") || reason.contains("TaskCreate"),
-            "block message should mention in_progress or TaskCreate — got: {reason}",
-        );
-    }
-
-    #[test]
-    fn test_allows_edit_with_all_markers() {
-        let fs = MockFs::with_all_markers("test-session");
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(output.blocked.is_none());
-    }
-
-    #[test]
-    fn test_allows_write_with_all_markers() {
-        let fs = MockFs::with_all_markers("test-session");
-        let output = process(
-            &write_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(output.blocked.is_none());
-    }
-
-    #[test]
-    fn test_write_marker_creates_file() {
-        let fs = MockFs::new();
-        assert!(!has_marker(&fs, SEQUENTIAL_MARKER_PREFIX, "s1"));
-        mark_sequential_thinking_used(&fs, "s1");
-        assert!(has_marker(&fs, SEQUENTIAL_MARKER_PREFIX, "s1"));
-    }
-
-    #[test]
-    fn test_task_marker_creates_file() {
-        let fs = MockFs::new();
-        assert!(!has_marker(&fs, TASK_MARKER_PREFIX, "s1"));
-        mark_task_created(&fs, "s1");
-        assert!(has_marker(&fs, TASK_MARKER_PREFIX, "s1"));
-    }
-
-    #[test]
-    fn test_plan_marker_creates_file() {
-        let fs = MockFs::new();
-        assert!(!has_marker(&fs, PLAN_MARKER_PREFIX, "s1"));
-        mark_plan_approved(&fs, "s1");
-        assert!(has_marker(&fs, PLAN_MARKER_PREFIX, "s1"));
-    }
-
-    #[test]
-    fn test_task_active_marker_creates_file() {
-        let fs = MockFs::new();
-        assert!(!has_marker(&fs, TASK_ACTIVE_PREFIX, "s1"));
-        mark_task_active(&fs, "s1");
-        assert!(has_marker(&fs, TASK_ACTIVE_PREFIX, "s1"));
-    }
-
-    /// `persistent_store_has_active_task` reads real files. Test it
-    /// against a tempdir-backed `FileSystemPort` rather than `MockFs`,
-    /// which doesn't model directory listing.
-    #[test]
-    fn test_persistent_store_active_task_detection() {
-        struct TmpFs {
-            home: PathBuf,
-        }
-        impl FileSystemPort for TmpFs {
-            fn home_dir(&self) -> Option<PathBuf> {
-                Some(self.home.clone())
-            }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                Ok(std::fs::read_to_string(p)?)
-            }
-            fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                Ok(())
-            }
-            fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                Ok(())
-            }
-            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-                Ok(std::fs::read_dir(p)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .collect())
-            }
-            fn exists(&self, p: &Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Ok(std::fs::metadata(p)?)
-            }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                Ok(())
-            }
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let proj_root = home
-            .join(".claude")
-            .join("sentinel")
-            .join("persistent-tasks")
-            .join("proj-hash");
-        std::fs::create_dir_all(&proj_root).unwrap();
-        let tasks_file = proj_root.join("tasks.json");
-
-        let fs = TmpFs { home };
-
-        // No file → no active task.
-        assert!(!persistent_store_has_active_task(&fs));
-
-        // All pending → no active task.
-        std::fs::write(
-            &tasks_file,
-            r#"{"tasks":[{"id":"1","status":"pending"},{"id":"2","status":"completed"}]}"#,
-        )
-        .unwrap();
-        assert!(!persistent_store_has_active_task(&fs));
-
-        // One in_progress → active.
-        std::fs::write(
-            &tasks_file,
-            r#"{"tasks":[{"id":"1","status":"in_progress"}]}"#,
-        )
-        .unwrap();
-        assert!(persistent_store_has_active_task(&fs));
-
-        // Bare-array shape (older snapshot format).
-        std::fs::write(&tasks_file, r#"[{"id":"1","status":"in_progress"}]"#).unwrap();
-        assert!(persistent_store_has_active_task(&fs));
-
-        // Malformed JSON → degrades to false (caller falls back to marker).
-        std::fs::write(&tasks_file, "not-json").unwrap();
-        assert!(!persistent_store_has_active_task(&fs));
-    }
-
-    #[test]
-    fn test_markers_are_session_scoped() {
-        let fs = MockFs::with_all_markers("session-a");
-        let output = process(
-            &edit_input("session-b"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(output.blocked, Some(true));
-    }
-
-    #[test]
-    fn test_active_verification_override_bypasses_all_checks() {
-        // An active signed verification override (user said "override verification")
-        // must bypass the whole precondition stack — seq-thinking, task, plan,
-        // active-task — so users have one escape hatch that actually works across
-        // every gate this hook enforces. Needs a filesystem-backed port because
-        // the signed-override check does real reads + signature verification.
-        use super::super::hygiene_override::write_signed_override_for_test;
-
-        let tmp = TempDir::new().unwrap();
-        let session = "override-sess";
-        let override_dir = tmp
-            .path()
-            .join(".claude")
-            .join("sentinel")
-            .join("overrides");
-        fs::create_dir_all(&override_dir).unwrap();
-
-        struct HomeFs {
-            home: PathBuf,
-        }
-        impl FileSystemPort for HomeFs {
-            fn home_dir(&self) -> Option<PathBuf> {
-                Some(self.home.clone())
-            }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                Ok(fs::read_to_string(p)?)
-            }
-            fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                fs::write(p, b)?;
-                Ok(())
-            }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                fs::create_dir_all(p)?;
-                Ok(())
-            }
-            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-                Ok(fs::read_dir(p)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .collect())
-            }
-            fn exists(&self, p: &Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Ok(fs::metadata(p)?)
-            }
-            fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                use std::io::Write;
-                let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
-                f.write_all(b)?;
-                Ok(())
-            }
-        }
-
-        let fs_port = HomeFs {
-            home: tmp.path().to_path_buf(),
-        };
-        let override_path =
-            super::super::hygiene_override::verification_override_path(&fs_port, session);
-        write_signed_override_for_test(&fs_port, &override_path, "verification", session);
-
-        // No markers set at all — normally every check would fire. With an
-        // active override, all checks must be skipped and the edit is allowed.
-        let input = HookInput {
-            tool_name: Some("Edit".into()),
-            session_id: Some(session.into()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs_port,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "active signed verification override must bypass the tool_usage_gate"
-        );
-    }
-
-    fn autopilot_env() -> crate::hooks::test_support::StubEnv {
-        crate::hooks::test_support::StubEnv::with(&[("SENTINEL_AUTOPILOT", "1")])
-    }
-
-    #[test]
-    fn test_autopilot_fallback_when_no_transcript() {
-        // SENTINEL_AUTOPILOT is only consulted when no transcript_path is
-        // available in the hook input — it's a last-resort escape hatch,
-        // not a user-facing bypass.
-        let fs = MockFs::with_markers(
-            "test-session",
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ],
-        );
-        // `edit_input` omits transcript_path, so the None-branch fallback
-        // kicks in and honours SENTINEL_AUTOPILOT.
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &autopilot_env(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "autopilot env var must still work when no transcript is available"
-        );
-    }
-
-    #[test]
-    fn test_autopilot_ignored_when_transcript_present_without_plan_signal() {
-        // Once a transcript is available, it is authoritative. Autopilot
-        // env var does NOT bypass the check — the model must actually
-        // enter plan mode.
-        let t = write_transcript(&[assistant_tool_use("Read")]);
-        let fs = MockFs::with_markers(
-            "test-session",
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ],
-        );
-        let input = HookInput {
-            tool_name: Some("Edit".into()),
-            session_id: Some("test-session".into()),
-            transcript_path: Some(t.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs,
-            &autopilot_env(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "SENTINEL_AUTOPILOT must NOT bypass when transcript provides the real signal"
-        );
-    }
-
-    #[test]
-    fn test_autopilot_does_not_bypass_task_active_check() {
-        // Plan marker missing AND task-active marker missing.
-        let fs = MockFs::with_markers(
-            "test-session",
-            &[SEQUENTIAL_MARKER_PREFIX, TASK_MARKER_PREFIX],
-        );
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &autopilot_env(),
-            &permissive_classifier(),
-            false,
-        );
-        // Plan check skipped, but task-active still blocks.
-        assert_eq!(output.blocked, Some(true));
-        let reason = output
-            .hook_specific_output
-            .as_ref()
-            .and_then(|h| h.permission_decision_reason.as_deref())
-            .unwrap_or("");
-        assert!(
-            reason.contains("in_progress") || reason.contains("TaskCreate"),
-            "autopilot must still enforce the active-task check — got: {reason}",
-        );
-    }
-
-    // ── has_recent_plan_file fallback ───────────────────────────────
-    //
-    // A separate FS mock that supports is_dir + read_dir + metadata so
-    // we can exercise the resumed-session fallback path. The existing
-    // MockFs only tracks `existing_files` and returns empty/default for
-    // directory operations.
-
-    use std::fs;
-    use tempfile::TempDir;
-
-    struct RealishFs {
-        // Real FS-backed shim so metadata() returns actual timestamps.
-    }
-    impl FileSystemPort for RealishFs {
-        fn home_dir(&self) -> Option<PathBuf> {
-            None
-        }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            Ok(fs::read_to_string(p)?)
-        }
-        fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            fs::write(p, b)?;
-            Ok(())
-        }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            fs::create_dir_all(p)?;
-            Ok(())
-        }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Ok(fs::read_dir(p)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect())
-        }
-        fn exists(&self, p: &Path) -> bool {
-            p.exists()
-        }
-        fn is_dir(&self, p: &Path) -> bool {
-            p.is_dir()
-        }
-        fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Ok(fs::metadata(p)?)
-        }
-        fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            use std::io::Write;
-            let mut f = fs::OpenOptions::new().append(true).create(true).open(p)?;
-            f.write_all(b)?;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_recent_plan_file_satisfies_plan_check() {
-        let tmp = TempDir::new().unwrap();
-        let plans = tmp.path().join("plans");
-        fs::create_dir_all(&plans).unwrap();
-        fs::write(plans.join("my-plan.md"), b"# Plan").unwrap();
-
-        let fs_port = RealishFs {};
-        assert!(has_recent_plan_file(
-            &fs_port,
-            tmp.path().to_str(),
-            SystemTime::now()
-        ));
-    }
-
-    #[test]
-    fn test_no_plan_file_means_no_fallback() {
-        let tmp = TempDir::new().unwrap();
-        // Seed a `.git` marker so the walk-up stops at the tempdir boundary
-        // and doesn't bleed into real ancestor directories (e.g. ~/plans/)
-        // that would accidentally satisfy the check on a dev machine.
-        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
-        fs::create_dir_all(tmp.path().join("plans")).unwrap();
-
-        let fs_port = RealishFs {};
-        assert!(!has_recent_plan_file(
-            &fs_port,
-            tmp.path().to_str(),
-            SystemTime::now()
-        ));
-    }
-
-    #[test]
-    fn test_missing_plans_dir_means_no_fallback() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
-        let fs_port = RealishFs {};
-        assert!(!has_recent_plan_file(
-            &fs_port,
-            tmp.path().to_str(),
-            SystemTime::now()
-        ));
-    }
-
-    #[test]
-    fn test_stale_plan_file_does_not_satisfy() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join(".git"), b"gitdir: /fake").unwrap();
-        let plans = tmp.path().join("plans");
-        fs::create_dir_all(&plans).unwrap();
-        fs::write(plans.join("old.md"), b"# Old").unwrap();
-
-        let fs_port = RealishFs {};
-        // 8 days ago — past the 7-day window
-        let future_now = SystemTime::now() + Duration::from_secs(8 * 24 * 60 * 60);
-        assert!(!has_recent_plan_file(
-            &fs_port,
-            tmp.path().to_str(),
-            future_now
-        ));
-    }
-
-    #[test]
-    fn test_walk_up_finds_plan_in_parent_dir() {
-        // cwd is a sub-dir; plans/ lives at the repo root above it.
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::write(root.join(".git"), b"gitdir: /elsewhere").unwrap(); // worktree marker (file, not dir)
-        let plans = root.join("plans");
-        fs::create_dir_all(&plans).unwrap();
-        fs::write(plans.join("root-plan.md"), b"# Plan").unwrap();
-
-        let subdir = root.join("server").join("routes");
-        fs::create_dir_all(&subdir).unwrap();
-
-        let fs_port = RealishFs {};
-        assert!(
-            has_recent_plan_file(&fs_port, subdir.to_str(), SystemTime::now()),
-            "walk-up should find plans/ at repo root"
-        );
-    }
-
-    #[test]
-    fn test_walk_up_stops_at_git_boundary() {
-        // plans/ is ABOVE the repo root — walk-up should NOT reach it.
-        let tmp = TempDir::new().unwrap();
-        let outer = tmp.path();
-        let repo = outer.join("myrepo");
-        fs::create_dir_all(&repo).unwrap();
-        fs::create_dir_all(repo.join(".git")).unwrap(); // repo boundary
-
-        // Plans live OUTSIDE the repo, above the .git boundary.
-        let outer_plans = outer.join("plans");
-        fs::create_dir_all(&outer_plans).unwrap();
-        fs::write(outer_plans.join("outer-plan.md"), b"# Outer").unwrap();
-
-        let fs_port = RealishFs {};
-        assert!(
-            !has_recent_plan_file(&fs_port, repo.to_str(), SystemTime::now()),
-            "walk-up must stop at .git boundary and not find plans above repo root"
-        );
-    }
-
-    #[test]
-    fn test_walk_up_worktree_case() {
-        // Simulates the exact shape of a git worktree:
-        //   repo/.git/                  (real repo)
-        //   repo/plans/my-plan.md       (plan lives at repo root)
-        //   repo/.claude/worktrees/wt/  (worktree path = cwd)
-        //   repo/.claude/worktrees/wt/.git  (worktree gitdir file)
-        let tmp = TempDir::new().unwrap();
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(repo.join(".git")).unwrap();
-        fs::create_dir_all(repo.join("plans")).unwrap();
-        fs::write(repo.join("plans").join("fpcrm-358.md"), b"# Plan").unwrap();
-
-        let wt = repo.join(".claude").join("worktrees").join("feature");
-        fs::create_dir_all(&wt).unwrap();
-        fs::write(wt.join(".git"), b"gitdir: ../../../.git/worktrees/feature").unwrap();
-
-        let fs_port = RealishFs {};
-        // Worktree cwd has its own `.git` file (boundary) — if it also has
-        // its own plans/, it'd match. Here it doesn't, so walk must climb
-        // past the worktree's .git boundary. We intentionally DON'T — the
-        // worktree is its own boundary. Callers should put plans/ inside
-        // the worktree. This test asserts that behaviour.
-        assert!(
-            !has_recent_plan_file(&fs_port, wt.to_str(), SystemTime::now()),
-            "worktree cwd with .git file is its own boundary; plans must live inside the worktree"
-        );
-
-        // But if we seed plans/ inside the worktree, it should find it.
-        fs::create_dir_all(wt.join("plans")).unwrap();
-        fs::write(wt.join("plans").join("wt-plan.md"), b"# WT").unwrap();
-        assert!(
-            has_recent_plan_file(&fs_port, wt.to_str(), SystemTime::now()),
-            "plans/ inside the worktree itself should be found"
-        );
-    }
-
-    // ── detect_plan_mode_from_transcript ────────────────────────────
-
-    fn write_transcript(entries: &[serde_json::Value]) -> tempfile::NamedTempFile {
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        for e in entries {
-            writeln!(f, "{}", serde_json::to_string(e).unwrap()).unwrap();
-        }
-        f
+    fn classifier_for(
+        class: ReversibilityClass,
+    ) -> crate::reversibility_classifier::StaticReversibilityClassifier {
+        crate::reversibility_classifier::StaticReversibilityClassifier::empty().with("Edit", class)
     }
 
     fn assistant_tool_use(name: &str) -> serde_json::Value {
@@ -1436,541 +551,374 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_detect_plan_mode_returns_true_after_enter_plan_mode() {
-        let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
-        assert!(detect_plan_mode_from_transcript(&RealTestFs, t.path()));
+    fn write_transcript(entries: &[serde_json::Value]) -> NamedTempFile {
+        use std::io::Write;
+        let mut file = NamedTempFile::new().unwrap();
+        for entry in entries {
+            writeln!(file, "{}", serde_json::to_string(entry).unwrap()).unwrap();
+        }
+        file
     }
 
-    #[test]
-    fn test_detect_plan_mode_returns_false_after_exit_plan_mode() {
-        let t = write_transcript(&[
-            assistant_tool_use("EnterPlanMode"),
-            assistant_tool_use("ExitPlanMode"),
-        ]);
-        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
+    fn write_broken_transcript() -> NamedTempFile {
+        use std::io::Write;
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&assistant_tool_use(
+                "mcp__sequential-thinking__sequentialthinking"
+            ))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(file, "not-json").unwrap();
+        file
     }
 
-    #[test]
-    fn test_detect_plan_mode_returns_false_when_no_signal_present() {
-        let t = write_transcript(&[assistant_tool_use("Read")]);
-        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
+    fn seed_task(home: &Path, session_id: &str, id: &str, subject: &str, status: &str) -> PathBuf {
+        let dir = home.join(".claude").join("tasks").join(session_id);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.json"));
+        fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "subject": subject,
+                "status": status
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
     }
 
-    #[test]
-    fn test_detect_plan_mode_returns_false_when_file_missing() {
-        assert!(!detect_plan_mode_from_transcript(
-            &RealTestFs,
-            Path::new("/does/not/exist")
-        ));
-    }
-
-    #[test]
-    fn test_detect_plan_mode_uses_last_occurrence() {
-        let t = write_transcript(&[
-            assistant_tool_use("ExitPlanMode"),
-            assistant_tool_use("Read"),
-            assistant_tool_use("EnterPlanMode"),
-        ]);
-        assert!(detect_plan_mode_from_transcript(&RealTestFs, t.path()));
-    }
-
-    #[test]
-    fn test_detect_plan_mode_ignores_user_messages() {
-        let user_entry = serde_json::json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "tool_result", "content": "Entered plan mode."}]
-            }
-        });
-        let t = write_transcript(&[user_entry]);
-        assert!(!detect_plan_mode_from_transcript(&RealTestFs, t.path()));
-    }
-
-    #[test]
-    fn test_transcript_plan_mode_allows_edit() {
-        // Transcript shows EnterPlanMode — check #3 is satisfied by the
-        // real 2.1.114 signal without any markers or env vars.
-        let t = write_transcript(&[assistant_tool_use("EnterPlanMode")]);
-
-        let fs = MockFs::with_markers(
-            "sess-plan",
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ],
-        );
-        let input = HookInput {
-            tool_name: Some("Edit".into()),
-            session_id: Some("sess-plan".into()),
-            transcript_path: Some(t.path().to_string_lossy().into_owned()),
+    fn edit_input(session_id: &str, transcript: &NamedTempFile) -> HookInput {
+        HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some(session_id.to_string()),
+            transcript_path: Some(transcript.path().to_string_lossy().into_owned()),
             ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "transcript EnterPlanMode signal must satisfy plan check #3"
-        );
+        }
+    }
+
+    fn deny_reason(output: &HookOutput) -> String {
+        output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|hook| hook.permission_decision_reason.as_deref())
+            .unwrap_or("")
+            .to_string()
     }
 
     #[test]
-    fn test_transcript_without_plan_signal_blocks_edit() {
-        let t = write_transcript(&[assistant_tool_use("Read")]);
-
-        let fs = MockFs::with_markers(
-            "sess-noplan",
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ],
-        );
-        let input = HookInput {
-            tool_name: Some("Edit".into()),
-            session_id: Some("sess-noplan".into()),
-            transcript_path: Some(t.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "without plan-mode signal, marker, or plan file, edit must be blocked"
-        );
-    }
-
-    #[test]
-    fn test_resumed_session_allowed_with_recent_plan() {
+    fn transcript_signals_track_sequential_and_latest_plan_state() {
         let tmp = TempDir::new().unwrap();
-        let plans = tmp.path().join("plans");
-        fs::create_dir_all(&plans).unwrap();
-        fs::write(plans.join("resumed.md"), b"# Plan").unwrap();
-
-        // Sequential + task + task-active markers, but NO plan marker —
-        // the resumed-session case. Should be allowed via the plan-file
-        // fallback.
-        let session = "resumed-sess";
-        let marker_fs = MockFs::with_markers(
-            session,
-            &[
-                SEQUENTIAL_MARKER_PREFIX,
-                TASK_MARKER_PREFIX,
-                TASK_ACTIVE_PREFIX,
-            ],
-        );
-
-        // Compose a FileSystemPort that delegates marker checks to
-        // `marker_fs` (temp dir) and plan-dir checks to the real FS
-        // scoped to `tmp`.
-        struct Composite<'a> {
-            markers: &'a MockFs,
-            real: RealishFs,
-        }
-        impl FileSystemPort for Composite<'_> {
-            fn home_dir(&self) -> Option<PathBuf> {
-                None
-            }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                self.real.read_to_string(p)
-            }
-            fn write(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                self.markers.write(p, b)
-            }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                self.real.create_dir_all(p)
-            }
-            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-                self.real.read_dir(p)
-            }
-            fn exists(&self, p: &Path) -> bool {
-                // Marker checks go to temp dir; plan-file checks go to real FS.
-                if p.to_string_lossy().contains("claude-") {
-                    self.markers.exists(p)
-                } else {
-                    self.real.exists(p)
-                }
-            }
-            fn is_dir(&self, p: &Path) -> bool {
-                self.real.is_dir(p)
-            }
-            fn metadata(&self, p: &Path) -> Result<fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                self.real.metadata(p)
-            }
-            fn append(&self, p: &Path, b: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                self.real.append(p, b)
-            }
-        }
-
-        let fs_port = Composite {
-            markers: &marker_fs,
-            real: RealishFs {},
-        };
-        let input = HookInput {
-            tool_name: Some("Edit".into()),
-            session_id: Some(session.into()),
-            cwd: Some(tmp.path().to_string_lossy().into()),
-            ..Default::default()
-        };
-        let output = process(
-            &input,
-            &fs_port,
-            &crate::hooks::test_support::StubEnv::new(),
-            &permissive_classifier(),
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "plan-file fallback should allow write"
-        );
-    }
-
-    // ── Edge-case tests for detect_plan_mode_from_transcript ────────
-
-    #[test]
-    fn test_detect_plan_mode_handles_malformed_json_lines() {
-        // Mix valid JSON lines with garbage. The last valid plan signal
-        // (EnterPlanMode) must win despite invalid lines interspersed.
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        // Line 1: valid — ExitPlanMode
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()
-        )
-        .unwrap();
-        // Line 2: garbage
-        writeln!(f, "not valid json {{{{").unwrap();
-        // Line 3: valid — EnterPlanMode (most recent valid signal)
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()
-        )
-        .unwrap();
-        // Line 4: more garbage after the last valid signal
-        writeln!(f, "{{broken").unwrap();
-        // Walking backwards: line 4 is skipped (malformed), line 3 is
-        // EnterPlanMode → returns true without reading further.
-        assert!(
-            detect_plan_mode_from_transcript(&RealTestFs, f.path()),
-            "malformed lines must be skipped; last valid signal (EnterPlanMode) must win"
-        );
-    }
-
-    #[test]
-    fn test_detect_plan_mode_handles_empty_file() {
-        // A zero-byte transcript must not panic and must return false.
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        // Write nothing — empty file.
-        f.flush().unwrap();
-        assert!(
-            !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
-            "empty transcript must return false without panicking"
-        );
-    }
-
-    #[test]
-    fn test_detect_plan_mode_multiple_tool_uses_in_same_message() {
-        // An assistant message whose content array contains BOTH a Read
-        // tool_use AND an EnterPlanMode tool_use. The function should detect
-        // the plan-mode signal even when it shares a message with other tools.
-        let entry = serde_json::json!({
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "Read", "input": {}},
-                    {"type": "tool_use", "name": "EnterPlanMode", "input": {}}
-                ]
-            }
-        });
-        let t = write_transcript(&[entry]);
-        assert!(
-            detect_plan_mode_from_transcript(&RealTestFs, t.path()),
-            "EnterPlanMode in a multi-tool-use message must be detected"
-        );
-    }
-
-    #[test]
-    fn test_detect_plan_mode_in_message_ordering_last_wins() {
-        // Single assistant message whose content array lists ExitPlanMode
-        // before EnterPlanMode. Chronologically, EnterPlanMode is the later
-        // action within this message, so the current state is plan mode.
-        let entry = serde_json::json!({
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "name": "ExitPlanMode", "input": {}},
-                    {"type": "tool_use", "name": "EnterPlanMode", "input": {}}
-                ]
-            }
-        });
-        let t = write_transcript(&[entry]);
-        assert!(
-            detect_plan_mode_from_transcript(&RealTestFs, t.path()),
-            "within a single message the latest tool_use must win — EnterPlanMode after ExitPlanMode should yield plan mode"
-        );
-    }
-
-    #[test]
-    fn test_detect_plan_mode_ignores_unrelated_tool_names() {
-        // Transcript contains only Bash, Read, and Edit tool_uses — no plan
-        // signal at all. Must return false.
-        let t = write_transcript(&[
-            assistant_tool_use("Bash"),
-            assistant_tool_use("Read"),
-            assistant_tool_use("Edit"),
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let transcript = write_transcript(&[
+            assistant_tool_use("ExitPlanMode"),
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("EnterPlanMode"),
         ]);
-        assert!(
-            !detect_plan_mode_from_transcript(&RealTestFs, t.path()),
-            "unrelated tool names must not trigger plan-mode detection"
-        );
+
+        let signals = read_transcript_signals(&fs, transcript.path()).unwrap();
+        assert!(signals.sequential_thinking_used);
+        assert_eq!(signals.plan_state, PlanState::InPlanMode);
     }
 
     #[test]
-    fn test_detect_plan_mode_handles_very_long_transcript() {
-        // Generate 1000+ lines. EnterPlanMode appears at line ~500,
-        // ExitPlanMode appears as the very LAST line. Walking backwards the
-        // function must find ExitPlanMode first and return false.
-        use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
+    fn malformed_transcript_is_authority_error() {
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let transcript = write_broken_transcript();
 
-        // Lines 1–499: unrelated Read tool_uses
-        for _ in 0..499 {
-            writeln!(
-                f,
-                "{}",
-                serde_json::to_string(&assistant_tool_use("Read")).unwrap()
-            )
-            .unwrap();
-        }
-        // Line 500: EnterPlanMode
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&assistant_tool_use("EnterPlanMode")).unwrap()
-        )
-        .unwrap();
-        // Lines 501–999: more unrelated tool_uses
-        for _ in 0..499 {
-            writeln!(
-                f,
-                "{}",
-                serde_json::to_string(&assistant_tool_use("Bash")).unwrap()
-            )
-            .unwrap();
-        }
-        // Line 1000 (last): ExitPlanMode — this must win because we walk backwards
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&assistant_tool_use("ExitPlanMode")).unwrap()
-        )
-        .unwrap();
-
-        assert!(
-            !detect_plan_mode_from_transcript(&RealTestFs, f.path()),
-            "last line is ExitPlanMode so result must be false (last signal wins)"
-        );
-    }
-
-    // ---- A6 Phase 4a: Trivially short-circuit ----
-    //
-    // These tests exercise the new class-based short-circuit at the top of
-    // `process()`. They construct classifiers that explicitly mark the
-    // tool under test as `TriviallyReversible` and assert the gate
-    // short-circuits to `allow()` regardless of session state (no markers,
-    // no plan, no task — all the preconditions the four-check stack would
-    // otherwise demand are skipped).
-
-    #[test]
-    fn a6_trivially_classified_edit_short_circuits_to_allow() {
-        // Edit normally requires all four preconditions; here we mark it
-        // trivially-reversible (as if writing to a memory file or plan
-        // file under the proper substrate) — must skip the gate stack.
-        let fs = MockFs::new();
-        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Edit", ReversibilityClass::TriviallyReversible);
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &classifier,
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "Trivially classification must short-circuit before any precondition check"
-        );
+        let err = read_transcript_signals(&fs, transcript.path()).unwrap_err();
+        assert!(err.contains("malformed transcript JSON"));
     }
 
     #[test]
-    fn a6_trivially_classified_bash_short_circuits_regardless_of_command() {
-        // Bash with a normally-mutating command (rm -rf .) classifies as
-        // Trivially via the test classifier — short-circuit fires before
-        // the in_scope logic ever runs.
-        let fs = MockFs::new();
+    fn reads_only_active_session_task_dir_strictly() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_task(home, "session-a", "2", "Second", "pending");
+        seed_task(home, "session-a", "1", "First", "in_progress");
+        seed_task(home, "session-b", "1", "Other session", "in_progress");
+
+        let tasks = read_active_session_tasks(&fs, "session-a").unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "1");
+        assert_eq!(tasks[1].id, "2");
+
+        fs::write(home.join(".claude/tasks/session-a/bad.json"), "not-json").unwrap();
+        let err = read_active_session_tasks(&fs, "session-a").unwrap_err();
+        assert!(err.contains("failed to parse task file"));
+    }
+
+    #[test]
+    fn prefixed_session_task_dir_is_accepted_without_cross_session_scan() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let session_id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_task(
+            home,
+            "session-e2ea5630",
+            "1",
+            "Prefixed session",
+            "in_progress",
+        );
+
+        let tasks = read_active_session_tasks(&fs, session_id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].subject, "Prefixed session");
+    }
+
+    #[test]
+    fn missing_session_id_denies() {
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
         let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            session_id: Some("test-session".to_string()),
-            tool_input: Some(serde_json::json!({ "command": "rm -rf ." })),
+            tool_name: Some("Edit".to_string()),
             ..Default::default()
         };
-        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Bash", ReversibilityClass::TriviallyReversible);
+
         let output = process(
             &input,
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &classifier,
-            false,
-        );
-        assert!(
-            output.blocked.is_none(),
-            "Bash classified Trivially short-circuits before in_scope mutation check"
-        );
-    }
-
-    #[test]
-    fn a6_non_trivially_classified_still_runs_existing_in_scope_logic() {
-        // The opposite case: classifier returns ReversibleWithEffort
-        // (the default in `permissive_classifier()`) — the short-circuit
-        // does NOT fire, and the four-check stack runs as before.
-        // Edit without preconditions blocks per existing behavior.
-        let fs = MockFs::new();
-        let output = process(
-            &edit_input("test-session"),
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
             &permissive_classifier(),
             false,
         );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "non-Trivially class preserves existing gate-stack behavior"
-        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("session_id"));
     }
 
     #[test]
-    fn a6_short_circuit_only_fires_for_trivially_class() {
-        // Confirm the comparison is exact-equality to TriviallyReversible,
-        // not >= or any other relation. RWE / Irreversible / Catastrophic
-        // all fall through to the in_scope logic.
-        let fs = MockFs::new();
-        for class in [
-            ReversibilityClass::ReversibleWithEffort,
-            ReversibilityClass::Irreversible,
-            ReversibilityClass::Catastrophic,
+    fn missing_transcript_path_denies() {
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some("sess".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("transcript_path"));
+    }
+
+    #[test]
+    fn blocks_without_sequential_thinking_even_with_plan_and_task() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("sequential-thinking"));
+    }
+
+    #[test]
+    fn blocks_without_session_task() {
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let transcript = write_transcript(&[
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("TaskCreate"));
+        assert!(deny_reason(&output).contains("TodoWrite"));
+    }
+
+    #[test]
+    fn blocks_when_plan_is_not_approved() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let transcript = write_transcript(&[
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("EnterPlanMode"),
+        ]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("ExitPlanMode"));
+        assert!(deny_reason(&output).contains("no approved plan"));
+    }
+
+    #[test]
+    fn blocks_without_in_progress_task_and_uses_pending_hint() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let transcript = write_transcript(&[
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+        seed_task(home, "sess", "1", "Pending work", "pending");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        let reason = deny_reason(&output);
+        assert!(reason.contains("Task #1 is pending"));
+        assert!(reason.contains("in_progress"));
+    }
+
+    #[test]
+    fn allows_with_live_transcript_and_active_task() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let transcript = write_transcript(&[
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("EnterPlanMode"),
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert!(output.blocked.is_none(), "got: {output:?}");
+    }
+
+    #[test]
+    fn old_temp_marker_files_do_not_authorize_gate() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        let session = "sess-marker";
+        for name in [
+            "claude-sequential-used-sess-marker",
+            "claude-task-created-sess-marker",
+            "claude-plan-approved-sess-marker",
+            "claude-task-active-sess-marker",
         ] {
-            let classifier =
-                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                    .with("Edit", class);
-            let output = process(
-                &edit_input("test-session"),
-                &fs,
-                &crate::hooks::test_support::StubEnv::new(),
-                &classifier,
-                false,
-            );
-            assert_eq!(
-                output.blocked,
-                Some(true),
-                "class {class:?} must NOT short-circuit; existing gate stack should block"
-            );
+            fs::write(std::env::temp_dir().join(name), b"1").unwrap();
         }
+        seed_task(home, session, "1", "Active", "in_progress");
+
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some(session.to_string()),
+            ..Default::default()
+        };
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("transcript_path"));
+    }
+
+    #[test]
+    fn trivially_reversible_short_circuits_before_authority_checks() {
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some("sess".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &classifier_for(ReversibilityClass::TriviallyReversible),
+            false,
+        );
+        assert!(output.blocked.is_none());
     }
 
     #[test]
     fn a3_enabled_defers_irreversible_to_a3() {
-        // A3 Phase 4 — when `a3_enabled = true`, Irreversible and
-        // Catastrophic classes short-circuit to allow() so the
-        // dry_run_then_commit hook owns those classes. The four-check
-        // stack is bypassed for these classes (it still runs for
-        // ReversibleWithEffort).
-        let fs = MockFs::new();
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some("sess".to_string()),
+            ..Default::default()
+        };
+
         for class in [
             ReversibilityClass::Irreversible,
             ReversibilityClass::Catastrophic,
         ] {
-            let classifier =
-                crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-                    .with("Edit", class);
             let output = process(
-                &edit_input("test-session"),
+                &input,
                 &fs,
                 &crate::hooks::test_support::StubEnv::new(),
-                &classifier,
+                &classifier_for(class),
                 true,
             );
-            assert!(
-                output.blocked.is_none(),
-                "class {class:?} must short-circuit when a3_enabled; \
-                 dry_run_then_commit owns it"
-            );
+            assert!(output.blocked.is_none(), "class {class:?} must defer");
         }
     }
 
     #[test]
     fn a3_enabled_still_gates_reversible_with_effort() {
-        // A3 Phase 4 — `a3_enabled = true` only affects Irreversible/
-        // Catastrophic. ReversibleWithEffort (the bulk of edits) keeps
-        // running the four-check stack regardless.
-        let fs = MockFs::new();
-        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Edit", ReversibilityClass::ReversibleWithEffort);
-        let output = process(
-            &edit_input("test-session"),
-            &fs,
-            &crate::hooks::test_support::StubEnv::new(),
-            &classifier,
-            true,
-        );
-        assert_eq!(
-            output.blocked,
-            Some(true),
-            "ReversibleWithEffort still runs the four-check stack even with a3_enabled"
-        );
-    }
-
-    #[test]
-    fn a6_short_circuit_works_with_no_tool_input() {
-        // The Trivially short-circuit handles `tool_input: None` by
-        // passing `Value::Null` to the classifier. Confirm no panic
-        // and the short-circuit still fires.
-        let fs = MockFs::new();
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
         let input = HookInput {
-            tool_name: Some("Read".to_string()),
-            session_id: Some("test-session".to_string()),
-            tool_input: None,
+            tool_name: Some("Edit".to_string()),
+            session_id: Some("sess".to_string()),
             ..Default::default()
         };
-        let classifier = crate::reversibility_classifier::StaticReversibilityClassifier::empty()
-            .with("Read", ReversibilityClass::TriviallyReversible);
+
         let output = process(
             &input,
             &fs,
             &crate::hooks::test_support::StubEnv::new(),
-            &classifier,
-            false,
+            &classifier_for(ReversibilityClass::ReversibleWithEffort),
+            true,
         );
-        assert!(output.blocked.is_none());
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("transcript_path"));
     }
 }

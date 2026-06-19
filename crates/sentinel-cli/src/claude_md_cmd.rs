@@ -8,6 +8,7 @@
 //! Both surfaces call the same functions here — keep the shared contract.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -110,10 +111,102 @@ fn edit_template_at(path: &Path, find: &str, replace: &str) -> Result<()> {
 /// the call — this is an admin action and we want best-effort behaviour.
 pub fn restart_all_mcps() -> Result<Value> {
     let config_path = user_claude_json_path()?;
-    let extra_dirs: Vec<PathBuf> = dirs::home_dir()
+    let extra_dirs: Vec<PathBuf> = sentinel_infrastructure::paths::home_root()
         .map(|h| vec![h.join(".cargo").join("bin")])
         .unwrap_or_default();
     restart_all_mcps_with(&config_path, &extra_dirs)
+}
+
+pub async fn run_operational_tool_graph_audit(
+    operation: &str,
+    input: &Value,
+    result: &Value,
+) -> Result<Value> {
+    let identifier = format!(
+        "{operation}:input-{}:result-{}",
+        sentinel_infrastructure::operational_tool_graph::sha256_json(input),
+        sentinel_infrastructure::operational_tool_graph::sha256_json(result)
+    );
+    let state = sentinel_infrastructure::operational_tool_graph::OperationalToolState::from_result(
+        identifier, operation, input, result,
+    );
+    let graph = sentinel_infrastructure::operational_tool_graph::build_operational_tool_graph()
+        .await
+        .map_err(|e| anyhow!("build operational tool graph: {e}"))?;
+    let run =
+        sentinel_infrastructure::operational_tool_graph::run_operational_tool_decision_report(
+            &graph, state,
+        )
+        .await
+        .map_err(|e| anyhow!("run operational tool graph: {e}"))?;
+    let authorization = run
+        .operational_tool_authorization()
+        .map_err(|e| anyhow!("operational tool graph authorization failed: {e}"))?
+        .ok_or_else(|| anyhow!("operational tool graph produced no terminal checkpoint"))?;
+    let graph_runs = sentinel_infrastructure::paths::sentinel_root()
+        .join("metrics")
+        .join("operational-tool.graph-runs.jsonl");
+    if let Some(parent) = graph_runs.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create operational tool graph audit dir {}",
+                parent.display()
+            )
+        })?;
+    }
+    let row = json!({
+        "workflow_authority": "langgraph",
+        "graph": "operational_tool",
+        "operation": operation,
+        "decision": sentinel_infrastructure::operational_tool_graph::
+            operational_tool_decision_label(authorization.decision()),
+        "authorization_checkpoint": authorization.checkpoint_ref(),
+        "thread_id": run.thread_id.clone(),
+        "run": run,
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&graph_runs)
+        .with_context(|| format!("open operational tool graph audit {}", graph_runs.display()))?;
+    serde_json::to_writer(&mut file, &row).with_context(|| {
+        format!(
+            "write operational tool graph audit {}",
+            graph_runs.display()
+        )
+    })?;
+    file.write_all(b"\n").with_context(|| {
+        format!(
+            "terminate operational tool graph audit {}",
+            graph_runs.display()
+        )
+    })?;
+    Ok(json!({
+        "workflow_authority": "langgraph",
+        "graph": "operational_tool",
+        "operation": operation,
+        "graph_runs_path": graph_runs,
+        "decision": sentinel_infrastructure::operational_tool_graph::
+            operational_tool_decision_label(authorization.decision()),
+        "authorization_checkpoint": authorization.checkpoint_ref(),
+        "thread_id": row["thread_id"].clone(),
+        "run": row["run"].clone(),
+    }))
+}
+
+#[must_use]
+pub fn attach_operational_tool_graph_audit(mut result: Value, graph_audit: Value) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("workflow_authority".to_string(), json!("langgraph"));
+        object.insert("graph_audit".to_string(), graph_audit);
+        result
+    } else {
+        json!({
+            "workflow_authority": "langgraph",
+            "result": result,
+            "graph_audit": graph_audit,
+        })
+    }
 }
 
 /// Inner implementation with explicit config path + extra resolver dirs so
@@ -174,7 +267,8 @@ fn restart_all_mcps_with(config_path: &Path, extra_dirs: &[PathBuf]) -> Result<V
 
 /// Path to `~/.claude.json`. Returns an error if $HOME/$USERPROFILE is unset.
 fn user_claude_json_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = sentinel_infrastructure::paths::home_root()
+        .ok_or_else(|| anyhow!("cannot determine home directory"))?;
     Ok(home.join(".claude.json"))
 }
 
@@ -403,7 +497,7 @@ mod tests {
         let result = restart_all_mcps_with(&config_path, &[]).unwrap();
 
         // Restore PATH before any assertion that could panic — poisoning is
-        // handled by the `into_inner` fallback above but this keeps the env
+        // handled by the `into_inner` recovery path above but this keeps the env
         // clean for neighbouring tests.
         match prev_path {
             Some(v) => std::env::set_var("PATH", v),
@@ -421,5 +515,67 @@ mod tests {
             .modified()
             .unwrap();
         assert!(new_mtime > old, "mtime should have advanced");
+    }
+
+    #[tokio::test]
+    async fn operational_tool_graph_audit_emits_checkpoint_evidence() {
+        let _lock = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_sentinel_home = std::env::var_os("SENTINEL_HOME");
+        let prev_backend = std::env::var_os("SENTINEL_DECISION_GRAPH_CHECKPOINTER");
+        let prev_pg_url = std::env::var_os("SENTINEL_DECISION_GRAPH_POSTGRES_URL");
+        let prev_pg_schema = std::env::var_os("SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA");
+        std::env::set_var("SENTINEL_HOME", tmp.path());
+        std::env::set_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER", "sqlite");
+        std::env::remove_var("SENTINEL_DECISION_GRAPH_POSTGRES_URL");
+        std::env::remove_var("SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA");
+
+        let result = json!({
+            "touched": [],
+            "skipped": [],
+            "touched_count": 0,
+            "skipped_count": 0
+        });
+        let audit = run_operational_tool_graph_audit("restart_all_mcps", &json!({}), &result)
+            .await
+            .expect("operational tool graph audit");
+        assert_eq!(audit["workflow_authority"], "langgraph");
+        assert_eq!(audit["graph"], "operational_tool");
+        assert_eq!(audit["operation"], "restart_all_mcps");
+        assert_eq!(audit["decision"], "completed");
+        assert!(audit["authorization_checkpoint"]
+            .as_str()
+            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        let attached = attach_operational_tool_graph_audit(result, audit);
+        assert_eq!(attached["workflow_authority"], "langgraph");
+        assert_eq!(attached["graph_audit"]["graph"], "operational_tool");
+        let graph_rows = std::fs::read_to_string(
+            tmp.path()
+                .join(".claude")
+                .join("sentinel")
+                .join("metrics")
+                .join("operational-tool.graph-runs.jsonl"),
+        )
+        .expect("operational tool graph audit rows");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"graph\":\"operational_tool\""));
+        assert!(graph_rows.contains("\"authorization_checkpoint\""));
+
+        match prev_sentinel_home {
+            Some(v) => std::env::set_var("SENTINEL_HOME", v),
+            None => std::env::remove_var("SENTINEL_HOME"),
+        }
+        match prev_backend {
+            Some(v) => std::env::set_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER", v),
+            None => std::env::remove_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER"),
+        }
+        match prev_pg_url {
+            Some(v) => std::env::set_var("SENTINEL_DECISION_GRAPH_POSTGRES_URL", v),
+            None => std::env::remove_var("SENTINEL_DECISION_GRAPH_POSTGRES_URL"),
+        }
+        match prev_pg_schema {
+            Some(v) => std::env::set_var("SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA", v),
+            None => std::env::remove_var("SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA"),
+        }
     }
 }

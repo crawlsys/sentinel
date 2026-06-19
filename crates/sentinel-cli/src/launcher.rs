@@ -215,9 +215,10 @@ fn cargo_bin_dir() -> PathBuf {
         }
     }
 
-    // Fallback
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    // Resolve through Sentinel's home authority, but never the current working directory:
+    // staged binary lookup under CWD would let an attacker-controlled project
+    // directory masquerade as ~/.cargo/bin.
+    sentinel_infrastructure::paths::home_root_or_fatal()
         .join(".cargo")
         .join("bin")
 }

@@ -121,7 +121,7 @@ impl JudgeTrustTier {
 
 /// One judge's verdict, paired with the model that produced it.
 /// Stored in `MultiJudgeVerdict.individuals` so a verifier (or the
-/// dashboard) can see exactly which model said what.
+/// local client) can see exactly which model said what.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgeRun {
     pub model: JudgeModel,

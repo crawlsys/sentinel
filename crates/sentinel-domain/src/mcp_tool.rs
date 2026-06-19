@@ -73,7 +73,6 @@ pub const SAFE_METHOD_PREFIXES: &[&str] = &[
 pub const TRUSTED_MCP_SERVERS: &[&str] = &[
     "browserbase",
     "cdp",
-    "steel", // legacy alias for the browser surface
     "sequential-thinking",
     "memory-mcp",
     "sentinel",

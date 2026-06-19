@@ -34,6 +34,37 @@ use super::{GitStatusPort, HookContext};
 /// file-mutating tools risk silently-overwritten edits.
 const GUARDED_TOOLS: &[&str] = &["Edit", "Write"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TasksMdGuardDecision {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct TasksMdGuardEvaluation {
+    pub tool: Option<String>,
+    pub file_path: Option<String>,
+    pub guarded_tool: bool,
+    pub edit_tool: bool,
+    pub write_tool: bool,
+    pub file_path_present: bool,
+    pub project_tasks_md: bool,
+    pub existing_file_present: bool,
+    pub old_string_present: bool,
+    pub content_present: bool,
+    pub edit_overlaps_auto_block: bool,
+    pub write_changes_auto_block: bool,
+    pub should_block: bool,
+    pub decision: TasksMdGuardDecision,
+}
+
+impl TasksMdGuardEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.guarded_tool && self.file_path_present && self.project_tasks_md
+    }
+}
+
 /// Pull `file_path` from either Claude Code 2.1.89+ top-level field or the
 /// older `tool_input.file_path` location.
 fn file_path_from_input(input: &HookInput) -> Option<String> {
@@ -175,45 +206,121 @@ fn block_message(file_path: &str, action: &str) -> String {
 /// Process a `PreToolUse` event. Returns `HookOutput::block(msg)` when the call
 /// would mutate the auto block; `HookOutput::allow()` otherwise.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate(input, ctx);
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> TasksMdGuardEvaluation {
+    let tool = input.tool_name.clone();
     let tool_name = input.tool_name.as_deref().unwrap_or("");
-    if !GUARDED_TOOLS
+    let edit_tool = tool_name.eq_ignore_ascii_case("Edit");
+    let write_tool = tool_name.eq_ignore_ascii_case("Write");
+    let guarded_tool = GUARDED_TOOLS
         .iter()
-        .any(|t| t.eq_ignore_ascii_case(tool_name))
-    {
-        return HookOutput::allow();
+        .any(|t| t.eq_ignore_ascii_case(tool_name));
+    let file_path = file_path_from_input(input);
+    let file_path_present = file_path.as_deref().is_some_and(|p| !p.is_empty());
+
+    if !guarded_tool || !file_path_present {
+        return base_evaluation(tool, file_path, guarded_tool, edit_tool, write_tool);
     }
 
-    let Some(file_path) = file_path_from_input(input) else {
+    let file_path_text = file_path.as_deref().unwrap_or("");
+    let project_tasks_md = is_project_tasks_md(ctx.git, file_path_text);
+    if !project_tasks_md {
+        return TasksMdGuardEvaluation {
+            tool,
+            file_path,
+            guarded_tool,
+            edit_tool,
+            write_tool,
+            file_path_present,
+            project_tasks_md,
+            existing_file_present: false,
+            old_string_present: false,
+            content_present: false,
+            edit_overlaps_auto_block: false,
+            write_changes_auto_block: false,
+            should_block: false,
+            decision: TasksMdGuardDecision::Allow,
+        };
+    }
+
+    let existing = ctx.fs.read_to_string(Path::new(file_path_text)).ok();
+    let existing_file_present = existing.is_some();
+    let old_string = tool_field(input, "old_string");
+    let content = tool_field(input, "content");
+    let old_string_present = !old_string.is_empty();
+    let content_present = !content.is_empty();
+
+    let edit_overlaps_auto_block = edit_tool
+        && existing
+            .as_deref()
+            .is_some_and(|existing| edit_overlaps_block(existing, old_string));
+    let write_changes_auto_block = write_tool && write_changes_block(existing.as_deref(), content);
+    let should_block = edit_overlaps_auto_block || write_changes_auto_block;
+
+    TasksMdGuardEvaluation {
+        tool,
+        file_path,
+        guarded_tool,
+        edit_tool,
+        write_tool,
+        file_path_present,
+        project_tasks_md,
+        existing_file_present,
+        old_string_present,
+        content_present,
+        edit_overlaps_auto_block,
+        write_changes_auto_block,
+        should_block,
+        decision: if should_block {
+            TasksMdGuardDecision::Block
+        } else {
+            TasksMdGuardDecision::Allow
+        },
+    }
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    file_path: Option<String>,
+    guarded_tool: bool,
+    edit_tool: bool,
+    write_tool: bool,
+) -> TasksMdGuardEvaluation {
+    let file_path_present = file_path.as_deref().is_some_and(|p| !p.is_empty());
+    TasksMdGuardEvaluation {
+        tool,
+        file_path,
+        guarded_tool,
+        edit_tool,
+        write_tool,
+        file_path_present,
+        project_tasks_md: false,
+        existing_file_present: false,
+        old_string_present: false,
+        content_present: false,
+        edit_overlaps_auto_block: false,
+        write_changes_auto_block: false,
+        should_block: false,
+        decision: TasksMdGuardDecision::Allow,
+    }
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &TasksMdGuardEvaluation) -> HookOutput {
+    if !matches!(evaluation.decision, TasksMdGuardDecision::Block) {
         return HookOutput::allow();
+    }
+    let file_path = evaluation.file_path.as_deref().unwrap_or("tasks.md");
+    let action = if evaluation.write_tool {
+        "Write"
+    } else {
+        "Edit"
     };
-
-    if !is_project_tasks_md(ctx.git, &file_path) {
-        return HookOutput::allow();
-    }
-
-    let existing = ctx.fs.read_to_string(Path::new(&file_path)).ok();
-
-    match tool_name {
-        t if t.eq_ignore_ascii_case("Edit") => {
-            let Some(existing) = existing else {
-                // Edit on a missing file → upstream will reject; stay out.
-                return HookOutput::allow();
-            };
-            let old_string = tool_field(input, "old_string");
-            if edit_overlaps_block(&existing, old_string) {
-                return HookOutput::block(block_message(&file_path, "Edit"));
-            }
-            HookOutput::allow()
-        }
-        t if t.eq_ignore_ascii_case("Write") => {
-            let new_content = tool_field(input, "content");
-            if write_changes_block(existing.as_deref(), new_content) {
-                return HookOutput::block(block_message(&file_path, "Write"));
-            }
-            HookOutput::allow()
-        }
-        _ => HookOutput::allow(),
-    }
+    HookOutput::block(block_message(file_path, action))
 }
 
 #[cfg(test)]

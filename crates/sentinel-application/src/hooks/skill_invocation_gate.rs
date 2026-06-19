@@ -1,15 +1,16 @@
 //! Skill Invocation Gate — enforces that detected skills are actually invoked.
 //!
-//! When `skill_router` detects a skill, it injects a `MANDATORY: ... Read(...)`
-//! message asking Claude to load the skill before continuing. That instruction
-//! is advisory — Claude can ignore it and call other tools without ever
-//! invoking the skill. This hook makes the rule binding:
+//! When `skill_router` detects a skill, it injects a `MANDATORY:
+//! Skill(skill: ...)` message asking Claude to invoke the skill before
+//! continuing. That instruction is advisory — Claude can ignore it and call
+//! other tools without ever invoking the skill. This hook makes the rule
+//! binding:
 //!
 //! 1. **`PreToolUse`** — if a pending-skill state file exists for the session,
 //!    block any tool call outside the read-only allowlist with a clear "load
 //!    the skill first" message. The allowlist includes Read/Glob/Grep so
-//!    Claude can navigate to SKILL.md, plus `Skill` itself so the invocation
-//!    that satisfies the gate isn't blocked by it.
+//!    Claude can inspect files while recovering, plus `Skill` itself so the
+//!    invocation that satisfies the gate isn't blocked by it.
 //!
 //! 2. **`PostToolUse`** — when the `Skill` tool fires with a name matching the
 //!    pending skill, clear the state. State also auto-clears after a 5-minute
@@ -39,6 +40,40 @@ const ALLOWED_TOOLS: &[&str] = &[
     "TaskOutput",
     "mcp__sequential-thinking__sequentialthinking",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInvocationDecision {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillInvocationEvaluation {
+    pub tool: Option<String>,
+    pub session_id: Option<String>,
+    pub subagent_call: bool,
+    pub session_id_present: bool,
+    pub pending_skill_present: bool,
+    pub pending_skill_stale: bool,
+    pub pending_state_session_matches: bool,
+    pub allowed_tool: bool,
+    pub skill: Option<String>,
+    pub skill_present: bool,
+    pub skill_path_present: bool,
+    pub detected_at_present: bool,
+    pub should_block: bool,
+    pub decision: SkillInvocationDecision,
+}
+
+impl SkillInvocationEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        !self.subagent_call
+            && self.session_id_present
+            && self.pending_skill_present
+            && !self.pending_skill_stale
+    }
+}
 
 /// Pending state has a 5-minute TTL. After that, clear it and allow tools
 /// through — prevents a skill the user has explicitly moved on from from
@@ -86,53 +121,148 @@ fn is_subagent(input: &HookInput) -> bool {
 /// `PreToolUse` handler — block when there's a pending skill and the tool
 /// isn't on the allowlist.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate_pretool(input, ctx);
+    apply_pretool_side_effects(&evaluation, ctx);
+    output_from_pretool_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate_pretool(input: &HookInput, ctx: &HookContext<'_>) -> SkillInvocationEvaluation {
+    let tool = input.tool_name.clone();
+    let tool_name = input.tool_name.as_deref().unwrap_or("");
+    let session_id = input.session_id.clone();
+    let subagent_call = is_subagent(input);
+    let allowed_tool = ALLOWED_TOOLS.contains(&tool_name);
+
     // Never gate subagent/teammate tool calls. The pending-skill marker is a
     // main-session concept: it records that the user's message routed to a
     // skill the *main* session must invoke. A subagent shares the parent's
     // `session_id` but runs in its own context with its own instructions, so
     // gating it on the parent's pending skill is always wrong (and the
     // subagent can't clear the marker without derailing its own task).
-    if is_subagent(input) {
-        return HookOutput::allow();
+    if subagent_call {
+        return SkillInvocationEvaluation {
+            tool,
+            session_id,
+            subagent_call,
+            session_id_present: input.session_id.as_deref().is_some_and(|s| !s.is_empty()),
+            pending_skill_present: false,
+            pending_skill_stale: false,
+            pending_state_session_matches: false,
+            allowed_tool,
+            skill: None,
+            skill_present: false,
+            skill_path_present: false,
+            detected_at_present: false,
+            should_block: false,
+            decision: SkillInvocationDecision::Allow,
+        };
     }
 
     let session_id = match input.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
-        _ => return HookOutput::allow(),
+        _ => {
+            return SkillInvocationEvaluation {
+                tool,
+                session_id,
+                subagent_call,
+                session_id_present: false,
+                pending_skill_present: false,
+                pending_skill_stale: false,
+                pending_state_session_matches: false,
+                allowed_tool,
+                skill: None,
+                skill_present: false,
+                skill_path_present: false,
+                detected_at_present: false,
+                should_block: false,
+                decision: SkillInvocationDecision::Allow,
+            };
+        }
     };
 
     let state = match load_pending_state(ctx.fs, session_id) {
         Some(s) => s,
-        None => return HookOutput::allow(),
+        None => {
+            return SkillInvocationEvaluation {
+                tool,
+                session_id: Some(session_id.to_string()),
+                subagent_call,
+                session_id_present: true,
+                pending_skill_present: false,
+                pending_skill_stale: false,
+                pending_state_session_matches: false,
+                allowed_tool,
+                skill: None,
+                skill_present: false,
+                skill_path_present: false,
+                detected_at_present: false,
+                should_block: false,
+                decision: SkillInvocationDecision::Allow,
+            };
+        }
     };
 
     // Auto-clear stale state so the gate is self-healing.
-    if is_stale(&state.detected_at) {
-        clear_pending_state(ctx.fs, session_id);
+    let pending_skill_stale = is_stale(&state.detected_at);
+    let skill_present = !state.skill.trim().is_empty();
+    let skill_path_present = !state.skill_path.trim().is_empty();
+    let detected_at_present = !state.detected_at.trim().is_empty();
+    let pending_state_session_matches = state.session_id == session_id;
+    let should_block = !pending_skill_stale && !allowed_tool;
+    SkillInvocationEvaluation {
+        tool,
+        session_id: Some(session_id.to_string()),
+        subagent_call,
+        session_id_present: true,
+        pending_skill_present: true,
+        pending_skill_stale,
+        pending_state_session_matches,
+        allowed_tool,
+        skill: Some(state.skill),
+        skill_present,
+        skill_path_present,
+        detected_at_present,
+        should_block,
+        decision: if should_block {
+            SkillInvocationDecision::Block
+        } else {
+            SkillInvocationDecision::Allow
+        },
+    }
+}
+
+pub fn apply_pretool_side_effects(evaluation: &SkillInvocationEvaluation, ctx: &HookContext<'_>) {
+    if evaluation.pending_skill_present && evaluation.pending_skill_stale {
+        if let Some(session_id) = evaluation.session_id.as_deref() {
+            clear_pending_state(ctx.fs, session_id);
+        }
+    }
+}
+
+#[must_use]
+pub fn output_from_pretool_evaluation(evaluation: &SkillInvocationEvaluation) -> HookOutput {
+    if !matches!(evaluation.decision, SkillInvocationDecision::Block) {
         return HookOutput::allow();
     }
 
-    let tool_name = input.tool_name.as_deref().unwrap_or("");
-    if ALLOWED_TOOLS.contains(&tool_name) {
-        return HookOutput::allow();
-    }
+    let skill = evaluation.skill.as_deref().unwrap_or("");
+    let tool_name = evaluation.tool.as_deref().unwrap_or("");
 
     let envelope = HookEnvelope::block(
         "Skill Gate",
         format!(
             "Skill `{}` was detected but not invoked. Call `Skill(skill: \"{0}\")` \
-             or `Read(\"{}\")` before using `{}`. \
+             before using `{}`. \
              (Read-only tools and TaskCreate/TaskUpdate are allowed.)",
-            state.skill, state.skill_path, tool_name,
+            skill, tool_name,
         ),
     );
     HookOutput::block(envelope.render())
 }
 
 /// `PostToolUse` handler — clear the pending state once the `Skill` tool has
-/// been invoked with a matching skill name. Also clears on `Read` of the
-/// SKILL.md file as a fallback so the legacy "MANDATORY: Read(...)" flow
-/// still satisfies the gate.
+/// been invoked with a matching skill name.
 pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id = match input.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
@@ -145,11 +275,7 @@ pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput 
     };
 
     let tool_name = input.tool_name.as_deref().unwrap_or("");
-    let cleared = match tool_name {
-        "Skill" => skill_arg_matches(input, &state.skill),
-        "Read" => read_target_matches(input, &state.skill_path, &state.skill),
-        _ => false,
-    };
+    let cleared = tool_name == "Skill" && skill_arg_matches(input, &state.skill);
 
     if cleared {
         clear_pending_state(ctx.fs, session_id);
@@ -174,33 +300,6 @@ fn skill_arg_matches(input: &HookInput, expected_skill: &str) -> bool {
         .is_some_and(|s| s == expected_skill)
 }
 
-/// True when the Read tool's `file_path` looks like the SKILL.md for the
-/// pending skill. Compares both the `skill_path` string (with tilde expanded
-/// by the caller) and a fallback "skills/<name>/SKILL.md" suffix match so
-/// home-dir variants don't false-negative.
-fn read_target_matches(input: &HookInput, skill_path: &str, skill: &str) -> bool {
-    let target = match input
-        .tool_input
-        .as_ref()
-        .and_then(|v| v.get("file_path"))
-        .and_then(|v| v.as_str())
-    {
-        Some(t) => t,
-        None => return false,
-    };
-
-    // Direct match against the recorded skill_path (handles tilde-expanded
-    // identical strings).
-    if target == skill_path {
-        return true;
-    }
-    // Fallback: any path that ends with `skills/<skill>/SKILL.md` (forward
-    // or back-slash) is good enough — covers Windows/Unix and tilde expansion.
-    let suffix_unix = format!("skills/{skill}/SKILL.md");
-    let suffix_win = format!("skills\\{skill}\\SKILL.md");
-    target.ends_with(&suffix_unix) || target.ends_with(&suffix_win)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,19 +316,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -240,10 +352,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
@@ -252,7 +371,10 @@ mod tests {
             f.write_all(c)?;
             Ok(())
         }
-        fn remove_file(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn remove_file(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if p.exists() {
                 std::fs::remove_file(p)?;
             }
@@ -295,66 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_target_matches_direct() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({
-                "file_path": "~/.claude/skills/linear/SKILL.md"
-            })),
-            ..Default::default()
-        };
-        assert!(read_target_matches(
-            &input,
-            "~/.claude/skills/linear/SKILL.md",
-            "linear",
-        ));
-    }
-
-    #[test]
-    fn test_read_target_matches_suffix_unix() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({
-                "file_path": "/home/gary/.claude/skills/linear/SKILL.md"
-            })),
-            ..Default::default()
-        };
-        assert!(read_target_matches(
-            &input,
-            "~/.claude/skills/linear/SKILL.md",
-            "linear",
-        ));
-    }
-
-    #[test]
-    fn test_read_target_matches_suffix_windows() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({
-                "file_path": "C:\\Users\\garys\\.claude\\skills\\linear\\SKILL.md"
-            })),
-            ..Default::default()
-        };
-        assert!(read_target_matches(
-            &input,
-            "~/.claude/skills/linear/SKILL.md",
-            "linear",
-        ));
-    }
-
-    #[test]
-    fn test_read_target_does_not_match_other_skill() {
-        let input = HookInput {
-            tool_input: Some(serde_json::json!({
-                "file_path": "/home/gary/.claude/skills/memory/SKILL.md"
-            })),
-            ..Default::default()
-        };
-        assert!(!read_target_matches(
-            &input,
-            "~/.claude/skills/linear/SKILL.md",
-            "linear",
-        ));
-    }
-
-    #[test]
     fn test_pretool_allows_when_no_pending_state() {
         let input = HookInput {
             session_id: Some("test".to_string()),
@@ -379,8 +441,8 @@ mod tests {
 
     #[test]
     fn test_allowed_tools_include_skill_and_read() {
-        // Sanity: the tools that satisfy the gate must themselves be allowlisted
-        // so the gate doesn't refuse to let Claude clear it.
+        // Sanity: Skill satisfies the gate and Read remains allowed as a
+        // harmless inspection tool while recovering from the block.
         assert!(ALLOWED_TOOLS.contains(&"Skill"));
         assert!(ALLOWED_TOOLS.contains(&"Read"));
     }
@@ -456,12 +518,7 @@ mod tests {
         let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
 
         // — Turn 1a: router writes pending marker —
-        super::super::skill_router::write_pending_skill_state(
-            &fs,
-            skill,
-            &skill_path,
-            session_id,
-        );
+        super::super::skill_router::write_pending_skill_state(&fs, skill, &skill_path, session_id);
 
         // Gate should block Bash at this point (pending marker exists).
         {
@@ -561,6 +618,54 @@ mod tests {
                 "gate MUST allow Bash after skill was invoked, even when router re-detects the same skill on a later turn"
             );
         }
+    }
+
+    #[test]
+    fn test_reading_skill_md_does_not_satisfy_pending_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fs = TempDirFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let session_id = "test-session-read-no-satisfy";
+        let skill = "linear";
+        let skill_path = format!("~/.claude/skills/{skill}/SKILL.md");
+        super::super::skill_router::write_pending_skill_state(&fs, skill, &skill_path, session_id);
+
+        let git = Box::leak(Box::new(crate::hooks::test_support::StubGit));
+        let process = Box::leak(Box::new(crate::hooks::test_support::StubProcess));
+        let memory_mcp = Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env = Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+        let fs_ref: &TempDirFs = &fs;
+        let ctx = crate::hooks::HookContext {
+            git,
+            vector_store: None,
+            fs: fs_ref,
+            process,
+            llm: None,
+            memory_mcp,
+            env,
+            linear_lookup: None,
+        };
+
+        let read_input = HookInput {
+            session_id: Some(session_id.to_string()),
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(serde_json::json!({"file_path": skill_path})),
+            ..Default::default()
+        };
+        let read_out = process_posttool(&read_input, &ctx);
+        assert!(read_out.blocked.is_none(), "posttool must not block");
+
+        let bash_input = HookInput {
+            session_id: Some(session_id.to_string()),
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+        let bash_out = process_pretool(&bash_input, &ctx);
+        assert!(
+            bash_out.blocked.is_some(),
+            "Read(SKILL.md) must not clear the pending skill; only Skill(skill: ...) satisfies the gate"
+        );
     }
 
     /// Sanity: a genuinely new skill (never invoked this session) still blocks.

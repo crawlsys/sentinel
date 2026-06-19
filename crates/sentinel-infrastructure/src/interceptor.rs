@@ -286,12 +286,53 @@ impl RedirectLoaderPort for TomlRedirectLoader {
 }
 
 fn config_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
-    #[cfg(not(target_os = "windows"))]
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-
-    PathBuf::from(home)
+    crate::paths::home_root_or_fatal()
         .join(".config")
         .join("npx-interceptor.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::*;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn redirect_config_uses_authoritative_home_root() {
+        let _guard = env_lock();
+        let root = std::env::temp_dir().join("sentinel-interceptor-home-test");
+        let _home = EnvGuard::set("SENTINEL_HOME", &root);
+
+        assert_eq!(
+            config_path(),
+            root.join(".config").join("npx-interceptor.toml")
+        );
+    }
 }

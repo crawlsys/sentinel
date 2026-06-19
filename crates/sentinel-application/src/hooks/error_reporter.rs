@@ -46,9 +46,7 @@ impl Default for LinearConfig {
 /// Load Linear config from ~/.claude/sentinel/config/error-reporter.toml
 fn load_linear_config(fs: &dyn FileSystemPort) -> LinearConfig {
     let path = fs
-        .home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
+        .claude_dir()
         .join("sentinel")
         .join("config")
         .join("error-reporter.toml");
@@ -87,8 +85,10 @@ fn now_ms() -> u64 {
 }
 
 fn errors_file(fs: &dyn FileSystemPort) -> PathBuf {
-    let home = fs.home_dir().unwrap_or_else(|| PathBuf::from("."));
-    super::metrics_dir(&home).join("errors.jsonl")
+    fs.claude_dir()
+        .join("sentinel")
+        .join("metrics")
+        .join("errors.jsonl")
 }
 
 fn cooldown_file() -> PathBuf {
@@ -173,11 +173,14 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         })
         .collect();
 
-    let resolutions_path =
-        super::metrics_dir(&ctx.fs.home_dir().unwrap_or_else(|| PathBuf::from(".")))
-            .join(".error-resolutions.json")
-            .to_string_lossy()
-            .replace('\\', "/");
+    let resolutions_path = ctx
+        .fs
+        .claude_dir()
+        .join("sentinel")
+        .join("metrics")
+        .join(".error-resolutions.json")
+        .to_string_lossy()
+        .replace('\\', "/");
 
     let extra = errors.len().saturating_sub(error_lines.len());
     let context = format!(
@@ -225,19 +228,31 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            self.files
-                .get(p)
-                .cloned()
-                .ok_or_else(|| sentinel_domain::port_errors::FileSystemError::NotFound("not found".into()))
+        fn read_to_string(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            self.files.get(p).cloned().ok_or_else(|| {
+                sentinel_domain::port_errors::FileSystemError::NotFound("not found".into())
+            })
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &std::path::Path) -> bool {
@@ -246,10 +261,19 @@ mod tests {
         fn is_dir(&self, _: &std::path::Path) -> bool {
             false
         }
-        fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("no".into()))
+        fn metadata(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "no".into(),
+            ))
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

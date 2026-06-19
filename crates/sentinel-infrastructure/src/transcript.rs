@@ -4,12 +4,16 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 /// Find the transcript file for a session
 pub fn find_transcript(session_id: &str) -> Result<Option<PathBuf>> {
-    let projects_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    let projects_dir = crate::paths::home_root()
+        .ok_or_else(|| {
+            anyhow!(
+                "[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set."
+            )
+        })?
         .join(".claude")
         .join("projects");
 

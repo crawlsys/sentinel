@@ -32,19 +32,17 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 type PromptFn =
     Arc<dyn Fn(String, String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
-/// Resolve the transport for a judge `model_id`, preferring a subscription CLI
-/// JSON Schema for [`JudgeVerdict`], passed to `codex exec --output-schema` so
-/// the OpenAI judge leg returns guaranteed-valid JSON (no parse-failure path).
-/// Mirrors the `JudgeVerdict` deserialize shape: `sufficient` (bool),
+/// JSON Schema for [`JudgeVerdict`], kept as a strict structured-output
+/// contract fixture for OpenRouter-routed judge tests. Mirrors the
+/// `JudgeVerdict` deserialize shape: `sufficient` (bool),
 /// `confidence` (0..1), `reasoning` (string), `requested_evidence` (string array
 /// or null).
 ///
-/// NOTE: OpenAI structured-output (codex `--output-schema`) requires `required`
-/// to list **every** key in `properties` — an optional field is expressed by
-/// making it nullable (`["array","null"]`) and STILL listing it in `required`,
-/// not by omitting it. Omitting `requested_evidence` from `required` yields a
-/// 400 `invalid_json_schema`. `JudgeVerdict`'s serde tolerates the explicit
-/// `null` (the field is `Option`).
+/// Strict structured-output providers require `required` to list **every** key
+/// in `properties`; an optional field is expressed by making it nullable
+/// (`["array","null"]`) and still listing it in `required`. `JudgeVerdict`'s
+/// serde tolerates the explicit `null` because the field is `Option`.
+#[cfg(test)]
 const JUDGE_VERDICT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -57,32 +55,14 @@ const JUDGE_VERDICT_SCHEMA: &str = r#"{
   }
 }"#;
 
-/// for the `DualFrontier` frontier pair and falling back to `openrouter_fn`.
+/// Resolve the production judge transport for a model.
 ///
-/// Routes only the two frontier models whose subscription CLI faithfully serves
-/// them: `anthropic/claude-opus-*` → `claude -p`, `openai/*` → `codex exec`.
-/// Everything else (Sonnet, Kimi) keeps the OpenRouter transport — model
-/// identity matters for those tiers. The CLI builders return `None` when the
-/// binary is absent, so a box without the CLIs transparently uses OpenRouter.
-/// `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1` forces OpenRouter for all models.
+/// The judge is an OpenRouter-backed enterprise gateway. Do not substitute
+/// local CLIs based on PATH: that changes model identity and audit attribution
+/// outside the configured provider surface.
 fn resolve_judge_transport(model_id: &str, openrouter_fn: &PromptFn) -> (PromptFn, &'static str) {
-    if std::env::var("SENTINEL_AUDITOR_NO_SUBSCRIPTION")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
-        return (openrouter_fn.clone(), "openrouter");
-    }
-    // The CLI prompt-fns share the same (model_id, system, user) shape as our
-    // local PromptFn, so they slot in directly.
-    let cli: Option<(PromptFn, &'static str)> = if model_id.starts_with("anthropic/claude-opus") {
-        crate::llm_scorer_runtime::build_claude_cli_prompt_fn("judge")
-            .map(|(pf, _prefix)| (pf as PromptFn, "claude-cli"))
-    } else if model_id.starts_with("openai/") {
-        crate::llm_scorer_runtime::build_codex_cli_prompt_fn("judge", Some(JUDGE_VERDICT_SCHEMA))
-            .map(|(pf, _prefix)| (pf as PromptFn, "codex-cli"))
-    } else {
-        None
-    };
-    cli.unwrap_or_else(|| (openrouter_fn.clone(), "openrouter"))
+    let _ = model_id;
+    (openrouter_fn.clone(), "openrouter")
 }
 
 /// The OpenRouter-backed adversarial judge provider
@@ -116,19 +96,9 @@ impl JudgeProvider {
     /// the JSON verdict. The model id comes from
     /// [`JudgeModel::openrouter_model_id`](sentinel_domain::judge::JudgeModel::openrouter_model_id).
     ///
-    /// Subscription-first (same ladder as the prod auditor): for the
-    /// `DualFrontier` frontier models — Anthropic Opus (`anthropic/claude-opus-*`)
-    /// and OpenAI (`openai/*`) — prefer the local subscription CLI (`claude -p` /
-    /// `codex exec`, $0 per-token) when installed, falling back to OpenRouter.
-    /// Sonnet/Kimi stay on OpenRouter: model identity matters there (a bare
-    /// `claude -p` is not guaranteed to be Sonnet, and Kimi has no CLI). Opt out
-    /// with `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1`.
-    async fn judge(
-        &self,
-        model_id: &str,
-        system: &str,
-        user_msg: &str,
-    ) -> Result<JudgeVerdict> {
+    /// The transport is always OpenRouter. Subscription CLI probes are kept out
+    /// of production judge dispatch so model identity stays reproducible.
+    async fn judge(&self, model_id: &str, system: &str, user_msg: &str) -> Result<JudgeVerdict> {
         let (prompt_fn, provider) = resolve_judge_transport(model_id, &self.prompt_fn);
         let text = prompt_fn(
             model_id.to_string(),
@@ -158,37 +128,22 @@ impl JudgeProvider {
 /// Critical-tier work pairs Kimi+Sonnet (or +Opus) — see Stage B
 /// follow-up commit.
 pub struct MultiModelJudge {
-    judge: Option<JudgeProvider>,
+    judge: JudgeProvider,
 }
 
 impl MultiModelJudge {
     /// Initialize from environment variables.
-    pub fn from_env() -> Self {
-        let judge = JudgeProvider::from_env().ok();
-
-        if judge.is_none() {
-            eprintln!(
-                "[sentinel] WARNING: No AI judge available. \
-                 Set OPENROUTER_API_KEY for adversarial Kimi K2-Thinking / GPT-5.5 / Opus 4.8 judge. \
-                 All proof submissions will fail until configured."
-            );
-        }
+    pub fn from_env() -> Result<Self> {
+        let judge = JudgeProvider::from_env().context(
+            "No AI judge available. Set OPENROUTER_API_KEY for adversarial Kimi K2-Thinking / GPT-5.5 / Opus 4.8 judge.",
+        )?;
         info!(
-            provider = if judge.is_some() {
-                "openrouter"
-            } else {
-                "none"
-            },
+            provider = "openrouter",
             default_tier = %JudgeModel::default_review_tier(),
             "Adversarial judge initialized — pluggable across Haiku/Kimi/Sonnet/Opus tiers"
         );
 
-        Self { judge }
-    }
-
-    /// Returns `true` if the judge provider is available.
-    pub const fn has_any_provider(&self) -> bool {
-        self.judge.is_some()
+        Ok(Self { judge })
     }
 }
 
@@ -202,9 +157,7 @@ impl sentinel_application::judge_service::JudgeService for MultiModelJudge {
         evidence: &Evidence,
         model: JudgeModel,
     ) -> Result<JudgeVerdict> {
-        let provider = self.judge.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Adversarial judge not available — set OPENROUTER_API_KEY")
-        })?;
+        let provider = &self.judge;
 
         let model_id = model.openrouter_model_id();
         info!(
@@ -314,8 +267,7 @@ mod tests {
         Arc::new(|_m, _s, _u| Box::pin(async { Ok("openrouter".to_string()) }))
     }
 
-    /// Serializes tests that read/write `SENTINEL_AUDITOR_NO_SUBSCRIPTION` —
-    /// process env is global, so parallel env-touching tests would race.
+    /// Serializes tests that read/write process env.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -348,58 +300,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_judge_transport_keeps_openrouter_for_sonnet_and_kimi() {
-        // Sonnet + Kimi must stay on OpenRouter — model identity matters there
-        // (a bare `claude -p` isn't guaranteed to be Sonnet; Kimi has no CLI),
-        // so even if `claude`/`codex` are installed they must NOT be chosen.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
-        let or = dummy_openrouter_fn();
-        let (_pf1, p1) = resolve_judge_transport("anthropic/claude-sonnet-4.6", &or);
-        let (_pf2, p2) = resolve_judge_transport("moonshotai/kimi-k2.6", &or);
-        assert_eq!(p1, "openrouter", "Sonnet must stay on OpenRouter");
-        assert_eq!(p2, "openrouter", "Kimi must stay on OpenRouter");
-    }
-
-    #[test]
-    fn resolve_judge_transport_opt_out_forces_openrouter() {
-        // SENTINEL_AUDITOR_NO_SUBSCRIPTION=1 forces OpenRouter for EVERY model,
-        // including the frontier dual pair.
+    fn resolve_judge_transport_keeps_all_models_on_openrouter() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let or = dummy_openrouter_fn();
-        std::env::set_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION", "1");
-        let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
-        let (_o, po) = resolve_judge_transport("openai/gpt-5.5-pro", &or);
-        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
-        assert_eq!(pa, "openrouter", "opt-out forces OpenRouter for Opus");
-        assert_eq!(po, "openrouter", "opt-out forces OpenRouter for Codex");
-    }
-
-    #[test]
-    fn resolve_judge_transport_frontier_pair_prefers_cli_when_present() {
-        // For the frontier dual pair, the chosen provider is the subscription
-        // CLI when its binary is on PATH, else OpenRouter. We don't assume the
-        // CI box has claude/codex, so assert the result is one of the two valid
-        // outcomes per leg — never something else, never a panic.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
-        let or = dummy_openrouter_fn();
-        let (_a, pa) = resolve_judge_transport("anthropic/claude-opus-4.8", &or);
-        let (_o, po) = resolve_judge_transport("openai/gpt-5.5-pro", &or);
-        assert!(
-            pa == "claude-cli" || pa == "openrouter",
-            "Opus leg must be claude-cli (if installed) or openrouter, got {pa}"
-        );
-        assert!(
-            po == "codex-cli" || po == "openrouter",
-            "Codex leg must be codex-cli (if installed) or openrouter, got {po}"
-        );
-        // On this dev box both CLIs are installed → expect the CLI path.
-        if super::super::llm_scorer_runtime::resolve_cli("claude").is_some() {
-            assert_eq!(pa, "claude-cli", "claude is on PATH → Opus leg must use it");
-        }
-        if super::super::llm_scorer_runtime::resolve_cli("codex").is_some() {
-            assert_eq!(po, "codex-cli", "codex is on PATH → Codex leg must use it");
+        for model in [
+            "anthropic/claude-sonnet-4.6",
+            "moonshotai/kimi-k2.6",
+            "anthropic/claude-opus-4.8",
+            "openai/gpt-5.5-pro",
+        ] {
+            let (_pf, provider) = resolve_judge_transport(model, &or);
+            assert_eq!(
+                provider, "openrouter",
+                "judge transport must stay on OpenRouter for {model}"
+            );
         }
     }
 
@@ -427,8 +341,16 @@ mod tests {
     }
 
     #[test]
-    fn test_adversarial_judge_no_key() {
-        let judge = MultiModelJudge { judge: None };
-        assert!(!judge.has_any_provider());
+    fn multimodel_judge_from_env_errors_without_key() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::remove_var("OPENROUTER_API_KEY");
+        match MultiModelJudge::from_env() {
+            Ok(_) => panic!("missing key must error"),
+            Err(err) => assert!(err.to_string().contains("No AI judge available")),
+        }
+        if let Some(value) = saved {
+            std::env::set_var("OPENROUTER_API_KEY", value);
+        }
     }
 }

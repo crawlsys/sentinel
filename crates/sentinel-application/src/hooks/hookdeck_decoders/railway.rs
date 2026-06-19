@@ -1,7 +1,7 @@
 //! Railway deployment webhook decoders.
 //!
 //! Railway's webhook JSON isn't a public schema, but their project-event
-//! webhook (configured per-project in the Railway dashboard) carries fields
+//! webhook (configured per-project in the Railway report) carries fields
 //! like:
 //!
 //! ```json

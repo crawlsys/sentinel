@@ -21,16 +21,14 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 /// points at the main repo's `.git/config`, so we follow that pointer.
 fn has_git_remote(cwd: Option<&str>) -> bool {
     let Some(cwd) = cwd else {
-        // Without a cwd we can't check — be conservative and assume yes,
-        // matching the legacy behavior (recommend push by default).
-        return true;
+        return false;
     };
     let cwd = Path::new(cwd);
     let Some(config_path) = git_config_path(cwd) else {
-        return true; // not in a git repo we can probe — fall back to legacy
+        return false;
     };
     let Ok(content) = std::fs::read_to_string(&config_path) else {
-        return true;
+        return false;
     };
     content
         .lines()
@@ -250,8 +248,51 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_without_cwd_does_not_recommend_blind_push() {
+        let output = process(&bash_input("git merge feat/foo --no-edit main"));
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("merge to main should inject context");
+        assert!(
+            !ctx.contains("Push to remote: `git push`"),
+            "missing cwd must not recommend blind git push, got: {ctx}"
+        );
+        assert!(
+            ctx.contains("Configure a remote"),
+            "missing cwd should require explicit remote verification, got: {ctx}"
+        );
+    }
+
+    #[test]
+    fn test_merge_outside_git_repo_does_not_recommend_blind_push() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "git merge feat/foo --no-edit main"})),
+            cwd: Some(tmp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input);
+        let ctx = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("merge to main should inject context");
+        assert!(
+            !ctx.contains("Push to remote: `git push`"),
+            "non-git cwd must not recommend blind git push, got: {ctx}"
+        );
+        assert!(
+            ctx.contains("Configure a remote"),
+            "non-git cwd should require explicit remote verification, got: {ctx}"
+        );
+    }
+
+    #[test]
     fn test_merge_with_remote_suggests_git_push() {
-        // SEN-3 regression: remote configured → legacy "git push" still appears.
+        // SEN-3 regression: remote configured → explicit "git push" still appears.
         let tmp = tempfile::TempDir::new().unwrap();
         let git_dir = tmp.path().join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();

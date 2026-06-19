@@ -2,7 +2,7 @@
 //!
 //! Reads the agent's [`SpecChallenge`] from
 //! `input.extra.spec_challenge`, runs the deterministic
-//! completeness check, optionally consults a semantic
+//! completeness check, optionally queries a semantic
 //! [`SpecChallengeScorerPort`] for Catastrophic-class work, and
 //! persists the challenge via [`SpecChallengeStorePort`] for
 //! proof-chain re-verification.
@@ -33,7 +33,7 @@
 //! argument so it stays unit-testable in isolation.
 
 use sentinel_domain::events::{HookInput, HookOutput};
-use sentinel_domain::ports::{SpecChallengeScorerPort, SpecChallengeStorePort};
+use sentinel_domain::ports::{SpecChallengeScore, SpecChallengeScorerPort, SpecChallengeStorePort};
 use sentinel_domain::reversibility::ReversibilityClass;
 use sentinel_domain::spec_challenge::{ChallengeCategoryName, SpecChallenge};
 
@@ -65,6 +65,36 @@ impl A13EnforcementMode {
 /// [`process_with_threshold`].
 pub const DEFAULT_CATASTROPHIC_AXIS_THRESHOLD: f32 = 0.7;
 
+#[derive(Debug, Clone)]
+pub struct SpecChallengeEvaluation {
+    pub class: ReversibilityClass,
+    pub mode: A13EnforcementMode,
+    pub catastrophic_axis_threshold: f32,
+    pub challenge: Option<SpecChallenge>,
+    pub malformed_challenge: bool,
+    pub missing_required_challenge: bool,
+    pub completeness_finding_count: usize,
+    pub store_error: Option<String>,
+    pub scoring_required: bool,
+    pub scorer_missing: bool,
+    pub scorer_error: Option<String>,
+    pub score: Option<SpecChallengeScore>,
+    pub scorer_rejected: bool,
+    pub would_block: bool,
+    pub should_block: bool,
+    pub block_reason: Option<String>,
+}
+
+#[must_use]
+pub fn is_a13_signal(input: &HookInput, class: ReversibilityClass) -> bool {
+    !matches!(class, ReversibilityClass::TriviallyReversible)
+        && (input.extra.contains_key("spec_challenge")
+            || matches!(
+                class,
+                ReversibilityClass::Irreversible | ReversibilityClass::Catastrophic
+            ))
+}
+
 /// Process a `PreToolUse` event through the A13 spec-challenge
 /// gate. Uses the [`DEFAULT_CATASTROPHIC_AXIS_THRESHOLD`].
 #[must_use]
@@ -95,10 +125,32 @@ pub fn process_with_threshold(
     mode: A13EnforcementMode,
     catastrophic_axis_threshold: f32,
 ) -> HookOutput {
+    let Some(evaluation) = evaluate_with_threshold(
+        input,
+        class,
+        store,
+        scorer,
+        mode,
+        catastrophic_axis_threshold,
+    ) else {
+        return HookOutput::allow();
+    };
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate_with_threshold(
+    input: &HookInput,
+    class: ReversibilityClass,
+    store: Option<&dyn SpecChallengeStorePort>,
+    scorer: Option<&dyn SpecChallengeScorerPort>,
+    mode: A13EnforcementMode,
+    catastrophic_axis_threshold: f32,
+) -> Option<SpecChallengeEvaluation> {
     // 1. TriviallyReversible: skip regardless of mode. Challenge
     // cost isn't justified for trivial actions.
     if matches!(class, ReversibilityClass::TriviallyReversible) {
-        return HookOutput::allow();
+        return None;
     }
 
     // 2. Parse the challenge artifact (if present). Missing-but-
@@ -106,7 +158,7 @@ pub fn process_with_threshold(
     let challenge_value = input.extra.get("spec_challenge");
 
     let challenge = match challenge_value {
-        None => return handle_missing_challenge(class, mode),
+        None => return evaluate_missing_challenge(class, mode, catastrophic_axis_threshold),
         Some(value) => match serde_json::from_value::<SpecChallenge>(value.clone()) {
             Ok(c) => c,
             Err(err) => {
@@ -118,21 +170,58 @@ pub fn process_with_threshold(
                     error = %err,
                     "spec_challenge_gate: malformed challenge artifact"
                 );
-                return if mode.allows_blocking() {
-                    HookOutput::deny(reason)
-                } else {
-                    HookOutput::allow()
-                };
+                let would_block = true;
+                return Some(SpecChallengeEvaluation {
+                    class,
+                    mode,
+                    catastrophic_axis_threshold,
+                    challenge: None,
+                    malformed_challenge: true,
+                    missing_required_challenge: false,
+                    completeness_finding_count: 0,
+                    store_error: None,
+                    scoring_required: false,
+                    scorer_missing: false,
+                    scorer_error: None,
+                    score: None,
+                    scorer_rejected: false,
+                    would_block,
+                    should_block: mode.allows_blocking() && would_block,
+                    block_reason: Some(reason),
+                });
             }
         },
+    };
+
+    let mut evaluation = SpecChallengeEvaluation {
+        class,
+        mode,
+        catastrophic_axis_threshold,
+        challenge: Some(challenge.clone()),
+        malformed_challenge: false,
+        missing_required_challenge: false,
+        completeness_finding_count: 0,
+        store_error: None,
+        scoring_required: false,
+        scorer_missing: false,
+        scorer_error: None,
+        score: None,
+        scorer_rejected: false,
+        would_block: false,
+        should_block: false,
+        block_reason: None,
     };
 
     // 3. Completeness check (deterministic floor).
     let findings = challenge.completeness_findings();
     if !findings.is_empty() {
         let reason = format_completeness_failure(&challenge, &findings);
+        evaluation.completeness_finding_count = findings.len();
+        evaluation.would_block = true;
+        evaluation.block_reason = Some(reason);
         if mode.allows_blocking() {
-            return HookOutput::deny(reason);
+            evaluation.should_block = true;
+            return Some(evaluation);
         }
         tracing::info!(
             count = findings.len(),
@@ -140,15 +229,29 @@ pub fn process_with_threshold(
         );
     }
 
-    // 4. Persistence (best-effort; store failures never block the
-    // gate — the audit trail is observability, not enforcement).
+    // 4. Persistence. For enforced A13 work, a failed challenge write is a
+    // finding: the agent cannot prove what it challenged after acting.
     if let Some(store) = store {
         if let Err(err) = store.save(&challenge) {
+            let reason = format!(
+                "spec_challenge_gate: failed to persist SpecChallenge for work_id={} — {err}. \
+                 Refusing to continue without durable A13 audit evidence.",
+                challenge.work_id.as_str()
+            );
             tracing::warn!(
                 work_id = challenge.work_id.as_str(),
                 error = %err,
-                "spec_challenge_gate: store save failed; continuing"
+                "spec_challenge_gate: store save failed"
             );
+            evaluation.store_error = Some(err.to_string());
+            evaluation.would_block = true;
+            if evaluation.block_reason.is_none() {
+                evaluation.block_reason = Some(reason);
+            }
+            if mode.allows_blocking() {
+                evaluation.should_block = true;
+                return Some(evaluation);
+            }
         }
     }
 
@@ -157,6 +260,7 @@ pub fn process_with_threshold(
     let needs_scoring = matches!(class, ReversibilityClass::Catastrophic)
         || (matches!(class, ReversibilityClass::Irreversible)
             && matches!(mode, A13EnforcementMode::StrictBlocking));
+    evaluation.scoring_required = needs_scoring;
 
     if needs_scoring {
         if !mode.allows_blocking() {
@@ -165,29 +269,40 @@ pub fn process_with_threshold(
                 work_id = challenge.work_id.as_str(),
                 "spec_challenge_gate: would score Catastrophic challenge (ObserveOnly)"
             );
-            return HookOutput::allow();
+            return Some(evaluation);
         }
 
         let Some(scorer) = scorer else {
-            return HookOutput::deny(format!(
+            evaluation.scorer_missing = true;
+            evaluation.would_block = true;
+            evaluation.block_reason = Some(format!(
                 "spec_challenge_gate: {class:?} work requires semantic scoring but \
                  no scorer is configured. Wire a `SpecChallengeScorerPort` adapter \
                  or downgrade the upcoming work's reversibility class.",
             ));
+            evaluation.should_block = mode.allows_blocking();
+            return Some(evaluation);
         };
 
         let judged = match scorer.score(&challenge) {
             Ok(s) => s,
             Err(err) => {
-                return HookOutput::deny(format!(
+                evaluation.scorer_error = Some(err.to_string());
+                evaluation.would_block = true;
+                evaluation.block_reason = Some(format!(
                     "spec_challenge_gate: scorer error for {class:?} work — {err}. \
                      Retry after the scorer recovers.",
                 ));
+                evaluation.should_block = mode.allows_blocking();
+                return Some(evaluation);
             }
         };
+        evaluation.score = Some(judged);
 
         if !judged.all_axes_above(catastrophic_axis_threshold) {
-            return HookOutput::deny(format!(
+            evaluation.scorer_rejected = true;
+            evaluation.would_block = true;
+            evaluation.block_reason = Some(format!(
                 "spec_challenge_gate: scorer rejected {class:?} challenge — \
                  weakest axis {weak:.2} below threshold {th:.2}. \
                  Per-axis scores: assumptions={a:.2}, gaps={g:.2}, ambiguities={am:.2}, \
@@ -200,17 +315,36 @@ pub fn process_with_threshold(
                 alt = judged.alternatives_considered,
                 c = judged.constraints_not_satisfied,
             ));
+            evaluation.should_block = mode.allows_blocking();
+            return Some(evaluation);
         }
     }
 
-    HookOutput::allow()
+    evaluation.should_block = mode.allows_blocking() && evaluation.would_block;
+    Some(evaluation)
 }
 
-fn handle_missing_challenge(class: ReversibilityClass, mode: A13EnforcementMode) -> HookOutput {
+#[must_use]
+pub fn output_from_evaluation(evaluation: &SpecChallengeEvaluation) -> HookOutput {
+    if evaluation.should_block {
+        HookOutput::deny(
+            evaluation
+                .block_reason
+                .clone()
+                .unwrap_or_else(|| "spec_challenge_gate: blocked by A13 evaluation".to_string()),
+        )
+    } else {
+        HookOutput::allow()
+    }
+}
+
+fn evaluate_missing_challenge(
+    class: ReversibilityClass,
+    mode: A13EnforcementMode,
+    catastrophic_axis_threshold: f32,
+) -> Option<SpecChallengeEvaluation> {
     match class {
-        ReversibilityClass::TriviallyReversible | ReversibilityClass::ReversibleWithEffort => {
-            HookOutput::allow()
-        }
+        ReversibilityClass::TriviallyReversible | ReversibilityClass::ReversibleWithEffort => None,
         ReversibilityClass::Irreversible | ReversibilityClass::Catastrophic => {
             let reason = format!(
                 "spec_challenge_gate: {class:?} work requires a SpecChallenge artifact \
@@ -218,15 +352,31 @@ fn handle_missing_challenge(class: ReversibilityClass, mode: A13EnforcementMode)
                  gaps, ambiguities, alternatives_considered, and constraints_not_satisfied \
                  before acting."
             );
-            if mode.allows_blocking() {
-                HookOutput::deny(reason)
-            } else {
+            if !mode.allows_blocking() {
                 tracing::info!(
                     ?class,
                     "spec_challenge_gate: would block missing challenge (ObserveOnly)"
                 );
-                HookOutput::allow()
             }
+            let would_block = true;
+            Some(SpecChallengeEvaluation {
+                class,
+                mode,
+                catastrophic_axis_threshold,
+                challenge: None,
+                malformed_challenge: false,
+                missing_required_challenge: true,
+                completeness_finding_count: 0,
+                store_error: None,
+                scoring_required: false,
+                scorer_missing: false,
+                scorer_error: None,
+                score: None,
+                scorer_rejected: false,
+                would_block,
+                should_block: mode.allows_blocking() && would_block,
+                block_reason: Some(reason),
+            })
         }
     }
 }
@@ -542,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn store_failure_does_not_block_allow_path() {
+    fn store_failure_blocks_enforced_allow_path() {
         let challenge = well_formed_challenge();
         let input = input_with_challenge(&challenge);
         let store = RecordingStore::failing();
@@ -553,7 +703,13 @@ mod tests {
             None,
             A13EnforcementMode::DefaultBlocking,
         );
-        assert!(!is_deny(&out));
+        assert!(is_deny(&out));
+        assert!(
+            deny_reason(&out)
+                .is_some_and(|reason| reason.contains("failed to persist SpecChallenge")),
+            "store failure should surface durable-audit refusal: {:?}",
+            deny_reason(&out)
+        );
     }
 
     #[test]

@@ -58,7 +58,7 @@ pub const FLAG_SAMPLED: u8 = 0x01;
 /// (b) propagate to downstream MCP calls via traceparent / tracestate
 /// headers, and (c) link a [`StepProof`](crate::step_proof::StepProof) back
 /// to the trace it was emitted under so corpus queries can pivot to OTEL
-/// dashboards.
+/// trace views.
 ///
 /// Stored in `StepProof` as `Option<TraceContext>` — `None` for proofs that
 /// ran without OTEL configured (the common case until the OTLP exporter

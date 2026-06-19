@@ -3,8 +3,6 @@
 //! Fires on `SessionStart`. Reads `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`
 //! and injects incomplete tasks into context as a system reminder so Claude
 //! sees prior work and can continue where the previous session left off.
-//! (Legacy `~/.claude/persistent-tasks/` data is migrated automatically on
-//! first read — see `super::migrate_persistent_tasks_dir`.)
 //!
 //! Only injects tasks that are NOT completed — completed tasks are mentioned
 //! as a summary count but not listed in full.
@@ -14,7 +12,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// A single checklist item within a task
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -65,68 +63,48 @@ fn project_hash(cwd: &str) -> String {
 
 /// Get the persistent tasks directory for a project (under
 /// `~/.claude/sentinel/persistent-tasks/`).
-///
-/// Triggers a one-time migration from the legacy `~/.claude/persistent-tasks/`
-/// path the first time it's called per process.
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
-    super::migrate_persistent_tasks_dir(fs, &home);
     Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
 /// Read tasks from the persistent JSON file.
 ///
-/// **Bug fix (2026-05-06)**: Previously used `serde_json::from_str(&content).ok()?`
-/// which silently swallowed parse errors and returned None. If tasks.json was
-/// ever corrupted (half-written from a non-atomic write, malformed by an
-/// external editor, disk error), the rehydrator would treat it as "no tasks"
-/// and inject nothing — silent data loss with zero warning to the user.
-///
-/// The companion fix in `task_persist.rs` makes the write atomic, but we still
-/// want defense in depth: if a parse fails for any reason (concurrent writer,
-/// disk issue, manual edit gone wrong), log a loud warning so the user knows
-/// their persistent task store is corrupt. They can then recover from the
-/// per-session task dir at ~/.claude/tasks/<session>/ before it's too late.
-fn read_persistent_tasks(fs: &dyn FileSystemPort, project_hash: &str) -> Option<Vec<Task>> {
-    let dir = persistent_tasks_dir(fs, project_hash)?;
+/// Missing tasks are normal for a fresh project and return `Ok(None)`.
+/// Corrupt or unreadable task state is returned as an error so SessionStart can
+/// inject authority context instead of treating data loss as an empty queue.
+fn read_persistent_tasks(
+    fs: &dyn FileSystemPort,
+    project_hash: &str,
+) -> Result<Option<Vec<Task>>, String> {
+    let dir = persistent_tasks_dir(fs, project_hash)
+        .ok_or_else(|| "cannot determine home directory for persisted tasks".to_string())?;
     let path = dir.join("tasks.json");
-    let content = match fs.read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return None, // file simply doesn't exist yet — quiet path
-    };
-    match serde_json::from_str::<Vec<Task>>(&content) {
-        Ok(tasks) => Some(tasks),
-        Err(e) => {
-            tracing::warn!(
-                project_hash = project_hash,
-                path = %path.display(),
-                error = %e,
-                content_len = content.len(),
-                "CORRUPT tasks.json detected during rehydration — refusing to \
-                 silently treat as empty. User's tasks may be in a half-written \
-                 state. Recover from ~/.claude/tasks/<session>/ if available."
-            );
-            // Print to stderr too so it surfaces in the SessionStart hook output
-            // even when tracing is misconfigured.
-            eprintln!(
-                "[sentinel] task_rehydrate: corrupt tasks.json at {} — {} bytes, \
-                 parse error: {}. Tasks NOT rehydrated. Investigate before \
-                 creating new tasks (they may overlap or collide).",
-                path.display(),
-                content.len(),
-                e
-            );
-            None
-        }
+    if !fs.exists(&path) {
+        return Ok(None);
     }
+    let content = fs
+        .read_to_string(&path)
+        .map_err(|err| format!("failed to read persisted tasks {}: {err}", path.display()))?;
+    serde_json::from_str::<Vec<Task>>(&content)
+        .map(Some)
+        .map_err(|err| format!("failed to parse persisted tasks {}: {err}", path.display()))
 }
 
 /// Read metadata
-fn read_meta(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PersistMeta> {
-    let dir = persistent_tasks_dir(fs, project_hash)?;
+fn read_meta(fs: &dyn FileSystemPort, project_hash: &str) -> Result<Option<PersistMeta>, String> {
+    let dir = persistent_tasks_dir(fs, project_hash)
+        .ok_or_else(|| "cannot determine home directory for persisted task metadata".to_string())?;
     let path = dir.join("meta.json");
-    let content = fs.read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    if !fs.exists(&path) {
+        return Ok(None);
+    }
+    let content = fs
+        .read_to_string(&path)
+        .map_err(|err| format!("failed to read task metadata {}: {err}", path.display()))?;
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|err| format!("failed to parse task metadata {}: {err}", path.display()))
 }
 
 /// Check if the persisted tasks are from the CURRENT session.
@@ -187,14 +165,14 @@ fn format_rehydrate_instruction(
             "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
              Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
              If yes, recreate using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
-             If no or unclear, skip silently and proceed with the user's opening prompt."
+             If no or unclear, skip rehydration and proceed with the user's opening prompt."
         )
     } else {
         format!(
             "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
              Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
              If yes, recreate using TaskCreate with the exact subjects and descriptions shown above. \
-             If no or unclear, skip silently and proceed with the user's opening prompt."
+             If no or unclear, skip rehydration and proceed with the user's opening prompt."
         )
     }
 }
@@ -210,12 +188,21 @@ fn format_rehydrate_instruction(
 /// the prose summary ("last session you merged X, Y, Z"); a session killed
 /// mid-work gets both.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_input_session_id(input) else {
+        tracing::warn!("task_rehydrate skipped persisted context without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let proj_hash = project_hash(cwd);
 
-    let tasks_block = build_tasks_block(input, ctx, &proj_hash, session_id);
-    let summary_block = build_summary_block(ctx, &proj_hash, session_id);
+    let tasks_block = match build_tasks_block(input, ctx, &proj_hash, session_id) {
+        Ok(block) => block,
+        Err(err) => return authority_context(err),
+    };
+    let summary_block = match build_summary_block(ctx, &proj_hash, session_id) {
+        Ok(block) => block,
+        Err(err) => return super::session_summary::summary_read_error_context(err),
+    };
 
     match (tasks_block, summary_block) {
         (None, None) => HookOutput::allow(),
@@ -236,18 +223,20 @@ fn build_tasks_block(
     ctx: &HookContext<'_>,
     proj_hash: &str,
     session_id: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     // Read persistent tasks
     let tasks = match read_persistent_tasks(ctx.fs, proj_hash) {
-        Some(t) if !t.is_empty() => t,
-        _ => return None,
+        Ok(Some(tasks)) if !tasks.is_empty() => tasks,
+        Ok(_) => return Ok(None),
+        Err(err) => return Err(err),
     };
 
     // Check if these are from the current session (skip rehydration)
-    if let Some(meta) = read_meta(ctx.fs, proj_hash) {
-        if is_current_session(&meta, session_id) {
+    let meta = read_meta(ctx.fs, proj_hash)?;
+    if let Some(meta) = &meta {
+        if is_current_session(meta, session_id) {
             tracing::debug!("Persistent tasks are from current session — skipping rehydration");
-            return None;
+            return Ok(None);
         }
     }
 
@@ -256,12 +245,13 @@ fn build_tasks_block(
     let completed_count = tasks.iter().filter(|t| t.status == "completed").count();
 
     if incomplete.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let _ = input; // reserved for future per-input shaping
-    // Read meta for timestamp
-    let time_str = read_meta(ctx.fs, proj_hash).map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
+    let time_str = meta
+        .as_ref()
+        .map_or_else(|| "unknown".to_string(), |m| relative_time(&m.updated_at));
 
     // Detect whether any task has blocking relationships
     let has_blocking = incomplete
@@ -345,7 +335,18 @@ fn build_tasks_block(
         format_rehydrate_instruction(incomplete.len(), has_blocking, ctx.autopilot_enabled());
     context.push_str(&instruction);
 
-    Some(context)
+    Ok(Some(context))
+}
+
+fn authority_context(message: impl Into<String>) -> HookOutput {
+    HookOutput::inject_context(
+        HookEvent::SessionStart,
+        format!(
+            "{}[Task Rehydrate] {}",
+            HookOutput::SENTINEL_AUTHORITY_PREFIX,
+            message.into()
+        ),
+    )
 }
 
 /// Build the `[Last Session]` prose block from `session-summary.json`, or
@@ -353,13 +354,19 @@ fn build_tasks_block(
 ///
 /// Mirrors the on-disk struct written by [`super::session_summary`] without a
 /// hard dependency on its exact field set (extra fields are ignored).
-fn build_summary_block(ctx: &HookContext<'_>, proj_hash: &str, session_id: &str) -> Option<String> {
-    let summary = super::session_summary::read_summary(ctx.fs, proj_hash)?;
+fn build_summary_block(
+    ctx: &HookContext<'_>,
+    proj_hash: &str,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(summary) = super::session_summary::read_summary(ctx.fs, proj_hash)? else {
+        return Ok(None);
+    };
 
     // Skip a summary written by THIS session (e.g. SessionStart fired twice) —
     // it would just echo our own teardown back at us.
     if summary.session_id == session_id {
-        return None;
+        return Ok(None);
     }
 
     let when = relative_time(&summary.written_at);
@@ -387,12 +394,106 @@ fn build_summary_block(ctx: &HookContext<'_>, proj_hash: &str, session_id: &str)
          Use it to resume where work left off; the structured task list (if any) below is authoritative for what to do next.",
     );
 
-    Some(block)
+    Ok(Some(block))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
+    use std::path::{Path, PathBuf};
+
+    struct TestFs {
+        home: PathBuf,
+    }
+
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(())
+        }
+    }
+
+    fn process_with_home(home: PathBuf, cwd: &Path, session_id: &str) -> HookOutput {
+        let git = crate::hooks::test_support::StubGit;
+        let fs = TestFs { home };
+        let process_port = crate::hooks::test_support::StubProcess;
+        let memory_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let env = crate::hooks::test_support::StubEnv::new();
+        let ctx = crate::hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &process_port,
+            llm: None,
+            memory_mcp: &memory_mcp,
+            env: &env,
+            linear_lookup: None,
+        };
+        let input = HookInput {
+            session_id: Some(session_id.to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        process(&input, &ctx)
+    }
+
+    fn injected_context(output: &HookOutput) -> &str {
+        output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("expected context injection")
+    }
 
     #[test]
     fn test_project_hash_matches_persist() {
@@ -486,10 +587,39 @@ mod tests {
     }
 
     #[test]
+    fn read_persistent_tasks_ignores_non_sentinel_legacy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let project = "legacy-only";
+        let legacy_dir = home.join(".claude").join("persistent-tasks").join(project);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(
+            legacy_dir.join("tasks.json"),
+            r#"[{"id":"T-1","subject":"legacy","status":"pending"}]"#,
+        )
+        .unwrap();
+
+        let fs = TestFs { home: home.clone() };
+        let tasks = read_persistent_tasks(&fs, project).expect("canonical task read");
+
+        assert!(tasks.is_none(), "legacy task snapshots must be ignored");
+        assert!(
+            !home
+                .join(".claude")
+                .join("sentinel")
+                .join("persistent-tasks")
+                .exists(),
+            "legacy data must not be migrated into Sentinel authority state"
+        );
+    }
+
+    #[test]
     fn summary_block_absent_yields_none() {
         // No session-summary.json on disk for this hash → no prose block.
         let ctx = crate::hooks::test_support::stub_ctx();
-        assert!(build_summary_block(&ctx, "zzzzzzzz", "any-session").is_none());
+        assert!(build_summary_block(&ctx, "zzzzzzzz", "any-session")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -507,6 +637,167 @@ mod tests {
             .as_ref()
             .and_then(|h| h.additional_context.as_ref())
             .is_some();
-        assert!(!has_ctx, "expected no context injection when both sources empty");
+        assert!(
+            !has_ctx,
+            "expected no context injection when both sources empty"
+        );
+    }
+
+    #[test]
+    fn missing_session_does_not_read_persisted_tasks_or_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let task_dir = persistent_tasks_dir(&fs, &project).unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("tasks.json"), "not-json").unwrap();
+        let summary_path =
+            super::super::session_summary::summary_path(&fs, &project).expect("summary path");
+        std::fs::write(summary_path, "not-json").unwrap();
+
+        let input = HookInput {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+        let context = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            context.is_none(),
+            "missing session must not consume or report persisted unknown-session context"
+        );
+    }
+
+    #[test]
+    fn synthetic_session_does_not_rehydrate_unknown_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let task_dir = persistent_tasks_dir(&fs, &project).unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("tasks.json"),
+            r#"[{"id":"T-1","subject":"should not rehydrate","status":"pending"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            task_dir.join("meta.json"),
+            r#"{"session_id":"previous-real-session","updated_at":"2026-05-30T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+        let context = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            context.is_none(),
+            "synthetic session must not rehydrate persisted task state"
+        );
+    }
+
+    #[test]
+    fn corrupt_session_summary_injects_authority_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let summary_path =
+            super::super::session_summary::summary_path(&TestFs { home: home.clone() }, &project)
+                .unwrap();
+        std::fs::create_dir_all(summary_path.parent().unwrap()).unwrap();
+        std::fs::write(&summary_path, "not-json").unwrap();
+
+        let git = crate::hooks::test_support::StubGit;
+        let fs = TestFs { home };
+        let process_port = crate::hooks::test_support::StubProcess;
+        let memory_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let env = crate::hooks::test_support::StubEnv::new();
+        let ctx = crate::hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &process_port,
+            llm: None,
+            memory_mcp: &memory_mcp,
+            env: &env,
+            linear_lookup: None,
+        };
+        let input = HookInput {
+            session_id: Some("new-session".to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+        let context = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref())
+            .expect("corrupt summary must be visible");
+        assert!(context.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(context.contains("failed to parse session summary"));
+    }
+
+    #[test]
+    fn corrupt_tasks_json_injects_authority_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let fs = TestFs { home: home.clone() };
+        let task_dir = persistent_tasks_dir(&fs, &project).unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("tasks.json"), "not-json").unwrap();
+
+        let output = process_with_home(home, &cwd, "new-session");
+        let context = injected_context(&output);
+        assert!(context.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(context.contains("[Task Rehydrate]"));
+        assert!(context.contains("failed to parse persisted tasks"));
+    }
+
+    #[test]
+    fn corrupt_meta_json_injects_authority_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let fs = TestFs { home: home.clone() };
+        let task_dir = persistent_tasks_dir(&fs, &project).unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("tasks.json"),
+            r#"[{"id":"T-1","subject":"Resume enterprise path","status":"pending"}]"#,
+        )
+        .unwrap();
+        std::fs::write(task_dir.join("meta.json"), "not-json").unwrap();
+
+        let output = process_with_home(home, &cwd, "new-session");
+        let context = injected_context(&output);
+        assert!(context.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(context.contains("[Task Rehydrate]"));
+        assert!(context.contains("failed to parse task metadata"));
     }
 }

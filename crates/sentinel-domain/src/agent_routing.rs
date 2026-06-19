@@ -135,8 +135,6 @@ pub enum TieBreaker {
         winner: AgentId,
         typical_latency_ms: u32,
     },
-    /// Step 6 — final deterministic fallback: lexical `AgentId` order.
-    StableId { winner: AgentId },
 }
 
 /// Full decision tree for a single routing call. Returned by
@@ -144,8 +142,9 @@ pub enum TieBreaker {
 /// routing explain` CLI subcommand once Phase 3b ships it).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingExplanation {
-    /// The agent the router chose, or `None` when no agent
-    /// satisfied the requirements.
+    /// The agent the router chose, or `None` when no agent satisfied the
+    /// requirements or when the remaining candidates are still ambiguous after
+    /// all evidence-bearing tie-breakers run.
     pub chosen: Option<AgentId>,
     /// Agents that passed `required` + `forbidden` filtering and
     /// became tie-breaker candidates.

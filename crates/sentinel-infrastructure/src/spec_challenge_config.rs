@@ -17,7 +17,7 @@ use anyhow::{anyhow, Context, Result};
 use sentinel_application::hooks::spec_challenge_gate;
 use serde::Deserialize;
 
-/// Shipped baseline. Hook defaults to `ObserveOnly`,
+/// Shipped baseline. Hook defaults to `DefaultBlocking`,
 /// `catastrophic_axis_threshold` defaults to `0.7`.
 pub const SHIPPED_SPEC_CHALLENGE_DEFAULTS: &str =
     include_str!("../../../config/spec-challenge-defaults.toml");
@@ -30,29 +30,34 @@ pub struct SpecChallengeConfig {
 }
 
 impl SpecChallengeConfig {
-    /// Safe default: `ObserveOnly` mode, threshold `0.7`. No
-    /// blocking; telemetry only.
+    /// Production default: class-graded blocking, threshold `0.7`.
+    #[must_use]
+    pub const fn default_blocking() -> Self {
+        Self {
+            mode: spec_challenge_gate::A13EnforcementMode::DefaultBlocking,
+            catastrophic_axis_threshold: spec_challenge_gate::DEFAULT_CATASTROPHIC_AXIS_THRESHOLD,
+        }
+    }
+
+    /// Explicit diagnostics-only mode. Not used as a production fallback.
     #[must_use]
     pub const fn observe_only() -> Self {
         Self {
             mode: spec_challenge_gate::A13EnforcementMode::ObserveOnly,
-            catastrophic_axis_threshold:
-                spec_challenge_gate::DEFAULT_CATASTROPHIC_AXIS_THRESHOLD,
+            catastrophic_axis_threshold: spec_challenge_gate::DEFAULT_CATASTROPHIC_AXIS_THRESHOLD,
         }
     }
 
     /// Parse from a TOML string. Missing keys fall back to
-    /// [`Self::observe_only`] defaults; unknown mode strings
+    /// [`Self::default_blocking`] defaults; unknown mode strings
     /// surface as `Err`.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let toml_doc: SpecChallengeToml =
             toml::from_str(s).context("failed to parse spec-challenge TOML")?;
-        let mode = toml_doc
-            .spec_challenge_gate
-            .as_ref()
-            .map_or(Ok(spec_challenge_gate::A13EnforcementMode::ObserveOnly), |s| {
-                parse_mode(&s.mode)
-            })?;
+        let mode = toml_doc.spec_challenge_gate.as_ref().map_or(
+            Ok(spec_challenge_gate::A13EnforcementMode::DefaultBlocking),
+            |s| parse_mode(&s.mode),
+        )?;
         let threshold = toml_doc
             .spec_challenge_gate
             .as_ref()
@@ -88,10 +93,16 @@ impl SpecChallengeConfig {
                 return Ok(config);
             }
             let bytes = std::fs::read_to_string(path).with_context(|| {
-                format!("failed to read spec-challenge override at {}", path.display())
+                format!(
+                    "failed to read spec-challenge override at {}",
+                    path.display()
+                )
             })?;
             config = Self::from_toml_str(&bytes).with_context(|| {
-                format!("failed to parse spec-challenge override at {}", path.display())
+                format!(
+                    "failed to parse spec-challenge override at {}",
+                    path.display()
+                )
             })?;
             tracing::info!(
                 path = %path.display(),
@@ -140,15 +151,25 @@ mod tests {
     #[test]
     fn shipped_defaults_parse_cleanly() {
         let config = SpecChallengeConfig::shipped().unwrap();
-        assert_eq!(config.mode, A13EnforcementMode::ObserveOnly);
+        assert_eq!(config.mode, A13EnforcementMode::DefaultBlocking);
         assert!((config.catastrophic_axis_threshold - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn observe_only_constant_matches_shipped() {
+    fn default_blocking_constant_matches_shipped() {
         let shipped = SpecChallengeConfig::shipped().unwrap();
-        let const_default = SpecChallengeConfig::observe_only();
+        let const_default = SpecChallengeConfig::default_blocking();
         assert_eq!(shipped, const_default);
+    }
+
+    #[test]
+    fn explicit_observe_only_parses() {
+        let toml = r#"
+            [spec_challenge_gate]
+            mode = "ObserveOnly"
+        "#;
+        let config = SpecChallengeConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.mode, A13EnforcementMode::ObserveOnly);
     }
 
     #[test]
@@ -184,10 +205,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_section_falls_back_to_observe_only() {
+    fn missing_section_falls_back_to_default_blocking() {
         let toml = "";
         let config = SpecChallengeConfig::from_toml_str(toml).unwrap();
-        assert_eq!(config.mode, A13EnforcementMode::ObserveOnly);
+        assert_eq!(config.mode, A13EnforcementMode::DefaultBlocking);
         assert!((config.catastrophic_axis_threshold - 0.7).abs() < f32::EPSILON);
     }
 
@@ -230,15 +251,14 @@ mod tests {
     #[test]
     fn with_shipped_and_overrides_none_uses_shipped() {
         let config = SpecChallengeConfig::with_shipped_and_overrides(None).unwrap();
-        assert_eq!(config.mode, A13EnforcementMode::ObserveOnly);
+        assert_eq!(config.mode, A13EnforcementMode::DefaultBlocking);
     }
 
     #[test]
     fn with_shipped_and_overrides_missing_file_uses_shipped() {
         let path = std::path::Path::new("/nonexistent/path/spec-challenge.toml");
-        let config =
-            SpecChallengeConfig::with_shipped_and_overrides(Some(path)).unwrap();
-        assert_eq!(config.mode, A13EnforcementMode::ObserveOnly);
+        let config = SpecChallengeConfig::with_shipped_and_overrides(Some(path)).unwrap();
+        assert_eq!(config.mode, A13EnforcementMode::DefaultBlocking);
     }
 
     #[test]
@@ -254,8 +274,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let config =
-            SpecChallengeConfig::with_shipped_and_overrides(Some(&path)).unwrap();
+        let config = SpecChallengeConfig::with_shipped_and_overrides(Some(&path)).unwrap();
         assert_eq!(config.mode, A13EnforcementMode::StrictBlocking);
         assert!((config.catastrophic_axis_threshold - 0.9).abs() < f32::EPSILON);
     }

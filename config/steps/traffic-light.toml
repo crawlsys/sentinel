@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Traffic Light Skill — Step Definitions
 # Integration health assessment with green/yellow/red classification
 #

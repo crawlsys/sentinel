@@ -452,13 +452,15 @@ claude mcp add {} -- mcp-router --single {}
 ```bash
 cargo install --path .
 ```
-".to_string(),
+"
+        .to_string(),
         _ => r"## Installation
 
 ```bash
 cargo build --release
 ```
-".to_string(),
+"
+        .to_string(),
     };
 
     format!(
@@ -510,7 +512,8 @@ cargo build --release    # Build optimized binary
 cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
-```".to_string(),
+```"
+        .to_string(),
         Some(RustFlavor::Cli) => r"## Build Commands
 
 ```bash
@@ -519,7 +522,8 @@ cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
 cargo install --path .   # Install to ~/.cargo/bin/
-```".to_string(),
+```"
+        .to_string(),
         _ => r"## Build Commands
 
 ```bash
@@ -527,7 +531,8 @@ cargo build --release    # Build optimized binary
 cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt --check        # Check formatting
-```".to_string(),
+```"
+        .to_string(),
     };
     sections.push(build_cmds);
 

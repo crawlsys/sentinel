@@ -27,6 +27,29 @@
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::state::SessionState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRevocationDecision {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRevocationEvaluation {
+    pub tool: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_id_present: bool,
+    pub revoked: bool,
+    pub should_deny: bool,
+    pub decision: AgentRevocationDecision,
+}
+
+impl AgentRevocationEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.agent_id_present
+    }
+}
+
 /// Process a `PreToolUse` event. Returns:
 /// - [`HookOutput::allow`] when no `agent_id` is present, or when the
 ///   `agent_id` isn't on the revocation list.
@@ -34,17 +57,52 @@ use sentinel_domain::state::SessionState;
 ///   message names the revoked `agent_id` so the user has unambiguous
 ///   feedback in tool-result text.
 pub fn process(input: &HookInput, state: &SessionState) -> HookOutput {
+    let evaluation = evaluate(input, state);
+    output_from_evaluation(input, &evaluation)
+}
+
+pub fn evaluate(input: &HookInput, state: &SessionState) -> AgentRevocationEvaluation {
+    let tool = input.tool_name.clone();
     let agent_id = match input.agent_id.as_deref() {
         Some(id) if !id.is_empty() => id,
         // No agent_id on the input = main session, never revokable.
         // Revocation is for spawned subagents/teammates only.
-        _ => return HookOutput::allow(),
+        _ => {
+            return AgentRevocationEvaluation {
+                tool,
+                agent_id: None,
+                agent_id_present: false,
+                revoked: false,
+                should_deny: false,
+                decision: AgentRevocationDecision::Allow,
+            };
+        }
     };
 
-    if !state.is_agent_revoked(agent_id) {
+    let revoked = state.is_agent_revoked(agent_id);
+    AgentRevocationEvaluation {
+        tool,
+        agent_id: Some(agent_id.to_string()),
+        agent_id_present: true,
+        revoked,
+        should_deny: revoked,
+        decision: if revoked {
+            AgentRevocationDecision::Deny
+        } else {
+            AgentRevocationDecision::Allow
+        },
+    }
+}
+
+pub fn output_from_evaluation(
+    input: &HookInput,
+    evaluation: &AgentRevocationEvaluation,
+) -> HookOutput {
+    if !matches!(evaluation.decision, AgentRevocationDecision::Deny) {
         return HookOutput::allow();
     }
 
+    let agent_id = evaluation.agent_id.as_deref().unwrap_or("unknown-agent");
     HookOutput::deny(super::block_context::append_block_context(
         format!(
             "[Sentinel-Authority] agent_revocation: agent '{agent_id}' has been \

@@ -18,6 +18,42 @@ use std::path::PathBuf;
 // parse the bash command, load project config, decide what to block.
 use sentinel_domain::commit::{has_linear_ref, is_conventional};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitMessageDecision {
+    Allow,
+    AllowAmend,
+    AllowNoMessage,
+    AllowConventional,
+    BlockMalformed,
+    BlockMissingLinearRef,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitMessageEvaluation {
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub bash_tool: bool,
+    pub command_present: bool,
+    pub git_commit: bool,
+    pub amend: bool,
+    pub message: Option<String>,
+    pub conventional: bool,
+    pub effective_cwd: Option<String>,
+    pub project: Option<String>,
+    pub linear_prefixes: Vec<String>,
+    pub linear_ref_required: bool,
+    pub linear_ref_present: bool,
+    pub should_block: bool,
+    pub decision: CommitMessageDecision,
+}
+
+impl CommitMessageEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.bash_tool && self.git_commit
+    }
+}
+
 fn extract_commit_message(command: &str) -> Option<String> {
     let heredoc_re = Regex::new(r"(?s)<<'?EOF'?\s*\n(.*?)\n\s*EOF").ok()?;
     if let Some(caps) = heredoc_re.captures(command) {
@@ -206,80 +242,226 @@ fn effective_cwd_from_command(command: &str) -> Option<String> {
 }
 
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
-    if input.tool_name.as_deref() != Some("Bash") {
-        return HookOutput::allow();
-    }
+    let evaluation = evaluate(input, ctx);
+    output_from_evaluation(&evaluation)
+}
 
+pub fn evaluate(input: &HookInput, ctx: &super::HookContext<'_>) -> CommitMessageEvaluation {
+    let tool = input.tool_name.clone();
+    let bash_tool = input.tool_name.as_deref() == Some("Bash");
     let command = input
         .tool_input
         .as_ref()
         .and_then(|ti| ti.get("command"))
         .and_then(|c| c.as_str())
-        .unwrap_or("");
+        .map(str::to_string);
+    let command_present = command.as_deref().is_some_and(|cmd| !cmd.is_empty());
+
+    if !bash_tool {
+        return base_evaluation(tool, command, bash_tool, command_present);
+    }
+    let Some(command_text) = command.as_deref() else {
+        return base_evaluation(tool, command, bash_tool, command_present);
+    };
 
     let commit_re = match Regex::new(r"\bgit\s+commit\b") {
         Ok(re) => re,
-        Err(_) => return HookOutput::allow(),
+        Err(_) => return base_evaluation(tool, command, bash_tool, command_present),
     };
 
-    if !commit_re.is_match(command) {
-        return HookOutput::allow();
+    if !commit_re.is_match(command_text) {
+        return base_evaluation(tool, command, bash_tool, command_present);
     }
 
-    if command.contains("--amend") {
-        return HookOutput::allow();
+    if command_text.contains("--amend") {
+        return CommitMessageEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_commit: true,
+            amend: true,
+            message: None,
+            conventional: false,
+            effective_cwd: None,
+            project: None,
+            linear_prefixes: Vec::new(),
+            linear_ref_required: false,
+            linear_ref_present: false,
+            should_block: false,
+            decision: CommitMessageDecision::AllowAmend,
+        };
     }
 
-    let message = match extract_commit_message(command) {
-        Some(m) => m,
-        None => return HookOutput::allow(),
+    let Some(message) = extract_commit_message(command_text) else {
+        return CommitMessageEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_commit: true,
+            amend: false,
+            message: None,
+            conventional: false,
+            effective_cwd: None,
+            project: None,
+            linear_prefixes: Vec::new(),
+            linear_ref_required: false,
+            linear_ref_present: false,
+            should_block: false,
+            decision: CommitMessageDecision::AllowNoMessage,
+        };
     };
 
     if !is_conventional(&message) {
-        let valid_list = sentinel_domain::commit::VALID_PREFIXES
-            .iter()
-            .map(|p| format!("`{p}:`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let reason = format!(
-            "Commit message doesn't follow conventional format.\n\
-             Got: \"{message}\"\n\
-             Expected: <type>(<scope>): <description>\n\
-             Valid types: {valid_list}\n\
-             Examples: \"feat: add user auth\", \"fix(api): handle null response\", \"chore: bump deps\""
-        );
-        return HookOutput::block(reason);
+        return CommitMessageEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_commit: true,
+            amend: false,
+            message: Some(message),
+            conventional: false,
+            effective_cwd: None,
+            project: None,
+            linear_prefixes: Vec::new(),
+            linear_ref_required: false,
+            linear_ref_present: false,
+            should_block: true,
+            decision: CommitMessageDecision::BlockMalformed,
+        };
     }
 
     // Prefer the cwd the command actually commits in: `cd <path> && git commit`
     // → use <path>, not the session's input.cwd. Falls back to session cwd.
-    let effective_cwd = effective_cwd_from_command(command);
+    let effective_cwd = effective_cwd_from_command(command_text);
     let cwd_for_lookup: Option<&str> = effective_cwd.as_deref().or(input.cwd.as_deref());
 
+    let mut project = None;
+    let mut linear_prefixes = Vec::new();
+    let mut linear_ref_required = false;
+    let mut linear_ref_present = false;
     if let Some(cwd) = cwd_for_lookup {
         if let Some((project, prefixes)) = detect_prefixes_for_cwd(ctx.fs, cwd) {
-            if !has_linear_ref(&message, &prefixes) {
-                let list = prefixes
-                    .iter()
-                    .map(|p| format!("{p}-XXX"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let example = prefixes
-                    .first().map_or_else(|| "FPCRM-123".into(), |p| format!("{p}-123"));
-                let reason = format!(
-                    "Commit is missing a Linear issue reference.\n\
-                     Project `{project}` (cwd: {cwd}) requires one of: {list}.\n\
-                     Add a ref to the subject or body (e.g. \"feat: add X ({example})\" \
-                     or \"Ref {example}\" in the body).\n\
-                     Got: \"{message}\""
-                );
-                return HookOutput::block(reason);
-            }
+            linear_ref_required = true;
+            linear_ref_present = has_linear_ref(&message, &prefixes);
+            linear_prefixes = prefixes;
+            return CommitMessageEvaluation {
+                tool,
+                command,
+                bash_tool,
+                command_present,
+                git_commit: true,
+                amend: false,
+                message: Some(message),
+                conventional: true,
+                effective_cwd: Some(cwd.to_string()),
+                project: Some(project),
+                linear_prefixes,
+                linear_ref_required,
+                linear_ref_present,
+                should_block: !linear_ref_present,
+                decision: if linear_ref_present {
+                    CommitMessageDecision::AllowConventional
+                } else {
+                    CommitMessageDecision::BlockMissingLinearRef
+                },
+            };
         }
+        project = None;
     }
 
-    HookOutput::allow()
+    CommitMessageEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        git_commit: true,
+        amend: false,
+        message: Some(message),
+        conventional: true,
+        effective_cwd,
+        project,
+        linear_prefixes,
+        linear_ref_required,
+        linear_ref_present,
+        should_block: false,
+        decision: CommitMessageDecision::AllowConventional,
+    }
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    command: Option<String>,
+    bash_tool: bool,
+    command_present: bool,
+) -> CommitMessageEvaluation {
+    CommitMessageEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        git_commit: false,
+        amend: false,
+        message: None,
+        conventional: false,
+        effective_cwd: None,
+        project: None,
+        linear_prefixes: Vec::new(),
+        linear_ref_required: false,
+        linear_ref_present: false,
+        should_block: false,
+        decision: CommitMessageDecision::Allow,
+    }
+}
+
+pub fn output_from_evaluation(evaluation: &CommitMessageEvaluation) -> HookOutput {
+    match evaluation.decision {
+        CommitMessageDecision::Allow
+        | CommitMessageDecision::AllowAmend
+        | CommitMessageDecision::AllowNoMessage
+        | CommitMessageDecision::AllowConventional => HookOutput::allow(),
+        CommitMessageDecision::BlockMalformed => {
+            let message = evaluation.message.as_deref().unwrap_or("");
+            let valid_list = sentinel_domain::commit::VALID_PREFIXES
+                .iter()
+                .map(|p| format!("`{p}:`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let reason = format!(
+                "Commit message doesn't follow conventional format.\n\
+                 Got: \"{message}\"\n\
+                 Expected: <type>(<scope>): <description>\n\
+                 Valid types: {valid_list}\n\
+                 Examples: \"feat: add user auth\", \"fix(api): handle null response\", \"chore: bump deps\""
+            );
+            HookOutput::block(reason)
+        }
+        CommitMessageDecision::BlockMissingLinearRef => {
+            let project = evaluation.project.as_deref().unwrap_or("unknown");
+            let cwd = evaluation.effective_cwd.as_deref().unwrap_or("unknown");
+            let message = evaluation.message.as_deref().unwrap_or("");
+            let list = evaluation
+                .linear_prefixes
+                .iter()
+                .map(|p| format!("{p}-XXX"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let example = evaluation
+                .linear_prefixes
+                .first()
+                .map_or_else(|| "FPCRM-123".into(), |p| format!("{p}-123"));
+            let reason = format!(
+                "Commit is missing a Linear issue reference.\n\
+                 Project `{project}` (cwd: {cwd}) requires one of: {list}.\n\
+                 Add a ref to the subject or body (e.g. \"feat: add X ({example})\" \
+                 or \"Ref {example}\" in the body).\n\
+                 Got: \"{message}\""
+            );
+            HookOutput::block(reason)
+        }
+    }
 }
 
 #[cfg(test)]

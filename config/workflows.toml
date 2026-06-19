@@ -1529,8 +1529,8 @@ judge = "codex"
 description = "Stop tunnel, release resources, report URL used"
 
 # --- browserbase-tester (8 phases) ---
-# Renamed from 'steel-tester'. Localhost runs via CDP (mcp__cdp__*);
-# remote URLs (staging, production) run via Browserbase MCP.
+# Localhost runs via CDP (mcp__cdp__*); remote URLs (staging, production)
+# run via Browserbase MCP.
 [[workflows]]
 skill = "browserbase-tester"
 

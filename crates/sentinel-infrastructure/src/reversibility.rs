@@ -114,7 +114,7 @@ pub struct LayeredReversibilityClassifier {
     /// Compiled Layer-3 Bash patterns, evaluation order preserved.
     bash_patterns: Vec<(Regex, ReversibilityClass)>,
     /// Compiled file-path patterns for Write/Edit/NotebookEdit, evaluation
-    /// order preserved. Consulted before the Layer-1 builtin so a matched
+    /// order preserved. Queried before the Layer-1 builtin so a matched
     /// path (e.g. a memory-atom file) can override the default RWE class.
     path_patterns: Vec<(Regex, ReversibilityClass)>,
     /// `overrides[<tool_name>] = class` — Layer 4.
@@ -147,8 +147,7 @@ impl LayeredReversibilityClassifier {
     /// in a follow-up phase once the operator-overrides storage location
     /// is settled.
     pub fn with_shipped_defaults() -> Result<Self> {
-        const SHIPPED_DEFAULTS: &str =
-            include_str!("../../../config/reversibility-defaults.toml");
+        const SHIPPED_DEFAULTS: &str = include_str!("../../../config/reversibility-defaults.toml");
         Self::from_str(SHIPPED_DEFAULTS, None)
     }
 
@@ -156,8 +155,8 @@ impl LayeredReversibilityClassifier {
     /// optional overrides TOML string (operator-managed). The two
     /// sources are merged per the rules in the module docstring.
     pub fn from_str(defaults_toml: &str, overrides_toml: Option<&str>) -> Result<Self> {
-        let defaults: ReversibilityConfigToml = toml::from_str(defaults_toml)
-            .context("failed to parse reversibility defaults TOML")?;
+        let defaults: ReversibilityConfigToml =
+            toml::from_str(defaults_toml).context("failed to parse reversibility defaults TOML")?;
         let overrides = overrides_toml
             .map(|s| {
                 toml::from_str::<ReversibilityConfigToml>(s)
@@ -170,10 +169,7 @@ impl LayeredReversibilityClassifier {
 
     /// Load from paths. The defaults path must exist; the overrides path
     /// is optional and silently skipped if absent.
-    pub fn load_from_paths(
-        defaults_path: &Path,
-        overrides_path: Option<&Path>,
-    ) -> Result<Self> {
+    pub fn load_from_paths(defaults_path: &Path, overrides_path: Option<&Path>) -> Result<Self> {
         let defaults_str = std::fs::read_to_string(defaults_path).with_context(|| {
             format!(
                 "failed to read reversibility defaults from {}",
@@ -182,7 +178,10 @@ impl LayeredReversibilityClassifier {
         })?;
         let overrides_str = match overrides_path {
             Some(p) if p.exists() => Some(std::fs::read_to_string(p).with_context(|| {
-                format!("failed to read reversibility overrides from {}", p.display())
+                format!(
+                    "failed to read reversibility overrides from {}",
+                    p.display()
+                )
             })?),
             _ => None,
         };
@@ -202,9 +201,8 @@ impl LayeredReversibilityClassifier {
         // Layer 3: Bash patterns. Concatenate; overrides AFTER defaults so
         // operators can add catch-all rules without losing shipped
         // catastrophic-pattern coverage at the front of the list.
-        let mut bash_patterns = Vec::with_capacity(
-            defaults.bash.pattern.len() + overrides_config.bash.pattern.len(),
-        );
+        let mut bash_patterns =
+            Vec::with_capacity(defaults.bash.pattern.len() + overrides_config.bash.pattern.len());
         for rule in defaults
             .bash
             .pattern
@@ -220,9 +218,8 @@ impl LayeredReversibilityClassifier {
         // Path patterns (Write/Edit/NotebookEdit). Same concatenate-defaults-
         // first contract as bash patterns so operators can append refinements
         // without losing the shipped entries' precedence.
-        let mut path_patterns = Vec::with_capacity(
-            defaults.path.pattern.len() + overrides_config.path.pattern.len(),
-        );
+        let mut path_patterns =
+            Vec::with_capacity(defaults.path.pattern.len() + overrides_config.path.pattern.len());
         for rule in defaults
             .path
             .pattern
@@ -306,7 +303,7 @@ impl LayeredReversibilityClassifier {
 
 /// Built-in (Layer 1) class dispatch for non-MCP, non-Bash tools.
 /// Returns `None` when the tool name should be handled by a deeper
-/// layer (MCP via Layer 2, Bash via Layer 3) or by the unknown-tool
+/// layer (MCP via Layer 2, Bash via Layer 3) or by an unclassified-tool
 /// fallback.
 ///
 /// Coverage is exhaustive for the harness tools shipped by Claude Code
@@ -429,7 +426,7 @@ impl ReversibilityClassifierPort for LayeredReversibilityClassifier {
         // `builtin_class` doc comment describes for Skill/ToolSearch/AskUserQuestion.
         match tool_name {
             "Bash" | "PowerShell" => self.classify_bash(tool_input),
-            // Edit tools consult the path-pattern layer first: a matched path
+            // Edit tools query the path-pattern layer first: a matched path
             // (e.g. a memory-atom file or a `plans/*.md`) classifies by its
             // location. No match → fall through to the Layer-1 builtin
             // (ReversibleWithEffort), preserving prior behavior for source edits.
@@ -811,8 +808,7 @@ mod tests {
 
     #[test]
     fn malformed_toml_surfaces_clear_error() {
-        let err = LayeredReversibilityClassifier::from_str("not [valid] toml=", None)
-            .unwrap_err();
+        let err = LayeredReversibilityClassifier::from_str("not [valid] toml=", None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("reversibility defaults TOML"),
@@ -858,11 +854,9 @@ mod tests {
         "#,
         )
         .unwrap();
-        let c = LayeredReversibilityClassifier::load_from_paths(
-            &defaults_path,
-            Some(&overrides_path),
-        )
-        .unwrap();
+        let c =
+            LayeredReversibilityClassifier::load_from_paths(&defaults_path, Some(&overrides_path))
+                .unwrap();
         assert_eq!(
             c.classify("mcp__linear__list_issues", &no_input()),
             ReversibilityClass::TriviallyReversible
@@ -880,11 +874,9 @@ mod tests {
         let overrides_path = tmp.path().join("nonexistent.toml");
         std::fs::write(&defaults_path, "").unwrap();
         // overrides_path is some, but the file does not exist → silently skip.
-        let c = LayeredReversibilityClassifier::load_from_paths(
-            &defaults_path,
-            Some(&overrides_path),
-        )
-        .unwrap();
+        let c =
+            LayeredReversibilityClassifier::load_from_paths(&defaults_path, Some(&overrides_path))
+                .unwrap();
         assert_eq!(
             c.classify("Read", &no_input()),
             ReversibilityClass::TriviallyReversible
@@ -895,8 +887,8 @@ mod tests {
     fn load_from_paths_errors_on_missing_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let defaults_path = tmp.path().join("nonexistent.toml");
-        let err = LayeredReversibilityClassifier::load_from_paths(&defaults_path, None)
-            .unwrap_err();
+        let err =
+            LayeredReversibilityClassifier::load_from_paths(&defaults_path, None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("reversibility defaults"),
@@ -941,8 +933,7 @@ mod tests {
     // well-known tools. If you intentionally change a classification in
     // the shipped defaults, update the corresponding assertion here.
 
-    const SHIPPED_DEFAULTS: &str =
-        include_str!("../../../config/reversibility-defaults.toml");
+    const SHIPPED_DEFAULTS: &str = include_str!("../../../config/reversibility-defaults.toml");
 
     fn shipped() -> LayeredReversibilityClassifier {
         LayeredReversibilityClassifier::from_str(SHIPPED_DEFAULTS, None)
@@ -1338,7 +1329,10 @@ mod tests {
         // Bash's ReversibleWithEffort default for unrecognized commands.
         let c = shipped();
         assert_eq!(
-            c.classify("PowerShell", &ps_cmd("Get-Process | Select-Object -First 5")),
+            c.classify(
+                "PowerShell",
+                &ps_cmd("Get-Process | Select-Object -First 5")
+            ),
             ReversibilityClass::ReversibleWithEffort,
             "unmatched PowerShell must NOT be Irreversible"
         );
@@ -1347,7 +1341,10 @@ mod tests {
     #[test]
     fn powershell_read_only_invoke_restmethod_is_not_irreversible() {
         let c = shipped();
-        let class = c.classify("PowerShell", &ps_cmd("Invoke-RestMethod -Uri https://openrouter.ai/api/v1/models"));
+        let class = c.classify(
+            "PowerShell",
+            &ps_cmd("Invoke-RestMethod -Uri https://openrouter.ai/api/v1/models"),
+        );
         assert_ne!(
             class,
             ReversibilityClass::Irreversible,
@@ -1373,7 +1370,10 @@ mod tests {
     #[test]
     fn powershell_disk_cmdlets_are_catastrophic() {
         let c = shipped();
-        for cmd in ["Format-Volume -DriveLetter D", "Clear-Disk -Number 1 -RemoveData"] {
+        for cmd in [
+            "Format-Volume -DriveLetter D",
+            "Clear-Disk -Number 1 -RemoveData",
+        ] {
             assert_eq!(
                 c.classify("PowerShell", &ps_cmd(cmd)),
                 ReversibilityClass::Catastrophic,
@@ -1395,7 +1395,10 @@ mod tests {
     fn powershell_registry_delete_is_catastrophic() {
         let c = shipped();
         assert_eq!(
-            c.classify("PowerShell", &ps_cmd("Remove-Item -Path HKLM:\\SOFTWARE\\Foo -Recurse")),
+            c.classify(
+                "PowerShell",
+                &ps_cmd("Remove-Item -Path HKLM:\\SOFTWARE\\Foo -Recurse")
+            ),
             ReversibilityClass::Catastrophic
         );
     }
@@ -1470,7 +1473,13 @@ mod tests {
     #[test]
     fn shipped_defaults_internet_reads_trivial_writes_rwe_reboot_irreversible() {
         let c = shipped();
-        for t in ["network_overview", "health_check", "log_stats", "att_status", "netgear_status"] {
+        for t in [
+            "network_overview",
+            "health_check",
+            "log_stats",
+            "att_status",
+            "netgear_status",
+        ] {
             assert_eq!(
                 c.classify(&format!("mcp__internet__{t}"), &no_input()),
                 ReversibilityClass::TriviallyReversible,
@@ -1512,15 +1521,28 @@ mod tests {
         let c = shipped();
         // Regression: create_project etc. were unmapped → Irreversible → A3 gate
         // deadlock (Linear API rejects the dry-run _intent fields). Must be RWE.
-        for t in ["create_project", "update_project", "create_milestone", "create_document", "create_cycle", "create_initiative"] {
+        for t in [
+            "create_project",
+            "update_project",
+            "create_milestone",
+            "create_document",
+            "create_cycle",
+            "create_initiative",
+        ] {
             assert_eq!(
                 c.classify(&format!("mcp__linear__{t}"), &no_input()),
                 ReversibilityClass::ReversibleWithEffort,
                 "linear {t} should be ReversibleWithEffort, not Irreversible"
             );
         }
-        assert_eq!(c.classify("mcp__linear__list_projects", &no_input()), ReversibilityClass::TriviallyReversible);
-        assert_eq!(c.classify("mcp__linear__delete_project", &no_input()), ReversibilityClass::Irreversible);
+        assert_eq!(
+            c.classify("mcp__linear__list_projects", &no_input()),
+            ReversibilityClass::TriviallyReversible
+        );
+        assert_eq!(
+            c.classify("mcp__linear__delete_project", &no_input()),
+            ReversibilityClass::Irreversible
+        );
     }
 
     #[test]
@@ -1560,7 +1582,10 @@ mod tests {
         "#;
         let c = LayeredReversibilityClassifier::from_str(toml_src, None).unwrap();
         assert_eq!(
-            c.classify("Write", &edit_path("/home/u/.claude/projects/x/memory/note.md")),
+            c.classify(
+                "Write",
+                &edit_path("/home/u/.claude/projects/x/memory/note.md")
+            ),
             ReversibilityClass::TriviallyReversible
         );
         // Non-matching path falls through to the builtin RWE default.
@@ -1607,7 +1632,10 @@ mod tests {
         );
         // NotebookEdit uses `notebook_path` rather than `file_path`.
         assert_eq!(
-            c.classify("NotebookEdit", &json!({ "notebook_path": "/x/memory/nb.ipynb" })),
+            c.classify(
+                "NotebookEdit",
+                &json!({ "notebook_path": "/x/memory/nb.ipynb" })
+            ),
             ReversibilityClass::TriviallyReversible
         );
     }

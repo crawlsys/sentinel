@@ -14,11 +14,7 @@ const MAX_LOG_SIZE: u64 = 2 * 1024 * 1024; // 2MB
 
 /// Log directory
 fn log_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("sentinel")
-        .join("logs")
+    crate::paths::sentinel_root().join("logs")
 }
 
 /// Activity log entry

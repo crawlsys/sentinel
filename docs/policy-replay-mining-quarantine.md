@@ -38,7 +38,7 @@ The **bounded** variant — ADAS / AFlow-style search over Sentinel's *hook grap
   1. The search space is the hook configuration (toml/yaml structure), not agent prompts or model weights.
   2. Every proposed change requires a **human ratification step** in the loop before promotion.
   3. Every promotion is **rollback-tested** before becoming active.
-- **Pattern *surfacing* to humans.** Reports, dashboards, and analyses derived from proof chains that produce *information for human decision*, with no automated downstream action. Surfacing is fine; auto-acting on the surface is not.
+- **Pattern *surfacing* to humans.** Reports, reports, and analyses derived from proof chains that produce *information for human decision*, with no automated downstream action. Surfacing is fine; auto-acting on the surface is not.
 - **Manual hook authoring informed by replay analysis.** A human reading proof-chain reports and authoring new hooks by hand is unaffected. This is how Sentinel has always evolved.
 - **External evaluation harnesses** (TheAgentCompany, OSWorld, GAIA, SWE-bench, BA-eval corpora) that score the system against *external* benchmarks. The Goodhart hazard is on *internal* metrics; external benchmarks are the discipline that keeps internal metrics honest.
 

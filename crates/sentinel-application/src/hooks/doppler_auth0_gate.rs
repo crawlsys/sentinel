@@ -10,12 +10,12 @@
 //! are blocked with a message telling Claude to ask the user first — unless
 //! one of the bypasses below applies.
 //!
-//! **Autopilot bypass**: when `SENTINEL_AUTOPILOT=1`, non-prod Doppler and
+//! **Autopilot authorization**: when `SENTINEL_AUTOPILOT=1`, non-prod Doppler and
 //! Auth0 mutations are allowed without asking. A prod config (`prd`, `prod`,
 //! `production` — case-insensitive substring in the tool's `config` / `project`
 //! / `domain` argument) is still hard-blocked even in Autopilot. When the
-//! arguments don't name a config at all, Autopilot is conservative and falls
-//! back to the override path (prod might be implied).
+//! arguments don't name a config at all, Autopilot is conservative and blocks
+//! unless a valid session-scoped signed Doppler override applies.
 //!
 //! **Explicit override**: The user can unblock Doppler mutations for 5 minutes
 //! by typing a phrase matched by `hygiene_override::is_doppler_override`
@@ -26,7 +26,7 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
-use super::{EnvPort, HookContext};
+use super::{hygiene_override, EnvPort, HookContext};
 
 /// True iff `SENTINEL_AUTOPILOT` is set to `1` or `true` (case-insensitive).
 fn is_autopilot(env: &dyn EnvPort) -> bool {
@@ -113,118 +113,215 @@ const DOPPLER_READ_OPS: &[&str] = &[
     "share_secret_plain",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DopplerAuth0Provider {
+    None,
+    Doppler,
+    Auth0,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DopplerAuth0Decision {
+    Allow,
+    AllowReadOnly,
+    AllowAutopilotNonProd,
+    AllowSignedOverride,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct DopplerAuth0Evaluation {
+    pub tool: Option<String>,
+    pub operation: Option<String>,
+    pub provider: DopplerAuth0Provider,
+    pub router_management: bool,
+    pub read_only: bool,
+    pub mutation: bool,
+    pub autopilot: bool,
+    pub tool_input_present: bool,
+    pub production_target: bool,
+    pub session_id_present: bool,
+    pub signed_override_active: bool,
+    pub auth0_override_supported: bool,
+    pub should_block: bool,
+    pub decision: DopplerAuth0Decision,
+    pub block_reason: Option<String>,
+}
+
+impl DopplerAuth0Evaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        !matches!(self.provider, DopplerAuth0Provider::None)
+    }
+}
+
 /// Process a `PreToolUse` event. Blocks Doppler/Auth0 mutation tools.
 ///
 /// Doppler mutations can be unblocked by a signed session override written
 /// by `hygiene_override::process` when the user's prompt matches
 /// `is_doppler_override`. Auth0 mutations are never unblocked.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate(input, ctx);
+    output_from_evaluation(&evaluation)
+}
+
+pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> DopplerAuth0Evaluation {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
-        None => return HookOutput::allow(),
+        None => return base_evaluation(None, None, DopplerAuth0Provider::None, ctx),
     };
+    let provider = provider_for_tool(tool);
+    let operation = operation_for_tool(tool, provider);
+    let mut evaluation = base_evaluation(
+        Some(tool.to_string()),
+        operation.map(str::to_string),
+        provider,
+        ctx,
+    );
+    evaluation.tool_input_present = input.tool_input.is_some();
+    evaluation.session_id_present = input
+        .session_id
+        .as_deref()
+        .is_some_and(|session_id| !session_id.is_empty());
+    if evaluation.graph_authority_required() {
+        evaluation.production_target = targets_production(input.tool_input.as_ref());
+    }
 
     // mcp-router management tools are always safe (health check, list, restart)
     if tool.ends_with("__mcp_health_check")
         || tool.ends_with("__mcp_list_servers")
         || tool.ends_with("__mcp_restart_server")
     {
-        return HookOutput::allow();
+        evaluation.router_management = true;
+        evaluation.read_only = true;
+        evaluation.decision = DopplerAuth0Decision::AllowReadOnly;
+        return evaluation;
     }
 
     // Auth0 — hard-block against production tenants. In Autopilot, non-prod
     // tenants are allowed (the Autopilot directive in CLAUDE.md explicitly
     // permits non-prod Auth0 changes).
-    if tool.starts_with("mcp__auth0__") {
-        if is_autopilot(ctx.env) && !targets_production(input.tool_input.as_ref()) {
-            return HookOutput::allow();
+    if matches!(provider, DopplerAuth0Provider::Auth0) {
+        evaluation.mutation = true;
+        if evaluation.autopilot && !evaluation.production_target {
+            evaluation.decision = DopplerAuth0Decision::AllowAutopilotNonProd;
+            return evaluation;
         }
-        return HookOutput::deny(
+        block_evaluation(
+            &mut evaluation,
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission \
              in Planned mode, or a non-prod tenant in Autopilot. Production Auth0 changes always \
-             require Gary's explicit approval — no exceptions, even in Autopilot.",
+             require Gary's explicit approval — no exceptions, even in Autopilot."
+                .to_string(),
         );
+        return evaluation;
     }
 
     // Doppler — block mutations, allow reads
-    if tool.starts_with("mcp__doppler__") {
-        let op = tool.strip_prefix("mcp__doppler__").unwrap_or("");
-
+    if matches!(provider, DopplerAuth0Provider::Doppler) {
+        let op = operation.unwrap_or("");
         // Allow read-only operations
         if DOPPLER_READ_OPS.contains(&op) {
-            return HookOutput::allow();
+            evaluation.read_only = true;
+            evaluation.decision = DopplerAuth0Decision::AllowReadOnly;
+            return evaluation;
         }
+        evaluation.mutation = true;
 
-        // Autopilot bypass — allow Doppler mutations against non-prod configs
+        // Autopilot authorization — allow Doppler mutations against non-prod configs
         // without requiring an override. Prod configs (config/project name
         // contains `prd`/`prod`/`production`) still require the explicit
         // override path below.
-        if is_autopilot(ctx.env) && !targets_production(input.tool_input.as_ref()) {
-            return HookOutput::allow();
+        if evaluation.autopilot && !evaluation.production_target {
+            evaluation.decision = DopplerAuth0Decision::AllowAutopilotNonProd;
+            return evaluation;
         }
 
-        // Check for a live Doppler override. The MCP tool call may run in a child
-        // session (spawned by the MCP server) with a different session_id from the
-        // user's main session, so we scan ALL doppler-* override files and accept
-        // any whose embedded `ts` is within OVERRIDE_TTL_SECS. The signature check
-        // is skipped for cross-session matching — we rely on the redirect guard at
-        // the Bash level to prevent unauthorized writes to the overrides dir, and
-        // the high-friction prompt phrase required to write an override.
-        //
-        // On allowed mutation we **renew** the override by rewriting the file with
-        // the current timestamp. This gives a rolling window so batch writes
-        // (4+ set_secrets calls in parallel, or sequential flows) don't cliff off
-        // TTL when the user's prompt arrives minutes before the final mutation.
-        const OVERRIDE_TTL_SECS: u64 = 300; // 5 minutes — fits realistic batch writes
-
-        let overrides_dir = ctx
-            .fs
-            .home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude")
-            .join("sentinel")
-            .join("overrides");
-
-        if let Ok(paths) = ctx.fs.read_dir(&overrides_dir) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            for path in paths {
-                let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if !file_name.starts_with("doppler-") {
-                    continue;
-                }
-                let content = match ctx.fs.read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                // Parse ts:sig format (first field before `:`)
-                let mut parts = content.trim().splitn(2, ':');
-                let ts: u64 = match parts.next().and_then(|s| s.parse().ok()) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if now.saturating_sub(ts) < OVERRIDE_TTL_SECS {
-                    // Live override found — renew it so subsequent mutations in
-                    // the same batch inherit a fresh TTL. Best-effort: if renewal
-                    // fails we still allow this call (the override was valid).
-                    let sig = parts.next().unwrap_or("");
-                    let renewed = format!("{now}:{sig}");
-                    let _ = ctx.fs.write(&path, renewed.as_bytes());
-                    return HookOutput::allow();
-                }
-            }
+        if session_doppler_override_active(input, ctx) {
+            evaluation.signed_override_active = true;
+            evaluation.decision = DopplerAuth0Decision::AllowSignedOverride;
+            return evaluation;
         }
 
         // Block everything else (mutations)
-        return HookOutput::deny(format!(
+        block_evaluation(&mut evaluation, format!(
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Doppler mutation `{op}` requires explicit user permission. \
              Ask Gary before making ANY changes to Doppler secrets or configuration. NO EXCEPTIONS. \
-             To unblock for {OVERRIDE_TTL_SECS}s (auto-renews on each allowed write), Gary must type an \
+             To unblock briefly, Gary must type an \
              override phrase like \"override doppler\" or \"authorize doppler write\" in his next prompt."
         ));
+        return evaluation;
     }
 
+    evaluation
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    operation: Option<String>,
+    provider: DopplerAuth0Provider,
+    ctx: &HookContext<'_>,
+) -> DopplerAuth0Evaluation {
+    DopplerAuth0Evaluation {
+        tool,
+        operation,
+        provider,
+        router_management: false,
+        read_only: false,
+        mutation: false,
+        autopilot: is_autopilot(ctx.env),
+        tool_input_present: false,
+        production_target: false,
+        session_id_present: false,
+        signed_override_active: false,
+        auth0_override_supported: false,
+        should_block: false,
+        decision: DopplerAuth0Decision::Allow,
+        block_reason: None,
+    }
+}
+
+fn provider_for_tool(tool: &str) -> DopplerAuth0Provider {
+    if tool.starts_with("mcp__doppler__") {
+        DopplerAuth0Provider::Doppler
+    } else if tool.starts_with("mcp__auth0__") {
+        DopplerAuth0Provider::Auth0
+    } else {
+        DopplerAuth0Provider::None
+    }
+}
+
+fn operation_for_tool(tool: &str, provider: DopplerAuth0Provider) -> Option<&str> {
+    match provider {
+        DopplerAuth0Provider::Doppler => tool.strip_prefix("mcp__doppler__"),
+        DopplerAuth0Provider::Auth0 => tool.strip_prefix("mcp__auth0__"),
+        DopplerAuth0Provider::None => None,
+    }
+}
+
+fn session_doppler_override_active(input: &HookInput, ctx: &HookContext<'_>) -> bool {
+    let Some(session_id) = input.session_id.as_deref().filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let path = hygiene_override::doppler_override_path(ctx.fs, session_id);
+    hygiene_override::is_signed_override_active(ctx.fs, &path, "doppler", session_id)
+}
+
+fn block_evaluation(evaluation: &mut DopplerAuth0Evaluation, reason: String) {
+    evaluation.should_block = true;
+    evaluation.decision = DopplerAuth0Decision::Block;
+    evaluation.block_reason = Some(reason);
+}
+
+pub fn output_from_evaluation(evaluation: &DopplerAuth0Evaluation) -> HookOutput {
+    if evaluation.should_block {
+        return HookOutput::deny(
+            evaluation
+                .block_reason
+                .clone()
+                .unwrap_or_else(|| "Doppler/Auth0 gate blocked without a reason".to_string()),
+        );
+    }
     HookOutput::allow()
 }
 

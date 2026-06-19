@@ -2,7 +2,7 @@
 //!
 //! Walks `~/.claude/projects/*/` for session JSONL files, attributes
 //! each session to a Linear ticket (via path-slug regex first, then
-//! prompt grep fallback), aggregates per-model token usage from every
+//! bounded prompt inspection), aggregates per-model token usage from every
 //! `assistant` message's `usage` block, applies Anthropic per-model
 //! pricing (`sentinel-domain::pricing`), and writes
 //! `~/.claude/sentinel/metrics/tokens-per-ticket.jsonl`.
@@ -54,16 +54,19 @@ pub struct TicketAggregate {
     pub cache_creation: u64,
     pub output: u64,
     pub cost_usd: f64,
+    pub unpriced_tokens: u64,
     pub models: BTreeMap<String, u64>,
     pub confidence: Confidence,
 }
 
 /// Summary returned by `scan_token_usage` for human reporting.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ScanReport {
     pub total_sessions: u64,
     pub mapped_sessions: u64,
     pub unmapped_sessions: u64,
+    pub unpriced_sessions: u64,
+    pub unpriced_tokens: u64,
     pub tickets: u64,
     pub top_n_expensive: Vec<(String, f64)>,
 }
@@ -126,6 +129,7 @@ pub fn scan_token_usage(projects_root: &Path, output: &Path) -> Result<ScanRepor
             cache_creation: a.usage.cache_creation_5m + a.usage.cache_creation_1h,
             output: a.usage.output,
             cost_usd: round_cents(a.cost_usd),
+            unpriced_tokens: a.unpriced_tokens,
             models: a.models,
             confidence: a.confidence,
         })
@@ -165,6 +169,7 @@ struct AggBuild {
     sessions: u64,
     usage: TokenUsage,
     cost_usd: f64,
+    unpriced_tokens: u64,
     models: BTreeMap<String, u64>,
     confidence: Confidence,
 }
@@ -217,7 +222,17 @@ fn ingest_session(
     agg.usage = agg.usage.add(rollup.usage);
     // Cost: bill each session at its own model rate (avoids
     // mixing rates across a multi-model session).
-    agg.cost_usd += cost_for_session(&rollup);
+    match cost_for_session(&rollup) {
+        Ok(cost) => {
+            agg.cost_usd += cost;
+        }
+        Err(_) => {
+            let tokens = total_tokens(rollup.usage);
+            agg.unpriced_tokens += tokens;
+            report.unpriced_sessions += 1;
+            report.unpriced_tokens += tokens;
+        }
+    }
 
     for model in rollup.models_seen {
         let label = short_model_label(&model);
@@ -230,12 +245,17 @@ fn ingest_session(
 /// session. Multi-model sessions are rare in practice (model is
 /// session-scoped), and any drift is a single-session approximation
 /// well below the noise floor of estimated pricing.
-fn cost_for_session(rollup: &SessionRollup) -> f64 {
-    let model = rollup
-        .models_seen
-        .first()
-        .map_or("claude-opus-4-7", String::as_str);
+fn cost_for_session(rollup: &SessionRollup) -> Result<f64, sentinel_domain::pricing::PricingError> {
+    let model = rollup.models_seen.first().map_or("", String::as_str);
     cost_for(rollup.usage, model)
+}
+
+fn total_tokens(usage: TokenUsage) -> u64 {
+    usage.input
+        + usage.output
+        + usage.cache_read
+        + usage.cache_creation_5m
+        + usage.cache_creation_1h
 }
 
 fn round_cents(v: f64) -> f64 {
@@ -366,7 +386,7 @@ fn parse_session(jsonl: &Path) -> Result<SessionRollup> {
                 let short = usage_u64(cc, "ephemeral_5m_input_tokens");
                 let long = usage_u64(cc, "ephemeral_1h_input_tokens");
                 // If the breakdown reports zero but the flat field has a
-                // value, fall back to the flat number under the 5m bucket.
+                // value, route the flat number under the 5m bucket.
                 if short + long == 0 && flat_cc > 0 {
                     (flat_cc, 0)
                 } else {
@@ -477,7 +497,22 @@ mod tests {
             models_seen: vec!["claude-sonnet-4-5".into()],
         };
         // 1Mtok input on sonnet => $3.00
-        assert!((cost_for_session(&rollup) - 3.0).abs() < 0.01);
+        assert!((cost_for_session(&rollup).unwrap() - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cost_for_session_rejects_missing_model() {
+        let rollup = SessionRollup {
+            usage: TokenUsage {
+                input: 1_000_000,
+                output: 0,
+                cache_read: 0,
+                cache_creation_5m: 0,
+                cache_creation_1h: 0,
+            },
+            models_seen: Vec::new(),
+        };
+        assert!(cost_for_session(&rollup).is_err());
     }
 
     #[test]

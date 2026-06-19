@@ -5,13 +5,13 @@
 //! creating a tamper-evident chain — same trust model as blockchain.
 
 use chrono::{DateTime, Utc};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::evidence::Evidence;
 use crate::judge::JudgeVerdict;
-use crate::step_proof::StepProof;
+use crate::step_proof::{SignatureError, StepProof};
 
 /// Genesis hash — the "previous hash" for the first phase in a chain
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -48,6 +48,15 @@ pub struct PhaseProof {
 
     /// The judge's verdict
     pub judge_verdict: JudgeVerdict,
+
+    // ── Ed25519 attestation ──
+    /// Hex-encoded Ed25519 signature over `combined_hash`.
+    ///
+    /// Authoritative verification rejects `None`. The option exists only so
+    /// unsigned proof material can deserialize and produce a precise
+    /// `SignatureError::Missing` instead of hiding behind a parse failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 
     // ── Metadata ──
     pub started_at: DateTime<Utc>,
@@ -94,6 +103,34 @@ impl PhaseProof {
         hasher.update(b"judge");
         hasher.update([u8::from(judge_sufficient)]);
         format!("{:x}", hasher.finalize())
+    }
+
+    /// Sign this proof's `combined_hash` with an Ed25519 key.
+    pub fn sign_with(&mut self, key: &SigningKey) {
+        let signature: Signature = key.sign(self.combined_hash.as_bytes());
+        self.signature = Some(hex::encode(signature.to_bytes()));
+    }
+
+    /// Verify this proof's signature against a public key.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — signature is present and valid for this `combined_hash`
+    /// - `Err(SignatureError)` — signature is absent, malformed, wrong length,
+    ///   or doesn't verify against the supplied key
+    pub fn verify_signature(&self, key: &VerifyingKey) -> Result<bool, SignatureError> {
+        let Some(sig_hex) = &self.signature else {
+            return Err(SignatureError::Missing);
+        };
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| SignatureError::InvalidEncoding)?;
+        if sig_bytes.len() != ed25519_dalek::SIGNATURE_LENGTH {
+            return Err(SignatureError::InvalidLength);
+        }
+        let mut sig_array = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+        sig_array.copy_from_slice(&sig_bytes);
+        let signature = Signature::from_bytes(&sig_array);
+        key.verify(self.combined_hash.as_bytes(), &signature)
+            .map(|()| true)
+            .map_err(|_| SignatureError::VerificationFailed)
     }
 
     /// Verify this proof's hashes and timestamps are internally consistent
@@ -214,13 +251,9 @@ impl ProofEntry {
 
 /// The full chain for a skill execution.
 ///
-/// **Compatibility note**: `proofs` (Vec<PhaseProof>) is preserved as the
-/// canonical phase-only chain so existing on-disk files continue to load.
-/// `entries` (Vec<ProofEntry>) is the new mixed chain — when callers want
-/// step-level granularity they push to `entries` via [`add_step_proof`] and
-/// [`add_phase_entry`]. New code should prefer `entries`; the dual-vec layout
-/// exists only because mid-flight migrating every persisted chain would be
-/// a separate, bigger change.
+/// `entries` is the canonical mixed chain for both phases and steps. The
+/// serialized `proofs` field remains only so stale data can be detected and
+/// rejected by verification instead of being silently treated as authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofChain {
     /// Skill this chain is for
@@ -232,13 +265,12 @@ pub struct ProofChain {
     /// Genesis hash (always `GENESIS_HASH`)
     pub genesis_hash: String,
 
-    /// Legacy phase-only ordered list. New chains may leave this empty and
-    /// use `entries` instead; existing chains keep working unchanged.
+    /// Non-authoritative stale phase-only list. Runtime sealing writes phase
+    /// proofs to `entries`; verification rejects chains where this field is
+    /// non-empty.
     pub proofs: Vec<PhaseProof>,
 
-    /// Mixed-entry ordered list (phases AND steps). Empty by default for
-    /// backward-compat. When non-empty, `head_hash()` reads from the tail
-    /// of this vec instead of `proofs`.
+    /// Mixed-entry ordered list (phases AND steps).
     #[serde(default)]
     pub entries: Vec<ProofEntry>,
 
@@ -249,25 +281,20 @@ pub struct ProofChain {
     pub chain_valid: bool,
 }
 
-/// Result of verifying Ed25519 signatures across a chain's `StepProof` entries.
-///
-/// `PhaseProof` entries are NOT signature-checked (they carry no signature
-/// field) — their integrity rests on the hash chain + `verify_self`. A forged
-/// `PhaseProof` is therefore not caught here; closing that requires adding
-/// signing to `PhaseProof` (a separate follow-on).
+/// Result of verifying Ed25519 signatures across a chain's proof entries.
 #[derive(Debug, Clone)]
 pub struct SignatureReport {
-    /// Signed step entries that verified against the key.
+    /// Signed proof entries that verified against the key.
     pub verified: usize,
-    /// Step entries with no signature (legacy / signing-disabled).
+    /// Proof entries with no signature.
     pub unsigned: usize,
-    /// Entry ids (`<phase_id>.<step_id>`) that were present-but-invalid, or
-    /// unsigned while signatures were required. Non-empty ⇒ the chain fails.
+    /// Entry ids (`<phase_id>` or `<phase_id>.<step_id>`) that were unsigned or invalid.
+    /// Non-empty ⇒ the chain fails.
     pub failures: Vec<String>,
 }
 
 impl SignatureReport {
-    /// Whether every signed entry verified and no required signature was missing.
+    /// Whether every signable proof entry was signed and verified.
     #[must_use]
     pub fn is_ok(&self) -> bool {
         self.failures.is_empty()
@@ -291,54 +318,84 @@ impl ProofChain {
 
     /// Get the hash that the next proof must reference as `previous_hash`.
     ///
-    /// Resolution order: tail of `entries` (mixed chain), else tail of
-    /// `proofs` (legacy phase-only chain), else `GENESIS_HASH`. This keeps
-    /// chains that were started in phase-only mode working when callers
-    /// later switch to step-level appends — the next step's `previous_hash`
-    /// correctly references the last phase's `combined_hash`.
+    /// Resolution order: tail of `entries` (mixed chain), else `GENESIS_HASH`.
     #[must_use]
     pub fn head_hash(&self) -> &str {
         if let Some(entry) = self.entries.last() {
             return entry.combined_hash();
         }
-        self.proofs
-            .last()
-            .map_or(GENESIS_HASH, |p| &p.combined_hash)
+        GENESIS_HASH
     }
 
-    /// Verify Ed25519 signatures on every `StepProof` entry against `key`,
+    /// Canonical phase proofs in chain order.
+    pub fn phase_entries(&self) -> impl Iterator<Item = &PhaseProof> {
+        self.entries.iter().filter_map(|entry| match entry {
+            ProofEntry::Phase(proof) => Some(proof),
+            ProofEntry::Step(_) | ProofEntry::Disagreement(_) => None,
+        })
+    }
+
+    /// Canonical phase-proof count.
+    #[must_use]
+    pub fn phase_count(&self) -> usize {
+        self.phase_entries().count()
+    }
+
+    /// Canonical step-proof count.
+    #[must_use]
+    pub fn step_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry, ProofEntry::Step(_)))
+            .count()
+    }
+
+    /// Total canonical chain entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether every canonical phase proof has a sufficient judge verdict.
+    #[must_use]
+    pub fn phases_all_sufficient(&self) -> bool {
+        self.phase_entries()
+            .all(|proof| proof.judge_verdict.sufficient)
+    }
+
+    /// Verify Ed25519 signatures on every signable proof entry against `key`,
     /// failing closed.
     ///
     /// - signed + valid    → counted in `verified`
     /// - signed + invalid  → recorded as a failure (the proof was tampered with
     ///   after signing — e.g. a flipped judge verdict changes `combined_hash`,
     ///   so the signature over it no longer matches)
-    /// - unsigned          → counted in `unsigned`; a failure ONLY when
-    ///   `require_signed` is set (the signing-required posture)
+    /// - unsigned          → counted in `unsigned` and recorded as a failure
     ///
-    /// This is the check that `verify()` (hash-only) deliberately omits: without
-    /// it, an entry whose signed `combined_hash` was altered still passes chain
-    /// verification. See [`SignatureReport`] for the `PhaseProof` caveat.
+    /// This is the check that `verify()` deliberately omits because it has no
+    /// verifying key: without it, an entry whose signed `combined_hash` was
+    /// altered still passes hash-chain verification.
     #[must_use]
-    pub fn verify_signatures(&self, key: &VerifyingKey, require_signed: bool) -> SignatureReport {
+    pub fn verify_signatures(&self, key: &VerifyingKey) -> SignatureReport {
         let mut report = SignatureReport {
             verified: 0,
             unsigned: 0,
             failures: Vec::new(),
         };
         for entry in &self.entries {
-            let ProofEntry::Step(step) = entry else {
-                continue;
+            let id = entry.id();
+            let result = match entry {
+                ProofEntry::Phase(phase) => phase.verify_signature(key),
+                ProofEntry::Step(step) => step.verify_signature(key),
+                ProofEntry::Disagreement(marker) => marker.verify_signature(key),
             };
-            let id = format!("{}.{}", step.phase_id, step.step_id);
-            match step.verify_signature(key) {
+            match result {
                 Ok(true) => report.verified += 1,
-                Ok(false) => {
+                Ok(false) => report.failures.push(id),
+                Err(SignatureError::Missing) => {
                     report.unsigned += 1;
-                    if require_signed {
-                        report.failures.push(id);
-                    }
-                },
+                    report.failures.push(id);
+                }
                 Err(_) => report.failures.push(id),
             }
         }
@@ -350,10 +407,15 @@ impl ProofChain {
     /// 500 phases per skill is far beyond any legitimate workflow.
     const MAX_PROOFS_PER_CHAIN: usize = 500;
 
-    /// Add a proof to the chain. Returns error if `previous_hash` doesn't match.
+    /// Add a phase proof to the canonical mixed-entry chain.
     pub fn add_proof(&mut self, proof: PhaseProof) -> Result<(), ProofChainError> {
+        self.add_phase_entry(proof)
+    }
+
+    /// Add a phase proof to the canonical mixed-entry chain.
+    pub fn add_phase_entry(&mut self, proof: PhaseProof) -> Result<(), ProofChainError> {
         // **Attack #175 fix**: Reject proofs beyond the per-chain cap.
-        if self.proofs.len() >= Self::MAX_PROOFS_PER_CHAIN {
+        if self.entries.len() + self.proofs.len() >= Self::MAX_PROOFS_PER_CHAIN {
             return Err(ProofChainError::ChainFull {
                 skill: self.skill.clone(),
                 max: Self::MAX_PROOFS_PER_CHAIN,
@@ -376,7 +438,7 @@ impl ProofChain {
             });
         }
 
-        self.proofs.push(proof);
+        self.entries.push(ProofEntry::Phase(proof));
         Ok(())
     }
 
@@ -459,45 +521,13 @@ impl ProofChain {
         let mut errors = Vec::new();
         let mut last_completed: Option<DateTime<Utc>> = None;
 
-        for (i, proof) in self.proofs.iter().enumerate() {
-            // Check chain link
-            if proof.previous_hash != expected_previous {
-                errors.push(format!(
-                    "Phase {} ({}): expected previous_hash '{}', got '{}'",
-                    i, proof.phase_id, expected_previous, proof.previous_hash
-                ));
-            }
-
-            // Check internal consistency (includes timestamp ordering)
-            if !proof.verify_self() {
-                errors.push(format!(
-                    "Phase {} ({}): internal hash verification failed",
-                    i, proof.phase_id
-                ));
-            }
-
-            // **Attack #170 fix**: Cross-phase temporal ordering.
-            // Phase N must start at or after Phase N-1 completed.
-            if let Some(prev_completed) = last_completed {
-                if proof.started_at < prev_completed {
-                    errors.push(format!(
-                        "Phase {} ({}): started_at ({}) is before previous phase completed_at ({})",
-                        i, proof.phase_id, proof.started_at, prev_completed
-                    ));
-                }
-            }
-            last_completed = Some(proof.completed_at);
-
-            expected_previous.clone_from(&proof.combined_hash);
+        if !self.proofs.is_empty() {
+            errors.push(format!(
+                "unsupported phase-only proof vector contains {} entries; canonical proof chains must use entries",
+                self.proofs.len()
+            ));
         }
 
-        // After walking the legacy phase-only `proofs`, continue through
-        // the mixed `entries` chain. Each entry's previous_hash must follow
-        // from the current `expected_previous` — which started at GENESIS,
-        // then advanced through every PhaseProof above. If `proofs` is empty
-        // (modern step-first chain), `entries` walks from GENESIS as
-        // expected. This is the bridge that makes phase-only and mixed
-        // chains verify under the same algorithm.
         for (i, entry) in self.entries.iter().enumerate() {
             if entry.previous_hash() != expected_previous {
                 errors.push(format!(
@@ -533,21 +563,10 @@ impl ProofChain {
             expected_previous = entry.combined_hash().to_string();
         }
 
-        let steps_verified = self
-            .entries
-            .iter()
-            .filter(|e| matches!(e, ProofEntry::Step(_)))
-            .count();
-
         ChainVerification {
             valid: errors.is_empty(),
-            phases_verified: self.proofs.len()
-                + self
-                    .entries
-                    .iter()
-                    .filter(|e| matches!(e, ProofEntry::Phase(_)))
-                    .count(),
-            steps_verified,
+            phases_verified: self.phase_count(),
+            steps_verified: self.step_count(),
             errors,
         }
     }
@@ -557,9 +576,9 @@ impl ProofChain {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainVerification {
     pub valid: bool,
-    /// Phase entries seen across both legacy `proofs` and mixed `entries`.
+    /// Phase entries seen in the canonical mixed chain.
     pub phases_verified: usize,
-    /// Step entries seen in `entries` (legacy `proofs` carries none).
+    /// Step entries seen in the canonical mixed chain.
     #[serde(default)]
     pub steps_verified: usize,
     pub errors: Vec<String>,
@@ -639,6 +658,7 @@ mod tests {
                 reasoning: "Evidence verified".to_string(),
                 requested_evidence: None,
             },
+            signature: None,
             started_at: Utc::now(),
             completed_at: Utc::now(),
             duration_ms: 100,
@@ -657,7 +677,8 @@ mod tests {
         let mut chain = ProofChain::new("linear", "sess-1");
         let proof = make_proof("claim", "linear", GENESIS_HASH);
         assert!(chain.add_proof(proof).is_ok());
-        assert_eq!(chain.proofs.len(), 1);
+        assert_eq!(chain.phase_count(), 1);
+        assert!(chain.proofs.is_empty(), "stale phase vector stays empty");
     }
 
     #[test]
@@ -673,7 +694,8 @@ mod tests {
         let proof3 = make_proof("intelligence", "linear", chain.head_hash());
         chain.add_proof(proof3).unwrap();
 
-        assert_eq!(chain.proofs.len(), 3);
+        assert_eq!(chain.phase_count(), 3);
+        assert!(chain.proofs.is_empty(), "stale phase vector stays empty");
         let verification = chain.verify();
         assert!(verification.valid);
         assert_eq!(verification.phases_verified, 3);
@@ -764,18 +786,25 @@ mod tests {
         let vk = key.verifying_key();
         let art = || serde_json::json!({"k": "v"});
 
-        // Correctly signed step → passes, counted as verified.
+        // Correctly signed phase + step + disagreement marker → passes,
+        // counted as verified.
         let mut good = ProofChain::new("linear", "sess");
-        let mut step = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        let mut phase = make_proof("claim", "linear", GENESIS_HASH);
+        phase.sign_with(&key);
+        good.add_proof(phase).expect("add signed phase");
+        let mut step = make_step("s1", "claim", "linear", good.head_hash(), art());
         step.sign_with(&key);
         good.add_step_proof(step).expect("add signed step");
-        let rep = good.verify_signatures(&vk, false);
+        let mut marker = make_disagreement("linear", "sess", "s1", "claim", good.head_hash());
+        marker.sign_with(&key);
+        good.add_disagreement(marker).expect("add signed marker");
+        let rep = good.verify_signatures(&vk);
         assert!(rep.is_ok());
-        assert_eq!(rep.verified, 1);
+        assert_eq!(rep.verified, 3);
 
         // Wrong key must fail — the verifier can't be fooled by an arbitrary key.
         let wrong = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
-        assert!(!good.verify_signatures(&wrong, false).is_ok());
+        assert!(!good.verify_signatures(&wrong).is_ok());
 
         // Forged/garbled signature with a still-valid combined_hash → fails
         // closed. (verify_self, and thus add_step_proof, accept it because the
@@ -784,9 +813,11 @@ mod tests {
         let mut forged = make_step("s1", "claim", "linear", GENESIS_HASH, art());
         forged.sign_with(&key);
         forged.signature = Some("00".repeat(64));
-        forged_chain.add_step_proof(forged).expect("add (hash still valid)");
+        forged_chain
+            .add_step_proof(forged)
+            .expect("add (hash still valid)");
         assert!(
-            !forged_chain.verify_signatures(&vk, false).is_ok(),
+            !forged_chain.verify_signatures(&vk).is_ok(),
             "a forged signature must fail chain signature verification"
         );
 
@@ -810,21 +841,60 @@ mod tests {
         assert!(t.verify_self(), "re-sealed proof recomputes consistently");
         resealed_chain.add_step_proof(t).expect("add re-sealed");
         assert!(
-            !resealed_chain.verify_signatures(&vk, false).is_ok(),
+            !resealed_chain.verify_signatures(&vk).is_ok(),
             "a re-sealed verdict flip must invalidate the signature"
         );
 
-        // Unsigned entry: fine unless signatures are required.
+        // Unsigned step entry: fail closed.
         let mut unsigned_chain = ProofChain::new("linear", "sess");
         let unsigned = make_step("s1", "claim", "linear", GENESIS_HASH, art());
-        unsigned_chain.add_step_proof(unsigned).expect("add unsigned");
+        unsigned_chain
+            .add_step_proof(unsigned)
+            .expect("add unsigned");
+        let unsigned_report = unsigned_chain.verify_signatures(&vk);
+        assert!(!unsigned_report.is_ok(), "unsigned must fail verification");
+        assert_eq!(unsigned_report.unsigned, 1);
+        assert_eq!(unsigned_report.failures, vec!["claim.s1"]);
+
+        // Unsigned phase entry: fail closed too.
+        let mut unsigned_phase_chain = ProofChain::new("linear", "sess");
+        unsigned_phase_chain
+            .add_proof(make_proof("claim", "linear", GENESIS_HASH))
+            .expect("add unsigned phase");
+        let unsigned_phase_report = unsigned_phase_chain.verify_signatures(&vk);
         assert!(
-            unsigned_chain.verify_signatures(&vk, false).is_ok(),
-            "unsigned is acceptable when signatures are not required"
+            !unsigned_phase_report.is_ok(),
+            "unsigned phase must fail verification"
         );
+        assert_eq!(unsigned_phase_report.unsigned, 1);
+        assert_eq!(unsigned_phase_report.failures, vec!["claim"]);
+
+        // Unsigned disagreement marker: fail closed.
+        let mut unsigned_marker_chain = ProofChain::new("linear", "sess");
+        let mut signed_step = make_step("s1", "claim", "linear", GENESIS_HASH, art());
+        signed_step.sign_with(&key);
+        unsigned_marker_chain
+            .add_step_proof(signed_step)
+            .expect("add signed step before marker");
+        let marker_previous_hash = unsigned_marker_chain.head_hash().to_string();
+        unsigned_marker_chain
+            .add_disagreement(make_disagreement(
+                "linear",
+                "sess",
+                "s1",
+                "claim",
+                &marker_previous_hash,
+            ))
+            .expect("add unsigned marker");
+        let unsigned_marker_report = unsigned_marker_chain.verify_signatures(&vk);
         assert!(
-            !unsigned_chain.verify_signatures(&vk, true).is_ok(),
-            "unsigned must fail when signatures are required"
+            !unsigned_marker_report.is_ok(),
+            "unsigned disagreement marker must fail verification"
+        );
+        assert_eq!(unsigned_marker_report.unsigned, 1);
+        assert_eq!(
+            unsigned_marker_report.failures,
+            vec!["disagreement(claim.s1)"]
         );
     }
 
@@ -849,8 +919,13 @@ mod tests {
     fn test_proof_rejects_backwards_timestamps() {
         let evidence = Evidence::default();
         let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
-        let combined_hash =
-            PhaseProof::compute_combined_hash("claim", "linear", &evidence_hash, GENESIS_HASH, true);
+        let combined_hash = PhaseProof::compute_combined_hash(
+            "claim",
+            "linear",
+            &evidence_hash,
+            GENESIS_HASH,
+            true,
+        );
 
         let now = Utc::now();
         let proof = PhaseProof {
@@ -868,6 +943,7 @@ mod tests {
                 reasoning: "Evidence verified".to_string(),
                 requested_evidence: None,
             },
+            signature: None,
             // completed_at BEFORE started_at — should fail verification
             started_at: now,
             completed_at: now - chrono::Duration::seconds(60),
@@ -957,7 +1033,7 @@ mod tests {
         );
         chain.add_step_proof(step).expect("add step on empty chain");
         assert_eq!(chain.entries.len(), 1);
-        assert!(chain.proofs.is_empty(), "phase-only vec stays empty");
+        assert!(chain.proofs.is_empty(), "stale phase vector stays empty");
     }
 
     #[test]
@@ -1063,24 +1139,29 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_phase_only_chain_still_loads_via_serde() {
-        // On-disk chains written before M1.2 won't have an `entries` field.
-        // Verify the `#[serde(default)]` annotation lets them deserialize
-        // cleanly — anything else would silently break every persisted chain.
-        let legacy_json = r#"{
+    fn test_phase_only_proof_vector_is_rejected() {
+        let stale_json = format!(
+            r#"{{
             "skill": "linear",
             "session_id": "sess-1",
             "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-            "proofs": [],
+            "proofs": [{}],
             "complete": false,
             "chain_valid": true
-        }"#;
-        let chain: ProofChain = serde_json::from_str(legacy_json).expect("legacy chain loads");
-        assert!(
-            chain.entries.is_empty(),
-            "missing `entries` defaults to empty Vec"
+        }}"#,
+            serde_json::to_string(&make_proof("claim", "linear", GENESIS_HASH)).unwrap()
         );
-        assert!(chain.proofs.is_empty());
+        let chain: ProofChain = serde_json::from_str(&stale_json).expect("stale chain loads");
+        let verification = chain.verify();
+        assert!(!verification.valid);
+        assert!(
+            verification
+                .errors
+                .iter()
+                .any(|error| error.contains("unsupported phase-only proof vector")),
+            "stale phase vector must fail verification: {:?}",
+            verification.errors
+        );
     }
 
     #[test]

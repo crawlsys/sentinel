@@ -94,7 +94,10 @@ pub fn scan_code_audit(
     let mut summary = CodeAuditSummary::default();
     for (identifier, state_name) in issues {
         summary.completed_total += 1;
-        let ev = evidence.get(&identifier.to_uppercase()).cloned().unwrap_or_default();
+        let ev = evidence
+            .get(&identifier.to_uppercase())
+            .cloned()
+            .unwrap_or_default();
         if ev.is_present() {
             summary.with_evidence += 1;
         } else {
@@ -175,7 +178,10 @@ fn load_evidence(path: &Path) -> Result<HashMap<String, Evidence>> {
 
     let mut out = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
-        let commits = v.get("commits").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let commits = v
+            .get("commits")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let files = v
             .get("files")
             .and_then(serde_json::Value::as_array)
@@ -204,7 +210,6 @@ fn write_outputs(summary: &CodeAuditSummary, output_summary: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn tmp(json: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -214,11 +219,9 @@ mod tests {
 
     #[test]
     fn completed_with_evidence_passes() {
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"FPCRM-520","state":{"name":"Completed","type":"completed"}}
-            ]}"#,
-        );
+            ]}"#);
         let ev = tmp(r#"{"FPCRM-520":{"commits":3,"files":["x.tsx"]}}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_code_audit(cache.path(), ev.path(), out.path()).unwrap();
@@ -230,11 +233,9 @@ mod tests {
 
     #[test]
     fn completed_without_evidence_is_flagged() {
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"FPCRM-521","state":{"name":"Completed","type":"completed"}}
-            ]}"#,
-        );
+            ]}"#);
         // No entry at all for FPCRM-521.
         let ev = tmp(r#"{"FPCRM-999":{"commits":1,"files":["a.ts"]}}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
@@ -248,9 +249,8 @@ mod tests {
     #[test]
     fn zero_commits_and_zero_files_is_flagged() {
         // An entry that exists but is empty counts as no evidence.
-        let cache = tmp(
-            r#"[{"identifier":"FPCRM-522","state":{"name":"Completed","type":"completed"}}]"#,
-        );
+        let cache =
+            tmp(r#"[{"identifier":"FPCRM-522","state":{"name":"Completed","type":"completed"}}]"#);
         let ev = tmp(r#"{"FPCRM-522":{"commits":0,"files":[]}}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_code_audit(cache.path(), ev.path(), out.path()).unwrap();
@@ -261,13 +261,11 @@ mod tests {
 
     #[test]
     fn non_completed_tickets_are_ignored() {
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"FPCRM-600","state":{"name":"In Progress","type":"started"}},
                 {"identifier":"FPCRM-601","state":{"name":"Backlog","type":"backlog"}},
                 {"identifier":"FPCRM-602","state":{"name":"Completed","type":"completed"}}
-            ]}"#,
-        );
+            ]}"#);
         let ev = tmp(r#"{"FPCRM-602":{"commits":2,"files":["z.ts"]}}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_code_audit(cache.path(), ev.path(), out.path()).unwrap();
@@ -280,9 +278,8 @@ mod tests {
     #[test]
     fn files_only_counts_as_evidence() {
         // commits=0 but a touched file present → evidenced.
-        let cache = tmp(
-            r#"[{"identifier":"FPCRM-523","state":{"name":"Completed","type":"completed"}}]"#,
-        );
+        let cache =
+            tmp(r#"[{"identifier":"FPCRM-523","state":{"name":"Completed","type":"completed"}}]"#);
         let ev = tmp(r#"{"FPCRM-523":{"commits":0,"files":["only.tsx"]}}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_code_audit(cache.path(), ev.path(), out.path()).unwrap();

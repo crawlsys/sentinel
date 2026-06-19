@@ -474,10 +474,7 @@ fn check_directives(
 ///
 /// Returns `None` for any other shape. The caller treats a `None` as
 /// a malformed-override hard error.
-fn parse_override_target(
-    current_skill: &str,
-    target: &str,
-) -> Option<(String, String, String)> {
+fn parse_override_target(current_skill: &str, target: &str) -> Option<(String, String, String)> {
     let parts: Vec<&str> = target.split('.').collect();
     match parts.len() {
         2 => Some((
@@ -652,6 +649,8 @@ mod tests {
     #[test]
     fn compose_clean_supergraph_with_one_skill() {
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -668,13 +667,19 @@ id = "claim"
         assert_eq!(report.skills_seen, 1);
         assert_eq!(report.total_phases, 1);
         assert_eq!(report.total_steps, 2);
-        assert!(report.ok(), "clean supergraph composes, got {:?}", report.findings);
+        assert!(
+            report.ok(),
+            "clean supergraph composes, got {:?}",
+            report.findings
+        );
     }
 
     #[test]
     fn compose_detects_duplicate_step_coordinates() {
         // Same (phase_id, step_id) pair declared twice within one skill.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -688,29 +693,25 @@ id = "claim"
 "#;
         let (_guard, path) = temp_config(&[("linear", toml)]);
         let report = compose(&path).unwrap();
-        assert!(!report.ok(), "duplicate coords must surface as error");
+        assert!(!report.ok(), "duplicate step ids must surface as error");
         assert_eq!(report.error_count, 1);
         let msg = &report.findings[0].message;
         assert!(
-            msg.contains("duplicate step coordinate"),
-            "error names the duplication, got: {msg}",
+            msg.contains("duplicate step id '1'"),
+            "error names the strict step-config schema violation, got: {msg}",
         );
         assert!(msg.contains("linear"), "error names the skill");
     }
 
     #[test]
     fn compose_warns_on_skill_with_zero_phases() {
-        // Empty TOML — parses, but the resulting SkillSteps has no
-        // phases. That's a warning, not an error: someone may be
-        // mid-edit on a new skill config.
+        // Empty TOML is not an enterprise step catalog. Compose surfaces the
+        // loader's schema failure instead of accepting a zero-phase skill.
         let (_guard, path) = temp_config(&[("emptyskill", "")]);
         let report = compose(&path).unwrap();
         assert_eq!(report.skills_seen, 1);
-        // load_skill_steps returns None for empty TOML in some configs;
-        // either way we should produce SOME finding, and it should not
-        // be an error. Accept warning OR an error as long as we don't
-        // crash — the contract is "report it visibly."
-        assert!(!report.findings.is_empty(), "empty skill must produce a finding");
+        assert!(!report.ok(), "empty skill must be a schema error");
+        assert_eq!(report.error_count, 1);
     }
 
     #[test]
@@ -729,6 +730,8 @@ id = "claim"
     #[test]
     fn compose_walks_multiple_skills_independently() {
         let linear_toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
   [[phases.steps]]
@@ -736,6 +739,8 @@ id = "claim"
   description = "fetch"
 "#;
         let git_toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "branch"
   [[phases.steps]]
@@ -912,6 +917,8 @@ id = "branch"
         // is more than annotation: it actually wires producers to
         // consumers across the supergraph.
         let producer = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -921,6 +928,8 @@ id = "claim"
   provides = ["linear.ticket_id"]
 "#;
         let consumer = r#"
+federation_version = "1"
+
 [[phases]]
 id = "open_pr"
 
@@ -946,6 +955,8 @@ id = "open_pr"
         // could plan executions that physically can't run because a
         // required input is never produced.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "open_pr"
 
@@ -970,6 +981,8 @@ id = "open_pr"
         // doesn't exist. Compose must catch this — otherwise routers
         // emit plans depending on phantom steps.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "open_pr"
 
@@ -995,6 +1008,8 @@ id = "open_pr"
         // see the typo before any execution attempts to follow the
         // dangling pointer.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "open_pr"
 
@@ -1021,12 +1036,14 @@ id = "open_pr"
         // warning naming the migration message. The chain composes
         // (report.ok() == true), but operators see the heads-up.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
   [[phases.steps]]
   id = "1"
-  description = "fetch (legacy)"
+  description = "fetch (deprecated)"
   deprecated = "Use claim.2 — fetches by ID, not URL"
 "#;
         let (_g, path) = temp_config(&[("linear", toml)]);
@@ -1044,6 +1061,8 @@ id = "claim"
         // override = "claim.99" — target step doesn't exist. Hard
         // error: you can't replace a step that isn't there.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -1066,6 +1085,8 @@ id = "claim"
         // Compose composes (no error) but warns — declare the
         // deprecation up-front so consumers know.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -1095,12 +1116,14 @@ id = "claim"
         // old step, declare override on the new step. Compose emits
         // exactly one warning (the deprecation), no override warning.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
   [[phases.steps]]
   id = "old"
-  description = "legacy fetch"
+  description = "deprecated fetch"
   deprecated = "use claim.new"
 
   [[phases.steps]]
@@ -1122,6 +1145,8 @@ id = "claim"
         // override = "claim/old" — wrong separator. Compose can't
         // parse the grammar so it errors instead of resolving.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -1144,6 +1169,8 @@ id = "claim"
         // linear. Both halves are needed — declare deprecation on the
         // linear side, declare override on the git side.
         let producer = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -1153,6 +1180,8 @@ id = "claim"
   deprecated = "moved to git.claim.1"
 "#;
         let consumer = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -1203,6 +1232,8 @@ id = "claim"
         // still compose cleanly. Federation correctness ≠ router
         // visibility.
         let toml = r#"
+federation_version = "1"
+
 [[phases]]
 id = "internal"
 

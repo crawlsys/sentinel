@@ -46,7 +46,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One step-level verifier requirement. Composed into a registry
-/// at handler-construction time and consulted in `submit_step_complete`.
+/// at handler-construction time and queried in `submit_step_complete`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepVerifierRequirement {
     /// Skill the requirement applies to (e.g. `"linear"`).

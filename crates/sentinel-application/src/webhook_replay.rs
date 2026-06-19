@@ -86,9 +86,7 @@ impl LastSeenStore {
 
 /// Default state dir for a session: `~/.claude/sentinel/state/{session_id}/`.
 pub fn state_dir_for_session(session_id: &str) -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
+    crate::paths::claude_dir()
         .join("sentinel")
         .join("state")
         .join(session_id)

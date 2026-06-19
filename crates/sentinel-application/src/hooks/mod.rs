@@ -26,7 +26,6 @@ pub mod doc_drift;
 pub mod doppler_auth0_gate;
 pub mod dry_run_then_commit;
 pub mod error_reporter;
-pub mod evidence_collector;
 pub mod execution_log;
 pub mod git_hygiene;
 pub mod good_citizen_observer;
@@ -53,15 +52,15 @@ pub mod pr_auto_monitor;
 pub mod pr_merge_gate;
 pub mod pre_commit_verification;
 pub mod pre_compact;
+pub mod pre_push_browser_test;
 pub mod production_action_notice;
 pub mod production_override;
-pub mod pre_push_browser_test;
 pub mod prompt_injection_nudge;
 pub mod provenance_validate;
 pub mod requirements_traceability_gate;
+pub mod self_annealing;
 pub mod session_end;
 pub mod session_index;
-pub mod self_annealing;
 pub mod session_init;
 pub mod session_summary;
 pub mod setup;
@@ -77,8 +76,8 @@ pub mod subagent_start;
 pub mod subagent_stop;
 pub mod task_completed;
 pub mod task_coverage_check;
-pub mod task_decomposition_gate;
 pub mod task_created;
+pub mod task_decomposition_gate;
 pub mod task_persist;
 pub mod task_rehydrate;
 pub mod tasks_md_guard;
@@ -140,6 +139,27 @@ pub fn project_hash(cwd: &str) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// Return a validated session id that is safe to use as a durable state key.
+///
+/// Missing session identity is different from a real session. Hooks must not
+/// manufacture `unknown`, `default`, or any other synthetic key for files that
+/// later participate in Sentinel authority or LangGraph projection.
+#[must_use]
+pub fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.eq_ignore_ascii_case("unknown") || session_id.eq_ignore_ascii_case("default") {
+        return None;
+    }
+    sentinel_domain::SessionId::validate(session_id).ok()?;
+    Some(session_id)
+}
+
+/// Resolve a concrete, validated session id from a hook input.
+#[must_use]
+pub fn concrete_input_session_id(input: &sentinel_domain::events::HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
 }
 
 /// Return `<home>/.claude/sentinel/metrics`.
@@ -217,106 +237,10 @@ fn session_prefixed_dir_name(session_id: &str) -> Option<String> {
 /// Return `<home>/.claude/sentinel/persistent-tasks`.
 ///
 /// Snapshots of the per-session `TaskList` (one subdir per `project_hash`). The
-/// authoritative source for `task_rehydrate` on `SessionStart`. Previously
-/// lived at `<home>/.claude/persistent-tasks/` — moved under `sentinel/` so
-/// all sentinel-owned state is colocated.
-///
-/// Use [`legacy_persistent_tasks_root`] when reading old data during the
-/// migration window.
+/// authoritative source for `task_rehydrate` on `SessionStart`. This is the
+/// only supported persistent task snapshot root.
 pub fn persistent_tasks_root(home: &std::path::Path) -> std::path::PathBuf {
     sentinel_dir(home).join("persistent-tasks")
-}
-
-/// Return the legacy `<home>/.claude/persistent-tasks` path. Only used for
-/// one-time migration on first read; new writes always go through
-/// [`persistent_tasks_root`].
-pub fn legacy_persistent_tasks_root(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(".claude").join("persistent-tasks")
-}
-
-/// One-time migration of persistent-tasks data from the legacy location to
-/// the sentinel-owned location. Idempotent: no-op when the new dir already
-/// exists or the legacy dir doesn't.
-///
-/// Strategy: rename the legacy directory in place. If rename fails (e.g.
-/// across mount points, or because something else holds a handle on
-/// Windows), fall back to copying each `<hash>/` subdir individually and
-/// best-effort removing the legacy entries we successfully copied. The
-/// legacy root itself is left as an empty husk so users can confirm
-/// migration happened, then delete by hand.
-pub fn migrate_persistent_tasks_dir(fs: &dyn FileSystemPort, home: &std::path::Path) {
-    let new_root = persistent_tasks_root(home);
-    let legacy_root = legacy_persistent_tasks_root(home);
-    if fs.is_dir(&new_root) {
-        return;
-    }
-    if !fs.is_dir(&legacy_root) {
-        return;
-    }
-    if let Some(parent) = new_root.parent() {
-        let _ = fs.create_dir_all(parent);
-    }
-    if std::fs::rename(&legacy_root, &new_root).is_ok() {
-        tracing::info!(
-            from = %legacy_root.display(),
-            to = %new_root.display(),
-            "Migrated persistent-tasks dir"
-        );
-        return;
-    }
-    // Fallback: per-entry copy.
-    if let Err(e) = fs.create_dir_all(&new_root) {
-        tracing::warn!(error = %e, "Failed to create new persistent-tasks dir; aborting migration");
-        return;
-    }
-    let entries = fs.read_dir(&legacy_root).unwrap_or_default();
-    for entry in entries {
-        let Some(name) = entry
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let dest = new_root.join(&name);
-        if fs.exists(&dest) {
-            continue;
-        }
-        if std::fs::rename(&entry, &dest).is_ok() {
-            continue;
-        }
-        // Best-effort recursive copy as last resort. We use std::fs directly
-        // since the FileSystemPort doesn't expose a tree-copy primitive and
-        // this only runs once per machine.
-        if let Err(e) = copy_dir_recursive(&entry, &dest) {
-            tracing::warn!(
-                error = %e,
-                from = %entry.display(),
-                to = %dest.display(),
-                "Failed to migrate persistent-tasks subdir; leaving legacy copy in place"
-            );
-        }
-    }
-    tracing::info!(
-        from = %legacy_root.display(),
-        to = %new_root.display(),
-        "Migrated persistent-tasks dir (per-entry fallback)"
-    );
-}
-
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &dst_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 /// All hook module names — used for dynamic counting.
@@ -343,7 +267,6 @@ pub const HOOK_NAMES: &[&str] = &[
     "doppler_auth0_gate",
     "dry_run_then_commit",
     "error_reporter",
-    "evidence_collector",
     "execution_log",
     "git_hygiene",
     "good_citizen_observer",
@@ -459,7 +382,9 @@ where
             {
                 Ok(rt) => rt.block_on(async {
                     // Apply tokio timeout on top of reqwest timeouts
-                    if let Ok(result) = tokio::time::timeout(timeout, future).await { result } else {
+                    if let Ok(result) = tokio::time::timeout(timeout, future).await {
+                        result
+                    } else {
                         tracing::debug!("run_async: wall-clock timeout exceeded");
                         T::default()
                     }
@@ -483,8 +408,9 @@ where
 // The CLI (hook_cmd.rs) constructs concrete adapters and injects them.
 
 pub use sentinel_domain::ports::{
-    EnvPort, FileSystemPort, GitStatusPort, LinearLookupPort, LlmModel, LlmPort, LlmRequest,
-    MemoryMcpPort, ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult, VectorStorePort,
+    EnvPort, FileSystemPort, GitStatusPort, LinearLookupError, LinearLookupPort, LlmModel, LlmPort,
+    LlmRequest, MemoryMcpPort, ProcessOutput, ProcessPort, VectorPoint, VectorScrollResult,
+    VectorStorePort,
 };
 
 // ---------------------------------------------------------------------------
@@ -508,7 +434,8 @@ pub struct HookContext<'a> {
     /// Process execution (run commands, spawn detached). Always present.
     pub process: &'a dyn ProcessPort,
 
-    /// LLM completion (Anthropic). `None` if no API key is configured.
+    /// LLM completion through the standardized OpenRouter adapter. `None` if
+    /// no API key is configured.
     pub llm: Option<&'a dyn LlmPort>,
 
     /// Memory engine MCP client. Always present — wraps memory-mcp stdio.
@@ -517,8 +444,9 @@ pub struct HookContext<'a> {
     /// Environment-variable reader. Always present — wraps `std::env`.
     pub env: &'a dyn EnvPort,
 
-    /// Real-time single-issue Linear lookup for the PM gate. `None` when no
-    /// Linear token is configured — the gate then falls back to the cache.
+    /// Real-time single-issue Linear lookup for the PM gate. `None` means
+    /// live Linear authority is unavailable, so targeted start attempts fail
+    /// closed.
     pub linear_lookup: Option<&'a dyn LinearLookupPort>,
 }
 
@@ -535,8 +463,7 @@ impl HookContext<'_> {
 
     /// Whether sentinel autopilot is active. Read from `SENTINEL_AUTOPILOT`
     /// (any value other than `"0"` / empty / unset is treated as enabled).
-    /// Used by `tool_usage_gate`, `pr_merge_gate`, `doppler_auth0_gate`,
-    /// `task_rehydrate`.
+    /// Used by `pr_merge_gate`, `doppler_auth0_gate`, `task_rehydrate`.
     pub fn autopilot_enabled(&self) -> bool {
         match self.env.var("SENTINEL_AUTOPILOT").as_deref() {
             None | Some("" | "0") => false,
@@ -581,6 +508,9 @@ pub mod test_support {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -589,6 +519,9 @@ pub mod test_support {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -601,6 +534,9 @@ pub mod test_support {
             Err(FileSystemError::NotFound("not found".into()))
         }
         fn write(&self, _: &Path, _: &[u8]) -> Result<(), FileSystemError> {
+            Ok(())
+        }
+        fn replace_file_atomic(&self, _: &Path, _: &[u8]) -> Result<(), FileSystemError> {
             Ok(())
         }
         fn create_dir_all(&self, _: &Path) -> Result<(), FileSystemError> {
@@ -620,6 +556,88 @@ pub mod test_support {
         }
         fn append(&self, _: &Path, _: &[u8]) -> Result<(), FileSystemError> {
             Ok(())
+        }
+    }
+
+    pub struct TestHomeFs {
+        home: PathBuf,
+    }
+
+    impl TestHomeFs {
+        pub fn new(home: impl Into<PathBuf>) -> Self {
+            Self { home: home.into() }
+        }
+    }
+
+    impl FileSystemPort for TestHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+
+        fn read_to_string(&self, path: &Path) -> Result<String, FileSystemError> {
+            Ok(std::fs::read_to_string(path)?)
+        }
+
+        fn write(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(std::fs::write(path, content)?)
+        }
+
+        fn replace_file_atomic(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
+            self.write(path, content)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> Result<(), FileSystemError> {
+            Ok(std::fs::create_dir_all(path)?)
+        }
+
+        fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
+            Ok(std::fs::read_dir(path)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            path.exists()
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
+
+        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, FileSystemError> {
+            Ok(std::fs::metadata(path)?)
+        }
+
+        fn append(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            file.write_all(content)?;
+            Ok(())
+        }
+
+        fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err.into()),
+            }
+        }
+
+        fn remove_dir_all(&self, path: &Path) -> Result<(), FileSystemError> {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err.into()),
+            }
         }
     }
 
@@ -705,113 +723,26 @@ pub mod test_support {
             linear_lookup: None,
         }
     }
+
+    pub fn stub_ctx_with_fs<'a>(fs: &'a dyn FileSystemPort) -> HookContext<'a> {
+        let base = stub_ctx();
+        HookContext {
+            git: base.git,
+            vector_store: base.vector_store,
+            fs,
+            process: base.process,
+            llm: base.llm,
+            memory_mcp: base.memory_mcp,
+            env: base.env,
+            linear_lookup: base.linear_lookup,
+        }
+    }
 }
 
 #[cfg(test)]
-mod migrate_tests {
+mod persistent_tasks_root_tests {
     use super::*;
-    use std::path::Path;
     use std::path::PathBuf;
-
-    /// Real-FS adapter scoped to a caller-supplied home directory.
-    struct ScopedHomeFs {
-        home: PathBuf,
-    }
-    impl FileSystemPort for ScopedHomeFs {
-        fn home_dir(&self) -> Option<PathBuf> {
-            Some(self.home.clone())
-        }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-        }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-            }
-            std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-        }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-        }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_dir(p)
-                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
-                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        }
-        fn exists(&self, p: &Path) -> bool {
-            p.exists()
-        }
-        fn is_dir(&self, p: &Path) -> bool {
-            p.is_dir()
-        }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-        }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn migrate_moves_legacy_data_to_new_location() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let legacy = legacy_persistent_tasks_root(&home);
-        std::fs::create_dir_all(legacy.join("abc12345")).unwrap();
-        std::fs::write(
-            legacy.join("abc12345").join("tasks.json"),
-            r#"[{"id":"1","subject":"x","status":"pending","blockedBy":[],"blocks":[]}]"#,
-        )
-        .unwrap();
-        let fs = ScopedHomeFs { home: home.clone() };
-
-        migrate_persistent_tasks_dir(&fs, &home);
-
-        let new_root = persistent_tasks_root(&home);
-        assert!(new_root.is_dir(), "new root must exist after migration");
-        assert!(
-            new_root.join("abc12345").join("tasks.json").is_file(),
-            "task data must land at the new path"
-        );
-        // Legacy root should be gone (rename succeeded), or at least empty.
-        let legacy_still_present = legacy.is_dir();
-        if legacy_still_present {
-            assert!(
-                std::fs::read_dir(&legacy).unwrap().next().is_none(),
-                "if legacy root persists (fallback path), it must be empty"
-            );
-        }
-    }
-
-    #[test]
-    fn migrate_is_noop_when_new_already_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let legacy = legacy_persistent_tasks_root(&home);
-        let new_root = persistent_tasks_root(&home);
-        std::fs::create_dir_all(legacy.join("abc")).unwrap();
-        std::fs::write(legacy.join("abc").join("legacy.txt"), "legacy").unwrap();
-        std::fs::create_dir_all(new_root.join("abc")).unwrap();
-        std::fs::write(new_root.join("abc").join("new.txt"), "new").unwrap();
-        let fs = ScopedHomeFs { home: home.clone() };
-
-        migrate_persistent_tasks_dir(&fs, &home);
-
-        // New data is untouched.
-        assert!(new_root.join("abc").join("new.txt").is_file());
-        // Legacy file is also untouched (we don't merge — first-mover wins).
-        assert!(legacy.join("abc").join("legacy.txt").is_file());
-    }
-
-    #[test]
-    fn migrate_is_noop_when_legacy_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let fs = ScopedHomeFs { home: home.clone() };
-        // Neither dir exists — must not panic, must not create the new dir.
-        migrate_persistent_tasks_dir(&fs, &home);
-        assert!(!persistent_tasks_root(&home).exists());
-    }
 
     #[test]
     fn persistent_tasks_root_is_under_sentinel() {
@@ -820,18 +751,6 @@ mod migrate_tests {
         assert!(
             root.ends_with(".claude/sentinel/persistent-tasks")
                 || root.ends_with(r".claude\sentinel\persistent-tasks"),
-            "got: {}",
-            root.display()
-        );
-    }
-
-    #[test]
-    fn legacy_persistent_tasks_root_unchanged() {
-        let home = PathBuf::from("/some/home");
-        let root = legacy_persistent_tasks_root(&home);
-        assert!(
-            root.ends_with(".claude/persistent-tasks")
-                || root.ends_with(r".claude\persistent-tasks"),
             "got: {}",
             root.display()
         );
@@ -915,20 +834,35 @@ mod session_task_dir_tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Ok(std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
         }
         fn exists(&self, p: &Path) -> bool {
             p.exists()
@@ -936,10 +870,17 @@ mod session_task_dir_tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -985,7 +926,9 @@ mod session_task_dir_tests {
         let tmp = tempfile::tempdir().unwrap();
         let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
         seed_dir(tmp.path(), id);
-        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         assert_eq!(
             session_task_dir(&fs, tmp.path(), id),
             tasks_root(tmp.path()).join(id)
@@ -997,7 +940,9 @@ mod session_task_dir_tests {
         let tmp = tempfile::tempdir().unwrap();
         let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
         seed_dir(tmp.path(), "session-e2ea5630");
-        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         assert_eq!(
             session_task_dir(&fs, tmp.path(), id),
             tasks_root(tmp.path()).join("session-e2ea5630"),
@@ -1011,7 +956,9 @@ mod session_task_dir_tests {
         let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
         seed_dir(tmp.path(), id);
         seed_dir(tmp.path(), "session-e2ea5630");
-        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         assert_eq!(
             session_task_dir(&fs, tmp.path(), id),
             tasks_root(tmp.path()).join(id),
@@ -1023,7 +970,9 @@ mod session_task_dir_tests {
     fn returns_literal_path_when_neither_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let id = "ffffffff-0000-0000-0000-000000000000";
-        let fs = TmpHomeFs { home: tmp.path().to_path_buf() };
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         // No dir seeded — returns the literal path so the caller's is_dir check
         // reports a definitive absence (fresh session).
         assert_eq!(

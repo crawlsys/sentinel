@@ -78,7 +78,7 @@ pub struct CostPerPointSummary {
 }
 
 /// In-memory report returned by `scan_cost_per_point` for human reporting.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CostPerPointReport {
     pub tickets_analyzed: usize,
     pub tickets_with_estimate: usize,
@@ -352,8 +352,8 @@ fn ticket_id_from_issue(issue: &serde_json::Value) -> Option<String> {
         .get("identifier")
         .and_then(|v| v.as_str())
         .or_else(|| {
-            // Fallback: only treat `id` as a ticket id if it looks
-            // like one (PREFIX-NUMBER) — Linear UUIDs would
+            // Secondary id source: only treat `id` as a ticket id if
+            // it looks like one (PREFIX-NUMBER) — Linear UUIDs would
             // otherwise pollute the map.
             issue.get("id").and_then(|v| v.as_str()).filter(|s| {
                 s.chars().any(|c| c == '-')

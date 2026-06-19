@@ -20,11 +20,11 @@ Sentinel runs **two external benchmarks** on a recurring cadence:
 
 1. **TheAgentCompany** (Xu et al., 2024 — `arXiv:2412.14161`) — the generic anchor. Simulated company with Gitea + RocketChat + OwnCloud + NPC coworkers. Frontier baseline today is ~24-30% full-task completion. Run as the *general* AI-factory capability measurement.
 
-2. **BA-Eval Corpus** — a sentinel-curated benchmark for the BA-vertical product specifically. Real BA deliverables (consulting briefs, exec memos, board decks) sourced from public corpora and (with permission) partner orgs. Scored against a rubric that mirrors BA5's critique axes plus outcome-realism axes. Run as the *BA-vertical-specific* measurement.
+2. **BA-Eval Corpus** — a sentinel-curated benchmark for the BA-vertical product specifically. Real BA deliverables (advisory briefs, exec memos, board decks) sourced from public corpora and (with permission) partner orgs. Scored against a rubric that mirrors BA5's critique axes plus outcome-realism axes. Run as the *BA-vertical-specific* measurement.
 
 Together these are the **external discipline** that prevents internal metrics from drifting into Goodhart territory. The brief is explicit: internal metrics will optimize themselves into local maxima; external benchmarks we don't control are the corrective.
 
-Critical R5 boundary: benchmark *scores* feed operator dashboards, methodology decisions (which substrate changes ship), and (with the deterministic-dispatch-input boundary) A2 appraisal counters. Benchmark scores do **not** feed agent training. The benchmark exists to evaluate the substrate, not to train against.
+Critical R5 boundary: benchmark *scores* feed reports, methodology decisions (which substrate changes ship), and (with the deterministic-dispatch-input boundary) A2 appraisal counters. Benchmark scores do **not** feed agent training. The benchmark exists to evaluate the substrate, not to train against.
 
 This doc specifies methodology and cadence, not architecture. There is no new hook, no new port. There IS a new CLI subcommand (`sentinel eval`) and a new config file (`config/eval-corpora.toml`).
 
@@ -120,7 +120,7 @@ pub struct EvalCase {
 }
 
 pub enum SourceCorpus {
-    Public { url: String, license: String },  // e.g., publicly-published consulting deliverables
+    Public { url: String, license: String },  // e.g., publicly-published advisory deliverables
     PartnerContributed { partner: String, redaction_level: RedactionLevel },
     SyntheticGenerated { generation_method: String },  // for filling gaps in real cases
 }
@@ -128,7 +128,7 @@ pub enum SourceCorpus {
 
 Cases are sourced from three pools:
 
-1. **Public corpora** — published consulting deliverables (McKinsey/Bain/BCG public reports, academic case studies, public think-tank briefs). Scrape + curate + score-rubric attach.
+1. **Public corpora** — published advisory deliverables (McKinsey/Bain/BCG public reports, academic case studies, public think-tank briefs). Scrape + curate + score-rubric attach.
 2. **Partner-contributed** — with explicit permission, partner orgs share past BA work (redacted as needed). High signal because these are *real* deliverables with *real* outcomes; rare because of confidentiality.
 3. **Synthetic generated** — for filling gaps in capability coverage (e.g., we have lots of strategy briefs but few pricing analyses). Synthetic cases are explicitly typed as such; not used for outcome-scoring (the synthetic outcome isn't real).
 
@@ -148,7 +148,7 @@ Each axis 0.0-1.0; weighted score per case; aggregate per run.
 ### 3.4 The R5 boundary, applied
 
 The corpus and its scores are READ by:
-- Operator dashboard (which substrate changes improved which axes).
+- Report (which substrate changes improved which axes).
 - A2 appraisal counters (with R5 deterministic-dispatch-input boundary).
 - Methodology decisions (does this architectural change ship or not).
 - External reporting (when we tell stakeholders our BA-eval scores).
@@ -184,7 +184,7 @@ sentinel eval report <run_id>                           # human-readable summary
 sentinel eval diff <run_id_a> <run_id_b>                # before/after comparison
 ```
 
-All results write to `~/.claude/sentinel/eval/`. Sentinel's existing dashboard API exposes the results at `/api/eval/...` endpoints.
+All results write to `~/.claude/sentinel/eval/`. Sentinel's existing local API exposes the results at `/api/eval/...` endpoints.
 
 ---
 

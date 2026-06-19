@@ -36,29 +36,35 @@ pub struct ChannelEvent {
 
 /// Get the base events directory (parent of all session subdirs).
 fn events_base_dir(fs: &dyn FileSystemPort) -> std::path::PathBuf {
-    fs.home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".claude")
-        .join("sentinel")
-        .join("events")
+    fs.claude_dir().join("sentinel").join("events")
+}
+
+fn concrete_session_id(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id == "unknown" {
+        return None;
+    }
+    sentinel_domain::SessionId::validate(session_id).ok()?;
+    Some(session_id)
 }
 
 /// Get the session-scoped events directory.
 ///
-/// Returns `~/.claude/sentinel/events/{session_id}/` for the given session,
-/// or falls back to `~/.claude/sentinel/events/_unscoped/` if no session ID
-/// is available.
+/// Returns `~/.claude/sentinel/events/{session_id}/` only for concrete,
+/// validated session identities. Missing or synthetic session IDs do not get a
+/// shared fallback directory because that would mix event authority across
+/// concurrent Claude sessions.
 pub fn events_dir_for_session(
     fs: &dyn FileSystemPort,
     session_id: Option<&str>,
-) -> std::path::PathBuf {
-    let subdir = session_id.unwrap_or("_unscoped");
-    events_base_dir(fs).join(subdir)
+) -> Option<std::path::PathBuf> {
+    let subdir = concrete_session_id(session_id?)?;
+    Some(events_base_dir(fs).join(subdir))
 }
 
 /// Get the events directory for the current session, with the session id
 /// resolved from the env adapter.
-pub fn events_dir(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> std::path::PathBuf {
+pub fn events_dir(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Option<std::path::PathBuf> {
     let session_id = detect_session_id(env);
     events_dir_for_session(fs, session_id.as_deref())
 }
@@ -67,7 +73,7 @@ pub fn events_dir(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> std::path::Path
 fn detect_session_id(env: &dyn EnvPort) -> Option<String> {
     env.var("CLAUDE_SESSION_ID")
         .or_else(|| env.var("SESSION_ID"))
-        .filter(|s| !s.is_empty())
+        .and_then(|s| concrete_session_id(&s).map(str::to_string))
 }
 
 /// Derive a project name from a cwd path (uses the last path component).
@@ -83,7 +89,8 @@ fn project_from_cwd(cwd: Option<&str>) -> Option<String> {
 /// Emit a channel event by writing a JSON file to the session-scoped events directory.
 ///
 /// `session_id` and `cwd` should come from `HookInput` when available.
-/// If `session_id` is `None`, falls back to env-adapter detection.
+/// If `session_id` is `None`, env-adapter detection is attempted. Missing,
+/// synthetic, or malformed session identities do not emit event files.
 pub fn emit(
     fs: &dyn FileSystemPort,
     env: &dyn EnvPort,
@@ -94,11 +101,15 @@ pub fn emit(
     cwd: Option<&str>,
     source_agent: Option<&str>,
 ) {
-    let resolved_session_id = session_id
-        .map(String::from)
-        .or_else(|| detect_session_id(env));
+    let resolved_session_id = match session_id {
+        Some(session_id) => concrete_session_id(session_id).map(str::to_string),
+        None => detect_session_id(env),
+    };
 
-    let dir = events_dir_for_session(fs, resolved_session_id.as_deref());
+    let Some(dir) = events_dir_for_session(fs, resolved_session_id.as_deref()) else {
+        warn!("Skipping channel event without concrete session identity");
+        return;
+    };
     if let Err(e) = fs.create_dir_all(&dir) {
         warn!(error = %e, "Failed to create events directory");
         return;
@@ -145,13 +156,17 @@ pub fn pending_events_for_session(
     fs: &dyn FileSystemPort,
     session_id: Option<&str>,
 ) -> Vec<std::path::PathBuf> {
-    let dir = events_dir_for_session(fs, session_id);
+    let Some(dir) = events_dir_for_session(fs, session_id) else {
+        return Vec::new();
+    };
     pending_events_in_dir(fs, &dir)
 }
 
 /// List all pending event files in the current session's directory.
 pub fn pending_events(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Vec<std::path::PathBuf> {
-    let dir = events_dir(fs, env);
+    let Some(dir) = events_dir(fs, env) else {
+        return Vec::new();
+    };
     pending_events_in_dir(fs, &dir)
 }
 
@@ -266,7 +281,7 @@ pub fn channel_event_from_webhook(
         session_id: std::env::var("CLAUDE_SESSION_ID")
             .ok()
             .or_else(|| std::env::var("SESSION_ID").ok())
-            .filter(|s| !s.is_empty()),
+            .and_then(|s| concrete_session_id(&s).map(str::to_string)),
         project: None,
         source_agent: Some("hookdeck".into()),
         meta,
@@ -301,16 +316,31 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn read_to_string(
+                &self,
+                p: &std::path::Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+            {
                 Ok(vec![])
             }
             fn exists(&self, p: &std::path::Path) -> bool {
@@ -319,10 +349,18 @@ mod tests {
             fn is_dir(&self, p: &std::path::Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                p: &std::path::Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -348,11 +386,171 @@ mod tests {
     #[test]
     fn test_events_dir_for_session() {
         let fs = crate::hooks::test_support::StubFs;
-        let dir = events_dir_for_session(&fs, Some("abc-123"));
+        let dir = events_dir_for_session(&fs, Some("abc-123")).expect("concrete session dir");
         assert!(dir.ends_with("events/abc-123") || dir.ends_with("events\\abc-123"));
 
-        let unscoped = events_dir_for_session(&fs, None);
-        assert!(unscoped.ends_with("events/_unscoped") || unscoped.ends_with("events\\_unscoped"));
+        assert!(events_dir_for_session(&fs, None).is_none());
+        assert!(events_dir_for_session(&fs, Some("unknown")).is_none());
+        assert!(events_dir_for_session(&fs, Some("../escape")).is_none());
+    }
+
+    struct TempHomeFs {
+        home: std::path::PathBuf,
+    }
+
+    impl FileSystemPort for TempHomeFs {
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.home.clone())
+        }
+
+        fn read_to_string(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+
+        fn write(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+
+        fn create_dir_all(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+
+        fn read_dir(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
+        }
+
+        fn exists(&self, p: &std::path::Path) -> bool {
+            p.exists()
+        }
+
+        fn is_dir(&self, p: &std::path::Path) -> bool {
+            p.is_dir()
+        }
+
+        fn metadata(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+
+        fn append(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
+            Ok(file.write_all(c)?)
+        }
+    }
+
+    #[test]
+    fn emit_without_session_does_not_write_unscoped_event_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::new();
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent completed",
+            serde_json::Map::new(),
+            None,
+            Some("/tmp/sentinel"),
+            Some("tester"),
+        );
+
+        assert!(!tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("events")
+            .join("_unscoped")
+            .exists());
+    }
+
+    #[test]
+    fn emit_rejects_explicit_unknown_without_env_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env =
+            crate::hooks::test_support::StubEnv::with(&[("CLAUDE_SESSION_ID", "real-session")]);
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent completed",
+            serde_json::Map::new(),
+            Some("unknown"),
+            Some("/tmp/sentinel"),
+            Some("tester"),
+        );
+
+        assert!(!tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("events")
+            .join("real-session")
+            .exists());
+    }
+
+    #[test]
+    fn emit_with_concrete_session_writes_session_scoped_event() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::new();
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent completed",
+            serde_json::Map::new(),
+            Some("channel-real-session"),
+            Some("/tmp/sentinel"),
+            Some("tester"),
+        );
+
+        let pending = pending_events_for_session(&fs, Some("channel-real-session"));
+        assert_eq!(pending.len(), 1);
+        let event = read_event(&fs, &pending[0]).expect("channel event");
+        assert_eq!(event.session_id.as_deref(), Some("channel-real-session"));
+        assert_eq!(event.summary, "Agent completed");
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! issue may carry:
 //!
 //! * `identifier` (e.g. `"FPCRM-606"`) — required to be classified
-//! * `id` — the Linear issue UUID (required to mutate; absent ⇒ shadow-only)
+//! * `id` - the Linear issue UUID. The graph-backed apply path requires it.
 //! * `title` — fed to the model
 //! * `description` — fed to the model
 //! * `priority` — current Linear priority (0=none, 1=urgent … 4=low)
@@ -26,41 +26,33 @@
 //! number is *more* urgent. The models are asked for a `1..=4` severity (we
 //! never propose 0 — "no priority" is the gap we fill, not a verdict).
 //!
-//! ## Shadow vs apply
+//! ## Report-only scan
 //!
-//! By default (`apply == false`) the scan is **read-only**: it classifies and
-//! reports proposed priorities and mutates NOTHING. With `apply == true` and a
-//! Linear token present:
-//!
-//! * a ticket with NO priority (0 / absent) → the proposed priority is **set**
-//!   via `issueUpdate` (gap-fill — there is no human verdict to override).
-//! * a ticket that ALREADY has a priority → we do **not** overwrite it; the CLI
-//!   layer is responsible for the human-confirm step before any suggestion
-//!   comment is posted, so the module classifies it as a `suggest` action and
-//!   leaves the comment to the caller. (When this fn is invoked directly with
-//!   apply + token it will still post the suggestion comment, but the CLI gates
-//!   that path — see `severity_cmd`.)
+//! The application-layer scan is read-only: it classifies and reports proposed
+//! priorities and mutates NOTHING. Graph-backed Linear mutation is owned by
+//! `sentinel-infrastructure`, which consumes these proposal rows and checkpoints
+//! the apply/skip decision before issuing any `issueUpdate`.
 //!
 //! Output is written to `~/.claude/sentinel/metrics/severity.json` (summary)
 //! and `…severity.jsonl` (one row per proposal), idempotently.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
 use sentinel_domain::ports::{LlmModel, LlmPort, LlmRequest};
 
-/// Linear's GraphQL endpoint (REST POST). Matches the enforcer's constant.
-const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
-
 /// Max tokens for each model's severity verdict — a short JSON object.
 const SEVERITY_MAX_TOKENS: u32 = 256;
 
 /// One ticket's reconciled severity proposal, written as a JSONL row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeverityProposal {
+    /// Linear issue UUID, when present in the cache. Required by the
+    /// infrastructure graph-backed apply path.
+    pub issue_id: Option<String>,
     pub identifier: String,
     pub title: String,
     /// Current Linear priority (`None` or `Some(0)` == no priority set).
@@ -91,10 +83,10 @@ pub struct SeveritySummary {
     pub would_suggest: usize,
     /// Tickets where the two models disagreed (opus != gpt).
     pub disagreements: usize,
-    /// Mutations actually performed (0 in shadow mode).
+    /// Mutations actually performed by a downstream graph-backed apply path.
     pub applied: usize,
     /// `true` when no Linear mutation was performed (read-only).
-    pub shadow: bool,
+    pub report_only: bool,
 }
 
 /// Reconcile two model priority verdicts into one final priority.
@@ -114,8 +106,9 @@ pub fn reconcile(opus: i64, gpt: i64) -> i64 {
 ///
 /// The prompt asks for `{"priority":N,"reasoning":"..."}`, so we try to parse
 /// that JSON first (tolerant of leading/trailing prose by scanning for the
-/// first `{`…`}` span). If that fails, we fall back to the first standalone
-/// `1`-`4` digit in the text. Returns `None` when nothing in range is found.
+/// first `{`…`}` span). If JSON parsing fails, we also accept the first
+/// standalone `1`-`4` digit in the text. Returns `None` when nothing in range
+/// is found.
 #[must_use]
 pub fn parse_priority(text: &str) -> Option<i64> {
     // 1. Try strict JSON, then a brace-delimited substring (models often wrap
@@ -123,7 +116,8 @@ pub fn parse_priority(text: &str) -> Option<i64> {
     if let Some(p) = parse_priority_json(text) {
         return Some(p);
     }
-    // 2. Fallback: the first bare 1-4 that is not part of a larger number.
+    // 2. Secondary parse: the first bare 1-4 that is not part of a larger
+    //    number.
     let bytes = text.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if (b'1'..=b'4').contains(&b) {
@@ -178,53 +172,57 @@ struct Issue {
 /// its `.jsonl` sibling (proposal rows), and return the summary.
 ///
 /// For each ticket it asks `llm` twice (Opus then Codex/GPT-5.5), parses both
-/// verdicts, reconciles them, and classifies the action. In shadow mode
-/// (`apply == false`) it performs NO Linear mutation. With `apply == true` and
-/// a `linear_token`, a `set` action runs `issueUpdate`; a `suggest` action
-/// posts a `commentCreate`. Mutation errors are logged and the scan continues.
+/// verdicts, reconciles them, and classifies the action. This function performs
+/// NO Linear mutation. The graph-backed apply path consumes the generated
+/// proposal rows downstream and must checkpoint its authorization decision
+/// before any Linear write.
 ///
 /// # Errors
-/// Returns an error only on cache-read / output-write failures. Per-ticket LLM
-/// or Linear failures are tolerated (logged, skipped) so one bad ticket never
-/// aborts the whole scan.
+/// Returns an error on cache-read / output-write failures, LLM failures, or any
+/// ticket whose model verdicts cannot both be parsed. The downstream
+/// graph-backed apply path must consume a complete proposal set, not a partial
+/// report with silently skipped tickets.
 pub async fn scan_severity(
     linear_cache: &Path,
     output: &Path,
     llm: &dyn LlmPort,
-    apply: bool,
-    linear_token: Option<&str>,
 ) -> Result<SeveritySummary> {
     let issues = load_issues(linear_cache)
         .with_context(|| format!("load linear cache {}", linear_cache.display()))?;
 
-    // A live client only when we will actually mutate (apply + token present).
-    let client = (apply && linear_token.is_some()).then(reqwest::Client::new);
-
     let mut proposals: Vec<SeverityProposal> = Vec::new();
     let mut summary = SeveritySummary {
-        shadow: !apply,
+        report_only: true,
         ..Default::default()
     };
 
     for iss in &issues {
         summary.tickets_scanned += 1;
 
-        // Ask both models. A model that errors or returns nothing parseable is
-        // skipped for this ticket (we need both verdicts to reconcile).
         let prompt = build_prompt(&iss.identifier, &iss.title, &iss.description);
-        let opus_resp = complete(llm, LlmModel::Opus, &prompt).await;
-        let gpt_resp = complete(llm, LlmModel::Codex, &prompt).await;
-
-        let (Some(opus_pri), Some(gpt_pri)) = (
-            opus_resp.as_deref().and_then(parse_priority),
-            gpt_resp.as_deref().and_then(parse_priority),
-        ) else {
-            tracing::debug!(
-                ticket = %iss.identifier,
-                "auto-severity: skipping — could not parse both model verdicts"
-            );
-            continue;
-        };
+        let opus_resp = complete(llm, LlmModel::Opus, &prompt)
+            .await
+            .with_context(|| format!("auto-severity Opus verdict failed for {}", iss.identifier))?;
+        let gpt_resp = complete(llm, LlmModel::Codex, &prompt)
+            .await
+            .with_context(|| {
+                format!(
+                    "auto-severity GPT/Codex verdict failed for {}",
+                    iss.identifier
+                )
+            })?;
+        let opus_pri = parse_priority(&opus_resp).ok_or_else(|| {
+            anyhow::anyhow!(
+                "auto-severity Opus verdict for {} did not contain a parseable 1..=4 priority",
+                iss.identifier
+            )
+        })?;
+        let gpt_pri = parse_priority(&gpt_resp).ok_or_else(|| {
+            anyhow::anyhow!(
+                "auto-severity GPT/Codex verdict for {} did not contain a parseable 1..=4 priority",
+                iss.identifier
+            )
+        })?;
 
         let proposed = reconcile(opus_pri, gpt_pri);
         let models_agreed = opus_pri == gpt_pri;
@@ -233,8 +231,11 @@ pub async fn scan_severity(
         }
 
         // Reasoning from whichever model produced the more-urgent verdict (the
-        // one that "won" the reconcile); fall back to the other, then a stub.
-        let reasoning = pick_reasoning(opus_pri, gpt_pri, &opus_resp, &gpt_resp);
+        // one that "won" the reconcile); otherwise use the other model's
+        // reasoning. If neither model supplies reasoning, fail closed instead
+        // of inventing evidence for a proposal.
+        let reasoning = pick_reasoning(opus_pri, gpt_pri, &opus_resp, &gpt_resp)
+            .with_context(|| format!("auto-severity reasoning missing for {}", iss.identifier))?;
 
         let has_priority = iss.priority.is_some_and(|p| p > 0);
         let action = if !has_priority {
@@ -247,23 +248,8 @@ pub async fn scan_severity(
             "suggest"
         };
 
-        // Mutation path (only when armed). Errors are logged + tolerated.
-        if let (Some(client), Some(token), Some(id)) =
-            (client.as_ref(), linear_token, iss.id.as_deref())
-        {
-            let ok = match action {
-                "set" => set_priority(client, token, id, proposed).await,
-                "suggest" => {
-                    let body =
-                        suggestion_comment(&iss.identifier, iss.priority, proposed, &reasoning);
-                    post_comment(client, token, id, &body).await
-                }
-                _ => false, // "agree" — nothing to do
-            };
-            summary.applied += usize::from(ok);
-        }
-
         proposals.push(SeverityProposal {
+            issue_id: iss.id.clone(),
             identifier: iss.identifier.clone(),
             title: iss.title.clone(),
             current_priority: iss.priority,
@@ -298,33 +284,23 @@ fn build_prompt(identifier: &str, title: &str, description: &str) -> String {
     )
 }
 
-/// Run one completion, swallowing errors into `None` (so a model outage on one
-/// ticket doesn't abort the scan).
-async fn complete(llm: &dyn LlmPort, model: LlmModel, prompt: &str) -> Option<String> {
+/// Run one required model completion.
+async fn complete(llm: &dyn LlmPort, model: LlmModel, prompt: &str) -> Result<String> {
     let req = LlmRequest {
         model,
         prompt: prompt.to_string(),
         max_tokens: SEVERITY_MAX_TOKENS,
     };
-    match llm.complete(req).await {
-        Ok(text) => Some(text),
-        Err(e) => {
-            tracing::debug!(error = %e, ?model, "auto-severity: LLM completion failed");
-            None
-        }
-    }
+    llm.complete(req)
+        .await
+        .with_context(|| format!("auto-severity {model:?} completion failed"))
 }
 
 /// Pick the reasoning string from whichever model produced the winning (more
-/// urgent) verdict; fall back to the other model's reasoning, then a stub.
-fn pick_reasoning(
-    opus_pri: i64,
-    gpt_pri: i64,
-    opus_resp: &Option<String>,
-    gpt_resp: &Option<String>,
-) -> String {
-    let opus_reason = opus_resp.as_deref().and_then(parse_reasoning);
-    let gpt_reason = gpt_resp.as_deref().and_then(parse_reasoning);
+/// urgent) verdict; otherwise use the other model's reasoning.
+fn pick_reasoning(opus_pri: i64, gpt_pri: i64, opus_resp: &str, gpt_resp: &str) -> Result<String> {
+    let opus_reason = parse_reasoning(opus_resp);
+    let gpt_reason = parse_reasoning(gpt_resp);
     // The "winner" is the more-urgent (smaller) number; ties prefer Opus.
     let (primary, secondary) = if opus_pri <= gpt_pri {
         (opus_reason, gpt_reason)
@@ -333,77 +309,7 @@ fn pick_reasoning(
     };
     primary
         .or(secondary)
-        .unwrap_or_else(|| "no reasoning supplied by the models".to_string())
-}
-
-/// The body of a suggestion comment for a ticket that already has a priority.
-fn suggestion_comment(
-    identifier: &str,
-    current: Option<i64>,
-    proposed: i64,
-    reasoning: &str,
-) -> String {
-    let cur = current.map_or_else(|| "none".to_string(), |c| priority_label(c).to_string());
-    format!(
-        "## 🎯 Auto-severity suggestion\n\nTwo models (Opus 4.8 + GPT-5.5) judged \
-         {identifier}'s priority as **{}** (currently **{cur}**).\n\n{reasoning}\n\n\
-         _Shadow suggestion — a human should confirm before changing the priority._",
-        priority_label(proposed),
-    )
-}
-
-/// Human label for a Linear priority value.
-fn priority_label(p: i64) -> &'static str {
-    match p {
-        1 => "Urgent (1)",
-        2 => "High (2)",
-        3 => "Medium (3)",
-        4 => "Low (4)",
-        _ => "None (0)",
-    }
-}
-
-/// Set a ticket's priority via `issueUpdate`. Returns `true` on a successful
-/// POST. Errors are logged and swallowed (the scan continues).
-async fn set_priority(client: &reqwest::Client, token: &str, issue_id: &str, priority: i64) -> bool {
-    let mutation = serde_json::json!({
-        "query": "mutation($id:String!,$p:Int!){issueUpdate(id:$id,input:{priority:$p}){success}}",
-        "variables": { "id": issue_id, "p": priority }
-    });
-    linear_post(client, token, &mutation, issue_id, "set priority").await
-}
-
-/// Post a comment via `commentCreate`. Returns `true` on a successful POST.
-async fn post_comment(client: &reqwest::Client, token: &str, issue_id: &str, body: &str) -> bool {
-    let mutation = serde_json::json!({
-        "query": "mutation($id:String!,$b:String!){commentCreate(input:{issueId:$id,body:$b}){success}}",
-        "variables": { "id": issue_id, "b": body }
-    });
-    linear_post(client, token, &mutation, issue_id, "post comment").await
-}
-
-/// Shared Linear GraphQL POST. Logs + swallows any failure, returning `false`.
-async fn linear_post(
-    client: &reqwest::Client,
-    token: &str,
-    body: &serde_json::Value,
-    issue_id: &str,
-    what: &str,
-) -> bool {
-    match client
-        .post(LINEAR_GRAPHQL_URL)
-        .header("Authorization", token)
-        .header("Content-Type", "application/json")
-        .json(body)
-        .send()
-        .await
-    {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!(error = %e, issue = %issue_id, %what, "auto-severity: Linear mutation failed");
-            false
-        }
-    }
+        .ok_or_else(|| anyhow::anyhow!("no reasoning supplied by either model"))
 }
 
 /// Parse the permissive cache into normalized issues.
@@ -478,7 +384,7 @@ fn write_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
+    use sentinel_domain::port_errors::LlmError;
     use std::sync::Mutex;
 
     /// A mock `LlmPort` that returns canned responses in order, per model.
@@ -500,12 +406,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmPort for MockLlm {
-        async fn complete(&self, request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
+        async fn complete(
+            &self,
+            request: LlmRequest,
+        ) -> Result<String, sentinel_domain::port_errors::LlmError> {
             let q = match request.model {
                 LlmModel::Opus => &self.opus,
                 _ => &self.codex,
             };
-            Ok(q.lock().unwrap().pop().unwrap_or_default())
+            q.lock().unwrap().pop().ok_or_else(|| {
+                LlmError::Unavailable(format!("missing canned response for {:?}", request.model))
+            })
         }
     }
 
@@ -536,10 +447,13 @@ mod tests {
             parse_priority("Here you go:\n```json\n{\"priority\": 1}\n```"),
             Some(1)
         );
-        // Bare number fallback.
-        assert_eq!(parse_priority("I'd rate this a 4 — cosmetic only."), Some(4));
-        // Out-of-range JSON priority → no JSON match, falls to digit scan,
-        // finds none in 1..=4 (7 is rejected) → None.
+        // Bare number secondary parse.
+        assert_eq!(
+            parse_priority("I'd rate this a 4 — cosmetic only."),
+            Some(4)
+        );
+        // Out-of-range JSON priority -> no JSON match; the digit scan finds
+        // none in 1..=4 (7 is rejected) -> None.
         assert_eq!(parse_priority(r#"{"priority":7}"#), None);
         // Pure garbage.
         assert_eq!(parse_priority("no idea, sorry"), None);
@@ -548,9 +462,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shadow_scan_classifies_set_vs_suggest_and_applies_nothing() {
-        // T-1: no priority → "set". T-2: priority 4, models say 2 → "suggest".
-        // T-3: priority 3, models say 3 → "agree".
+    async fn report_only_scan_classifies_set_vs_suggest_and_applies_nothing() {
+        // T-1: no priority -> "set". T-2: priority 4, models say 2 -> "suggest".
+        // T-3: priority 3, models say 3 -> "agree".
         let c = cache(
             r#"[
                 {"id":"u1","identifier":"S-1","title":"prod down","description":"500s everywhere","priority":0},
@@ -558,7 +472,7 @@ mod tests {
                 {"id":"u3","identifier":"S-3","title":"normal bug","description":"edge case","priority":3}
             ]"#,
         );
-        // Both models agree per ticket: S-1→1, S-2→2, S-3→3.
+        // Both models agree per ticket: S-1 -> 1, S-2 -> 2, S-3 -> 3.
         let llm = MockLlm::new(
             &[
                 r#"{"priority":1,"reasoning":"production outage"}"#,
@@ -572,33 +486,36 @@ mod tests {
             ],
         );
         let out = tempfile::NamedTempFile::new().unwrap();
-        // apply=false, no token → pure shadow.
-        let s = scan_severity(c.path(), out.path(), &llm, false, None)
-            .await
-            .unwrap();
+        let s = scan_severity(c.path(), out.path(), &llm).await.unwrap();
 
         assert_eq!(s.tickets_scanned, 3);
         assert_eq!(s.would_set, 1); // S-1
         assert_eq!(s.would_suggest, 1); // S-2 (4 → 2)
         assert_eq!(s.disagreements, 0);
-        assert_eq!(s.applied, 0); // shadow — mutated nothing
-        assert!(s.shadow);
+        assert_eq!(s.applied, 0); // report-only scan mutated nothing
+        assert!(s.report_only);
+
+        let jsonl = std::fs::read_to_string(out.path().with_extension("jsonl")).unwrap();
+        let rows = jsonl
+            .lines()
+            .map(serde_json::from_str::<SeverityProposal>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows[0].identifier, "S-1");
+        assert_eq!(rows[0].issue_id.as_deref(), Some("u1"));
     }
 
     #[tokio::test]
     async fn disagreement_is_counted_and_reconciled_to_more_urgent() {
-        let c = cache(
-            r#"[{"id":"u9","identifier":"D-1","title":"x","description":"y","priority":0}]"#,
-        );
-        // Opus says 3, GPT says 1 → reconcile to 1, disagreement recorded.
+        let c =
+            cache(r#"[{"id":"u9","identifier":"D-1","title":"x","description":"y","priority":0}]"#);
+        // Opus says 3, GPT says 1 -> reconcile to 1, disagreement recorded.
         let llm = MockLlm::new(
             &[r#"{"priority":3,"reasoning":"looks routine"}"#],
             &[r#"{"priority":1,"reasoning":"actually a security hole"}"#],
         );
         let out = tempfile::NamedTempFile::new().unwrap();
-        let s = scan_severity(c.path(), out.path(), &llm, false, None)
-            .await
-            .unwrap();
+        let s = scan_severity(c.path(), out.path(), &llm).await.unwrap();
         assert_eq!(s.disagreements, 1);
         assert_eq!(s.would_set, 1);
         // Read the JSONL row back to confirm the reconciled value + reasoning.
@@ -608,32 +525,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unparseable_verdicts_skip_the_ticket() {
-        let c = cache(
-            r#"[{"id":"u0","identifier":"G-1","title":"x","description":"y","priority":0}]"#,
-        );
+    async fn unparseable_verdicts_fail_closed_before_writing_proposals() {
+        let c =
+            cache(r#"[{"id":"u0","identifier":"G-1","title":"x","description":"y","priority":0}]"#);
         let llm = MockLlm::new(&["no idea"], &["dunno"]);
         let out = tempfile::NamedTempFile::new().unwrap();
-        let s = scan_severity(c.path(), out.path(), &llm, false, None)
+        let err = scan_severity(c.path(), out.path(), &llm)
             .await
-            .unwrap();
-        assert_eq!(s.tickets_scanned, 1);
-        assert_eq!(s.would_set, 0); // nothing classified
+            .expect_err("unparseable model verdicts must fail closed");
+        assert!(
+            err.to_string().contains("G-1")
+                && err
+                    .to_string()
+                    .contains("did not contain a parseable 1..=4 priority"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !out.path().with_extension("jsonl").exists(),
+            "failed scan must not write partial proposal rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_reasoning_fails_closed_before_writing_proposals() {
+        let c =
+            cache(r#"[{"id":"u0","identifier":"R-1","title":"x","description":"y","priority":0}]"#);
+        let llm = MockLlm::new(&[r#"{"priority":2}"#], &[r#"{"priority":2}"#]);
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let err = scan_severity(c.path(), out.path(), &llm)
+            .await
+            .expect_err("reasoning-free model verdicts must fail closed");
+        assert!(
+            err.to_string().contains("R-1") && err.to_string().contains("reasoning"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !out.path().with_extension("jsonl").exists(),
+            "failed scan must not write partial proposal rows"
+        );
     }
 
     #[tokio::test]
     async fn missing_cache_is_empty_not_error() {
         let llm = MockLlm::new(&[], &[]);
         let out = tempfile::NamedTempFile::new().unwrap();
-        let s = scan_severity(
-            Path::new("/nonexistent/cache.json"),
-            out.path(),
-            &llm,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+        let s = scan_severity(Path::new("/nonexistent/cache.json"), out.path(), &llm)
+            .await
+            .unwrap();
         assert_eq!(s.tickets_scanned, 0);
     }
 }

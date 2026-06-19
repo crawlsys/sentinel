@@ -45,11 +45,9 @@
 //!    MUST carry a non-empty `requirement_refs` list. Recommendation
 //!    with no traceback → **Block-class**. This is the central BA3
 //!    structural violation.
-//! 4. **`MatrixStaleness`** — when the matrix endpoint is unreachable
-//!    and the adapter is serving from a `last_known_good` snapshot,
-//!    the hook surfaces this as a warn-class finding so the
-//!    operator sees the staleness. Always warn (matrix availability
-//!    isn't catastrophic-bound — the snapshot still validates).
+//! 4. **Matrix integrity** — when the matrix snapshot is unavailable
+//!    or malformed, the hook emits a Block-class finding. BA
+//!    recommendations cannot pass on unvalidated requirement citations.
 
 use std::fmt::Write;
 use std::time::Duration;
@@ -58,9 +56,9 @@ use sentinel_domain::ba::{RequirementCheck, RequirementFinding, RequirementRef};
 use sentinel_domain::events::{HookInput, HookOutput};
 use sentinel_domain::ports::{RequirementMatrixError, RequirementMatrixPort};
 
-/// Default staleness threshold for the matrix `last_known_good`
-/// snapshot. Snapshots older than 24h surface a `MatrixStaleness`
-/// finding; operator-configurable in a future phase.
+/// Reserved freshness threshold for future matrix snapshot age checks.
+/// The current production gate fails closed on unavailable/malformed
+/// snapshots instead of accepting stale data.
 pub const DEFAULT_MATRIX_STALENESS: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Enforcement mode per spec §3.
@@ -76,10 +74,10 @@ pub enum ValidationMode {
     /// Never blocks. Findings still computed; operator log records
     /// would-be blocks so the rollout can ratchet up.
     ObserveOnly,
-    /// Block on Existence + Coverage; warn on Hash + `MatrixStaleness`.
+    /// Block on Existence + Coverage + matrix integrity; warn on Hash.
     /// Default for routine BA outputs.
     DefaultBlocking,
-    /// Block on Existence + Coverage + Hash; warn on `MatrixStaleness`.
+    /// Block on Existence + Coverage + Hash + matrix integrity.
     /// Used for catastrophic-class outputs.
     StrictBlocking,
 }
@@ -99,6 +97,19 @@ impl ValidationMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RequirementsTraceabilityEvaluation {
+    pub check: RequirementCheck,
+    pub mode: ValidationMode,
+    pub would_block: bool,
+    pub should_block: bool,
+}
+
+#[must_use]
+pub fn is_ba3_signal(input: &HookInput) -> bool {
+    parse_requirement_refs(input).is_some() || is_recommendation(input)
+}
+
 /// Process a ``PreToolUse`` event through the BA3 requirements gate.
 ///
 /// `matrix` is the requirement-matrix lookup port; `mode` drives
@@ -109,18 +120,29 @@ pub fn process(
     matrix: &dyn RequirementMatrixPort,
     mode: ValidationMode,
 ) -> HookOutput {
+    let Some(evaluation) = evaluate(input, matrix, mode) else {
+        return HookOutput::allow();
+    };
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(
+    input: &HookInput,
+    matrix: &dyn RequirementMatrixPort,
+    mode: ValidationMode,
+) -> Option<RequirementsTraceabilityEvaluation> {
     let citations = parse_requirement_refs(input);
     let is_recommendation = is_recommendation(input);
 
     // Skip silently when neither field signals a BA flow:
     if citations.is_none() && !is_recommendation {
-        return HookOutput::allow();
+        return None;
     }
 
     let citations = citations.unwrap_or_default();
     let mut check = RequirementCheck::passing(citations.clone());
-    let mut any_block = false;
-    let mut matrix_unavailable_seen = false;
+    let mut would_block = false;
 
     // (3) Coverage — recommendation must carry at least one
     // requirement_ref. Fires before per-citation checks because
@@ -129,7 +151,7 @@ pub fn process(
         check = check.with_finding(RequirementFinding::Coverage {
             recommendation_summary: extract_recommendation_summary(input),
         });
-        any_block = true;
+        would_block = true;
     }
 
     // Per-citation Existence + Hash checks.
@@ -145,7 +167,7 @@ pub fn process(
                         actual_hash: row.content_hash.clone(),
                     });
                     if is_blocking {
-                        any_block = true;
+                        would_block = true;
                     }
                 }
             }
@@ -154,44 +176,52 @@ pub fn process(
                     orchestration_id: citation.orchestration_id.clone(),
                     matrix_row_id: citation.matrix_row_id.clone(),
                 });
-                any_block = true;
+                would_block = true;
             }
             Err(RequirementMatrixError::MatrixUnavailable(msg)) => {
                 tracing::warn!(
                     orchestration = %citation.orchestration_id,
                     error = %msg,
-                    "requirements_traceability_gate: matrix unavailable (no last_known_good); \
-                     soft-warn — citation will not validate but tool not blocked on lookup outage"
+                    "requirements_traceability_gate: matrix unavailable; blocking because citation cannot be validated"
                 );
-                matrix_unavailable_seen = true;
+                check = check.with_finding(RequirementFinding::MatrixUnavailable {
+                    orchestration_id: citation.orchestration_id.clone(),
+                    reason: msg,
+                });
+                would_block = true;
             }
             Err(RequirementMatrixError::Malformed(msg)) => {
                 tracing::warn!(
                     orchestration = %citation.orchestration_id,
                     error = %msg,
-                    "requirements_traceability_gate: matrix payload malformed; \
-                     soft-warn — operator should investigate"
+                    "requirements_traceability_gate: matrix payload malformed; blocking because citation cannot be validated"
                 );
+                check = check.with_finding(RequirementFinding::MatrixMalformed {
+                    orchestration_id: citation.orchestration_id.clone(),
+                    reason: msg,
+                });
+                would_block = true;
             }
         }
     }
 
-    // (4) MatrixStaleness — surfaced when the adapter is serving
-    // from a `last_known_good` snapshot. The port doesn't yet
-    // expose snapshot age directly; for Phase 3c we treat any
-    // `MatrixUnavailable` as a staleness signal. Always warn.
-    if matrix_unavailable_seen {
-        check = check.with_finding(RequirementFinding::MatrixStaleness {
-            snapshot_age_seconds: DEFAULT_MATRIX_STALENESS.as_secs(),
-        });
-    }
+    let should_block = mode.allows_blocking() && would_block;
+    Some(RequirementsTraceabilityEvaluation {
+        check,
+        mode,
+        would_block,
+        should_block,
+    })
+}
 
-    if mode.allows_blocking() && any_block {
-        HookOutput::deny(format_block_message(&check))
+#[must_use]
+pub fn output_from_evaluation(evaluation: &RequirementsTraceabilityEvaluation) -> HookOutput {
+    if evaluation.should_block {
+        HookOutput::deny(format_block_message(&evaluation.check))
     } else {
-        if any_block && !mode.allows_blocking() {
+        if evaluation.would_block && !evaluation.mode.allows_blocking() {
             tracing::warn!(
-                citations = check.references.len(),
+                citations = evaluation.check.references.len(),
                 "requirements_traceability_gate: ObserveOnly mode suppressed a would-be Block; \
                  flip to DefaultBlocking when telemetry shows the matrix layer is reliable"
             );
@@ -298,11 +328,19 @@ fn describe_finding(f: &RequirementFinding) -> String {
             "Coverage: recommendation `{recommendation_summary}` ships with NO requirement_refs \
              — this is the structural BA3 violation."
         ),
-        RequirementFinding::MatrixStaleness {
-            snapshot_age_seconds,
+        RequirementFinding::MatrixUnavailable {
+            orchestration_id,
+            reason,
         } => format!(
-            "MatrixStaleness: matrix endpoint unreachable; serving snapshot \
-             (~{snapshot_age_seconds}s threshold)."
+            "MatrixUnavailable: requirement matrix for `{orchestration_id}` could not be read \
+             ({reason}); citation cannot be validated."
+        ),
+        RequirementFinding::MatrixMalformed {
+            orchestration_id,
+            reason,
+        } => format!(
+            "MatrixMalformed: requirement matrix for `{orchestration_id}` is malformed \
+             ({reason}); citation cannot be validated."
         ),
     }
 }
@@ -448,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_block_uses_tool_name_fallback_summary() {
+    fn coverage_block_uses_tool_name_when_summary_missing() {
         let matrix = StubMatrix::new();
         let input = input_with(vec![("is_recommendation", serde_json::json!(true))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
@@ -522,31 +560,30 @@ mod tests {
         assert!(reason.contains("Hash"));
     }
 
-    // ---- MatrixUnavailable — soft-warn + staleness ----
+    // ---- Matrix integrity — fail closed ----
 
     #[test]
-    fn matrix_unavailable_does_not_block_but_logs() {
+    fn matrix_unavailable_blocks() {
         let cited = req("case-1", "R-001", "h", "x");
         let matrix = StubMatrix::new().with_next_error(RequirementMatrixError::MatrixUnavailable(
             "timeout".to_string(),
         ));
         let input = input_with(vec![("requirement_refs", refs_json(vec![cited]))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
-        assert_eq!(
-            output.blocked, None,
-            "MatrixUnavailable is soft-warn — operator log only, never block"
-        );
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("MatrixUnavailable"));
     }
 
     #[test]
-    fn malformed_matrix_response_does_not_block() {
+    fn malformed_matrix_response_blocks() {
         let cited = req("case-1", "R-001", "h", "x");
         let matrix = StubMatrix::new().with_next_error(RequirementMatrixError::Malformed(
             "schema mismatch".to_string(),
         ));
         let input = input_with(vec![("requirement_refs", refs_json(vec![cited]))]);
         let output = process(&input, &matrix, ValidationMode::DefaultBlocking);
-        assert_eq!(output.blocked, None);
+        assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("MatrixMalformed"));
     }
 
     // ---- ObserveOnly suppresses everything ----

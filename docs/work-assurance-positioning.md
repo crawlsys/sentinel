@@ -29,7 +29,7 @@ completely, and honestly*. That is the failure mode every real autonomous-coding
 it has a different buyer (**the engineering leader / dev-productivity team**) and a different lineage
 (**CI / test-coverage / code-review-gate / eval-in-the-loop**, not EDR/firewall/DLP).
 
-**Category: AI work-assurance — a correctness control plane for autonomous coding agents.**
+**Category: AI work-assurance — a correctness engine for autonomous coding agents.**
 
 ---
 
@@ -123,8 +123,8 @@ not yet shop for "AI work assurance" as a SKU. Analyst framing is "governance/tr
 The product is the **EDR/OPA topology applied to work-assurance**, not "every hook calls the cloud":
 
 ```
-            CLOUD CONTROL PLANE (Rust REST API)
-   policy authoring · dashboard · fleet config · audit + telemetry ingest · device enrollment
+            FUTURE CLOUD COORDINATION PLANE (Rust REST API; not in Sentinel today)
+   policy authoring · report · fleet config · audit + telemetry ingest · device enrollment
                               │  delta push (NATS/JetStream or PubNub)        ▲ async audit/telemetry
                               ▼  signed policy bundle                         │ (batched, near-real-time)
    ────────────────────────── LOCAL DATA PLANE (sentinel as resident daemon) ──────────────────────────
@@ -144,7 +144,7 @@ The product is the **EDR/OPA topology applied to work-assurance**, not "every ho
     step-judge, memory/Qdrant) → already tolerate the cloud; these are the natural sync-decision tier.
 - **Transport already exists:** the daemon (`crates/sentinel-cli/src/daemon_cmd.rs`) already runs a
   reconnecting-WebSocket uplink with a durable JSONL outbox + replay-protected inbox (the legatus
-  consulate client) — generalize that into the cloud sync channel rather than building new.
+  legatus-ai-daemon client) — generalize that into the cloud sync channel rather than building new.
 - **Defensibility leads with the judge + reality-check, not the crypto.** A hash chain proves
   *order/tamper-evidence*, not *correctness* — an LLM can produce a confident hallucination that
   passes a hash check. The moat is the AI-judge verdict + ground-truth claim verification; the proof

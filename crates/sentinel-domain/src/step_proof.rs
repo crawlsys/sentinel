@@ -26,9 +26,9 @@
 //! - `account_context`: optional account/tenant scope (Linear workspace,
 //!   Doppler config, Auth0 tenant) — propagates with the chain so cross-skill
 //!   handoffs preserve tenancy. Apollo header-propagation analog.
-//! - `signature`: optional Ed25519 signature over the combined hash. Set
-//!   when `SENTINEL_SIGNING_KEY` is configured. Mandatory chain integrity
-//!   stays via SHA-256; signing is the AEGIS-borrowed enterprise opt-in.
+//! - `signature`: Ed25519 signature over the combined hash. The field remains
+//!   optional at the data-shape boundary so old/foreign unsigned proofs can be
+//!   parsed and explicitly rejected by authoritative verification.
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -108,12 +108,12 @@ pub struct StepProof {
     /// The judge's verdict — sufficient/insufficient + reasoning.
     pub judge_verdict: JudgeVerdict,
 
-    // ── Optional Ed25519 signing (AEGIS pattern, opt-in) ──
-    /// Hex-encoded Ed25519 signature over `combined_hash` when signing is
-    /// enabled via `SENTINEL_SIGNING_KEY`. Verified by `verify_self` only
-    /// when present; absence is not a failure (same hash chain integrity
-    /// applies either way). The companion public key is recorded in the
-    /// chain's metadata so verifiers know which key to expect.
+    // ── Ed25519 attestation ──
+    /// Hex-encoded Ed25519 signature over `combined_hash`.
+    ///
+    /// Authoritative verification rejects `None`. The option exists only so
+    /// unsigned proof material can deserialize and produce a precise
+    /// `SignatureError::Missing` instead of hiding behind a parse failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 
@@ -153,9 +153,9 @@ impl StepProof {
 
     /// Compute the artifact hash from the handoff JSON value.
     ///
-    /// Returns the empty string for `Value::Null` so verification-only steps
-    /// (no payload) stay backward-compatible with simpler chains. Otherwise
-    /// hashes the canonical JSON representation.
+    /// Returns the empty string for `Value::Null` because verification-only
+    /// steps have no payload to hash. Otherwise hashes the canonical JSON
+    /// representation.
     #[must_use]
     pub fn compute_artifact_hash(artifact: &serde_json::Value) -> String {
         if artifact.is_null() {
@@ -205,12 +205,11 @@ impl StepProof {
     /// signing a proof that's already signed re-signs it (the signature
     /// is a deterministic function of the key + `combined_hash`).
     ///
-    /// **Mandatory chain integrity stays SHA-256.** Signing is the
-    /// enterprise compliance opt-in: when `SENTINEL_SIGNING_KEY` is
-    /// configured upstream, every `StepProof` gets signed at write time,
-    /// and verifiers can confirm "this chain entry was authored by the
-    /// holder of <`public_key`>" — closing the residual "did sentinel
-    /// really write this?" question that hash-only chains can't answer.
+    /// **Mandatory chain integrity stays SHA-256.** Signing adds enterprise
+    /// authorship attestation: every authoritative `StepProof` is signed at
+    /// write time, and verifiers confirm "this chain entry was authored by the
+    /// holder of <`public_key`>" — closing the residual "did sentinel really
+    /// write this?" question that hash-only chains can't answer.
     ///
     /// Caller owns the key material. sentinel-domain stays pure — no
     /// env reads, no key management. Infrastructure / CLI / hooks
@@ -220,22 +219,15 @@ impl StepProof {
         self.signature = Some(hex::encode(signature.to_bytes()));
     }
 
-    /// Verify this proof's signature (if present) against a public key.
+    /// Verify this proof's signature against a public key.
     ///
     /// Returns:
     /// - `Ok(true)` — signature is present and valid for this `combined_hash`
-    /// - `Ok(false)` — signature is absent (chain entry was written
-    ///   without signing enabled — not a failure, just unsigned)
-    /// - `Err(SignatureError)` — signature is present but malformed,
-    ///   wrong length, or doesn't verify against the supplied key
-    ///
-    /// The 3-way return is deliberate: callers walking a chain need
-    /// to distinguish "unsigned by policy" from "signed but tampered."
-    /// Treating absence as failure would break backwards compat with
-    /// existing chains that pre-date M1.7.
+    /// - `Err(SignatureError)` — signature is absent, malformed, wrong length,
+    ///   or doesn't verify against the supplied key
     pub fn verify_signature(&self, key: &VerifyingKey) -> Result<bool, SignatureError> {
         let Some(sig_hex) = &self.signature else {
-            return Ok(false);
+            return Err(SignatureError::Missing);
         };
         let sig_bytes = hex::decode(sig_hex).map_err(|_| SignatureError::InvalidEncoding)?;
         if sig_bytes.len() != ed25519_dalek::SIGNATURE_LENGTH {
@@ -297,6 +289,9 @@ impl StepProof {
 /// Errors from [`StepProof::verify_signature`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureError {
+    /// Signature field is absent. Enterprise StepProof verification requires
+    /// a signed proof entry.
+    Missing,
     /// Signature field is not valid hex.
     InvalidEncoding,
     /// Signature is hex-decoded but not 64 bytes (Ed25519 length).
@@ -310,6 +305,7 @@ pub enum SignatureError {
 impl std::fmt::Display for SignatureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Missing => write!(f, "signature is missing"),
             Self::InvalidEncoding => write!(f, "signature is not valid hex"),
             Self::InvalidLength => write!(f, "signature is not 64 bytes (Ed25519 length)"),
             Self::VerificationFailed => write!(
@@ -442,12 +438,28 @@ mod tests {
         // Preimage: step_id || phase_id || skill || evidence_hash ||
         // artifact_hash || previous_hash || b"judge" || [u8::from(sufficient)].
         assert_eq!(
-            StepProof::compute_combined_hash("s1", "claim", "linear", "ev", "art", GENESIS_HASH, true),
+            StepProof::compute_combined_hash(
+                "s1",
+                "claim",
+                "linear",
+                "ev",
+                "art",
+                GENESIS_HASH,
+                true
+            ),
             "22e17051e523b7d7b2a91fc62f7d1d330e1b5318760d791a9041bdfd6433ae79",
         );
         // The verdict byte must change the digest (locks the security binding).
         assert_eq!(
-            StepProof::compute_combined_hash("s1", "claim", "linear", "ev", "art", GENESIS_HASH, false),
+            StepProof::compute_combined_hash(
+                "s1",
+                "claim",
+                "linear",
+                "ev",
+                "art",
+                GENESIS_HASH,
+                false
+            ),
             "576568e080e2f4344fc92dc14e085e8cd61e33e10dd2817fc262bc4d2174798c",
         );
     }
@@ -457,7 +469,13 @@ mod tests {
         // Security regression (mirrors the PhaseProof case): the judge verdict
         // is bound into combined_hash, so flipping `sufficient` on a sealed
         // StepProof without re-sealing must fail recomputation.
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({"k": "v"}));
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::json!({"k": "v"}),
+        );
         assert!(p.verify_self(), "freshly sealed step must verify");
 
         p.judge_verdict.sufficient = !p.judge_verdict.sufficient;
@@ -473,7 +491,13 @@ mod tests {
         // into that hash closes the verdict-flip-on-signed-proof bypass two ways.
         let key = make_signing_key();
         let vk = key.verifying_key();
-        let mut p = make_step("1", "claim", "linear", GENESIS_HASH, serde_json::json!({"k": "v"}));
+        let mut p = make_step(
+            "1",
+            "claim",
+            "linear",
+            GENESIS_HASH,
+            serde_json::json!({"k": "v"}),
+        );
         p.sign_with(&key);
         assert!(p.verify_self());
         assert!(p.verify_signature(&vk).expect("verify"));
@@ -504,7 +528,10 @@ mod tests {
         // invalid signature (its documented 3-way contract), so the re-sealed
         // hash no longer matching the original signature surfaces as an error.
         assert!(
-            matches!(b.verify_signature(&vk), Err(SignatureError::VerificationFailed)),
+            matches!(
+                b.verify_signature(&vk),
+                Err(SignatureError::VerificationFailed)
+            ),
             "re-sealing after a verdict flip must invalidate the signature"
         );
     }
@@ -679,10 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_returns_false_for_unsigned_proof() {
-        // Backwards compat: chains written before M1.7 have no signature.
-        // verify_signature must distinguish "unsigned by policy" from
-        // "signed but tampered" — return Ok(false), not Err.
+    fn verify_errors_for_unsigned_proof() {
         let p = make_step(
             "1",
             "claim",
@@ -691,10 +715,12 @@ mod tests {
             serde_json::Value::Null,
         );
         let public = make_signing_key().verifying_key();
-        let result = p
-            .verify_signature(&public)
-            .expect("unsigned must not error");
-        assert!(!result, "unsigned proof returns Ok(false)");
+        let result = p.verify_signature(&public);
+        assert_eq!(
+            result,
+            Err(SignatureError::Missing),
+            "unsigned proof material must fail authoritative verification"
+        );
     }
 
     #[test]

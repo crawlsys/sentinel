@@ -31,7 +31,7 @@ fn default_binary_path() -> PathBuf {
 
 /// Path to the staged binary in ~/.cargo/bin/
 fn staged_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("[sentinel] FATAL: Cannot determine home directory")?;
+    let home = sentinel_infrastructure::paths::home_root_or_fatal();
     Ok(home
         .join(".cargo")
         .join("bin")
@@ -40,7 +40,7 @@ fn staged_path() -> Result<PathBuf> {
 
 /// Path to the staged binary's SHA-256 hash file
 fn staged_hash_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("[sentinel] FATAL: Cannot determine home directory")?;
+    let home = sentinel_infrastructure::paths::home_root_or_fatal();
     Ok(home
         .join(".cargo")
         .join("bin")

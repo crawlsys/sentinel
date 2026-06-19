@@ -9,7 +9,7 @@
 - `docs/ba2-ba4-discovery-and-interrogation.md` — discovery answers feed into the requirement chain BA7 measures against
 - `docs/ba5-adversarial-deck-critique.md` — BA5 critiques *artifact quality*; BA7 measures *real-world outcome*. Together they distinguish "looked good" from "actually worked"
 - `docs/ba6-connector-layer-scoping.md` — connector layer feeds outcome metrics back the same way it feeds source data (the metric *is* a source pull)
-- `docs/policy-replay-mining-quarantine.md` (R5) — load-bearing boundary: outcome data informs the operator dashboard; it must not become a training signal
+- `docs/policy-replay-mining-quarantine.md` (R5) — load-bearing boundary: outcome data informs the report; it must not become a training signal
 - `docs/policy-no-outcome-only-evaluation.md` (R14) — BA7 *adds* outcome to the picture; does NOT replace process supervision
 - Memory: `architecture-hexagonal-ddd`
 
@@ -26,7 +26,7 @@ A BA's actual value is **decisions changed and metrics moved**. Process quality 
 
 Attribution is hard. The brief is explicit: partial measurement is much better than zero. BA7 ships with proxy metrics where causal attribution is impossible (e.g., "the PR landed and stayed green for 30 days" is a proxy for "the recommendation worked"; not perfect, much better than "the PR landed"). Operators can extend metrics per workflow via `config/ba-outcomes.toml`.
 
-Critical boundary (R5): outcome data is for **operator-facing dashboards and post-hoc reasoning**, not for training agents to produce recommendations that "look outcome-positive." Same boundary as the appraisal counters in A2 — dispatch / measurement is fine; training-on-traces is not.
+Critical boundary (R5): outcome data is for **operator-facing reports and post-hoc reasoning**, not for training agents to produce recommendations that "look outcome-positive." Same boundary as the appraisal counters in A2 — dispatch / measurement is fine; training-on-traces is not.
 
 ---
 
@@ -182,7 +182,7 @@ Each is partial. Each is much better than "the work happened." Operators extend 
 ## 5. The R5 boundary — load-bearing
 
 Outcome data is read by:
-- **Operator dashboard** — "show me which recommendations from Q2 actually moved metrics."
+- **Report** — "show me which recommendations from Q2 actually moved metrics."
 - **A2 routing** — "which agent profiles produced StronglyCorrelated outcomes; weight their dispatch slightly higher" (this is the appraisal counter intersection).
 - **Reports for stakeholders** — "here's our hit rate on financial recommendations this year."
 
@@ -219,13 +219,13 @@ All hex/DDD-respecting. Pure value objects + pure ports in domain. Adapters in i
 
 Statistical attribution is hard. A `StronglyCorrelated` classification might be coincidence; an `Uncorrelated` might miss real impact that's confounded.
 
-Mitigations: every attribution class names its assumptions; operator dashboard surfaces confidence prominently; aggregate trends matter more than individual records; periodic operator review is the corrective.
+Mitigations: every attribution class names its assumptions; report surfaces confidence prominently; aggregate trends matter more than individual records; periodic operator review is the corrective.
 
 ### 7.2 The metric moved for the wrong reason
 
 A recommendation says "raise prices"; the operator implements it; MRR moves. But MRR also moved because a competitor went out of business that quarter. The attribution machinery has no way to know.
 
-Mitigations: `AttributionClass::Confounded { details }` exists for exactly this case; operators are encouraged to annotate confounders manually; the dashboard surfaces them; the next-quarter scrutiny stage is the place to reclassify.
+Mitigations: `AttributionClass::Confounded { details }` exists for exactly this case; operators are encouraged to annotate confounders manually; the report surfaces them; the next-quarter scrutiny stage is the place to reclassify.
 
 ### 7.3 The metric data isn't available
 
@@ -241,7 +241,7 @@ Operator (or sentinel architecture) tempted to wire outcome data into agent trai
 
 ### 7.6 Cross-tenant outcome leakage
 
-Same concern as everywhere else — multi-tenant deployments must not let outcome data cross tenant boundaries. Capability tokens per consul ADR-018; Phase 1 sandbox is single-tenant.
+Same concern as everywhere else — multi-tenant deployments must not let outcome data cross tenant boundaries. Capability tokens per Legatus AI ADR-018; Phase 1 sandbox is single-tenant.
 
 ---
 
@@ -275,14 +275,14 @@ Same concern as everywhere else — multi-tenant deployments must not let outcom
 
 - **Decision class:** sentinel architectural change. Adds a value-object module, three ports, two hooks (tracker + measurement cron), an adapter directory, three CLI subcommands, and one config file.
 - **Owner:** Gary Somerhalder ratifies. Co-requires BA3 (traceability matrix — the substrate); co-required by A12 (external benchmarks complement internal outcomes).
-- **Re-evaluation cadence:** revisit after first 100 outcome records reach the MetricMoveStage — calibrate attribution-class thresholds, refine proxy-metric defaults, evaluate operator dashboard usability.
+- **Re-evaluation cadence:** revisit after first 100 outcome records reach the MetricMoveStage — calibrate attribution-class thresholds, refine proxy-metric defaults, evaluate report usability.
 - **Related items in the brief:** BA7 (this), BA3 (substrate), BA5 (process-quality complement), A2 (appraisal-counter consumer of outcome signal with R5 boundary), A12 (external benchmark complement), R5 (load-bearing boundary), R14 (the retirement BA7 *adds to* without violating — outcome alongside process, not outcome instead of process).
 
 ---
 
 ## 11. Methodology caveat
 
-Attribution methodology is well-established in the causal-inference / business-analytics literature (Pearl, Imbens-Rubin, etc.). This doc applies standard practice; the novelty is *embedding measurement into the sentinel/consul/BA-orchestrator loop with the R5 boundary intact*. No new external citations needed.
+Attribution methodology is well-established in the causal-inference / business-analytics literature (Pearl, Imbens-Rubin, etc.). This doc applies standard practice; the novelty is *embedding measurement into the sentinel/Legatus AI/BA-orchestrator loop with the R5 boundary intact*. No new external citations needed.
 
 ## 12. Ratification
 
@@ -294,5 +294,5 @@ This document is **proposed**. It becomes a durable Sentinel architectural commi
 Ratification commits Sentinel to:
 - Building `OutcomeRecord` + value objects, three ports, two hooks, the CLI subcommands.
 - Shipping `config/ba-outcomes.toml` with documented proxy-metric defaults.
-- Maintaining the R5 boundary: outcome data is operator dashboard input + dispatch input (via A2 appraisal); never training input.
+- Maintaining the R5 boundary: outcome data is report input + dispatch input (via A2 appraisal); never training input.
 - Treating BA3 as a hard prerequisite (without traceability, there's nothing to attribute to).

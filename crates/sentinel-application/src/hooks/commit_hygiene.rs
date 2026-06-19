@@ -11,7 +11,9 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, HookContext};
+use super::{
+    concrete_input_session_id, session_path_component, EnvPort, FileSystemPort, HookContext,
+};
 
 /// Cooldown between commit reminders.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_MEDIUM_MS;
@@ -50,19 +52,24 @@ fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
     Some(dir.join(format!("commit-hygiene-{}.json", repo_hash(repo_root))))
 }
 
-fn current_session_id(env: &dyn EnvPort) -> String {
+fn env_session_id(env: &dyn EnvPort) -> Option<String> {
     env.var("CLAUDE_SESSION_ID")
         .or_else(|| env.var("SESSION_ID"))
-        .unwrap_or_else(|| "default".to_string())
+        .and_then(|session_id| session_path_component(&session_id).map(str::to_string))
 }
 
-fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
-    let session_id = current_session_id(env);
+fn current_session_id(input: &HookInput, env: &dyn EnvPort) -> Option<String> {
+    concrete_input_session_id(input)
+        .map(str::to_string)
+        .or_else(|| env_session_id(env))
+}
+
+fn cooldown_file(session_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("claude-commit-hygiene-{session_id}-last"))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
+fn cooldown_expired(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let content = match fs.read_to_string(&cooldown_file(session_id)) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -73,8 +80,8 @@ fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
-    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, session_id: &str) {
+    let _ = fs.write(&cooldown_file(session_id), now_ms().to_string().as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -82,19 +89,25 @@ fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
 // ---------------------------------------------------------------------------
 
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = current_session_id(input, ctx.env) else {
+        tracing::warn!("commit_hygiene skipped durable state without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let root = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
 
-    let files = if matches!(ctx.git.has_uncommitted_changes(cwd), Ok(true)) { match ctx.git.changed_files(cwd) {
-        Ok(f) if !f.is_empty() => f,
-        _ => {
-            // No changes — clear any previous state (write empty)
-            if let Some(path) = state_file(ctx.fs, &root) {
-                let _ = ctx.fs.write(&path, b"");
+    let files = if matches!(ctx.git.has_uncommitted_changes(cwd), Ok(true)) {
+        match ctx.git.changed_files(cwd) {
+            Ok(f) if !f.is_empty() => f,
+            _ => {
+                // No changes — clear any previous state (write empty)
+                if let Some(path) = state_file(ctx.fs, &root) {
+                    let _ = ctx.fs.write(&path, b"");
+                }
+                return HookOutput::allow();
             }
-            return HookOutput::allow();
         }
-    } } else {
+    } else {
         if let Some(path) = state_file(ctx.fs, &root) {
             let _ = ctx.fs.write(&path, b"");
         }
@@ -103,7 +116,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     let state = CommitState {
         cwd: cwd.to_string(),
-        session_id: current_session_id(ctx.env),
+        session_id,
         file_count: files.len(),
         files: files.into_iter().take(20).collect(), // Cap at 20 for readability
         ts: chrono::Utc::now().to_rfc3339(),
@@ -125,6 +138,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // ---------------------------------------------------------------------------
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = current_session_id(input, ctx.env) else {
+        tracing::warn!("commit_hygiene skipped prompt state without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let root = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
 
@@ -147,7 +164,6 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Including session_id prevents cross-session suppression when two
     // sessions share the same repo (non-worktree case): session A writes
     // state, session B must not treat it as its own.
-    let session_id = current_session_id(ctx.env);
     if state.session_id != session_id || state.cwd != cwd {
         return HookOutput::allow();
     }
@@ -157,11 +173,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs, ctx.env) {
+    if !cooldown_expired(ctx.fs, &session_id) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs, ctx.env);
+    write_cooldown(ctx.fs, &session_id);
 
     let file_list: String = state
         .files
@@ -192,8 +208,8 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::test_support;
-    use crate::hooks::GitStatusPort;
+    use crate::hooks::test_support::{self, stub_ctx_with_fs, StubEnv, TestHomeFs};
+    use crate::hooks::{EnvPort, GitStatusPort};
 
     struct TestGit {
         has_changes: bool,
@@ -201,19 +217,31 @@ mod tests {
     }
 
     impl GitStatusPort for TestGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.has_changes)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(self.files.clone())
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".to_string())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn list_worktree_names(&self, _: &str) -> Vec<String> {
@@ -228,6 +256,9 @@ mod tests {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -236,6 +267,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -258,6 +292,24 @@ mod tests {
             memory_mcp,
             env,
             linear_lookup: None,
+        }
+    }
+
+    fn make_ctx_with_fs_env<'a>(
+        git: &'a dyn GitStatusPort,
+        fs: &'a dyn FileSystemPort,
+        env: &'a dyn EnvPort,
+    ) -> HookContext<'a> {
+        let base = stub_ctx_with_fs(fs);
+        HookContext {
+            git,
+            vector_store: base.vector_store,
+            fs,
+            process: base.process,
+            llm: base.llm,
+            memory_mcp: base.memory_mcp,
+            env,
+            linear_lookup: base.linear_lookup,
         }
     }
 
@@ -321,7 +373,79 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = test_support::stub_ctx();
         // StubFs.read_to_string returns error → cooldown_expired returns true
-        assert!(cooldown_expired(ctx.fs, ctx.env));
+        assert!(cooldown_expired(ctx.fs, "cooldown-session"));
+    }
+
+    #[test]
+    fn missing_session_does_not_write_default_state_or_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let env = StubEnv::new();
+        let git = TestGit {
+            has_changes: true,
+            files: vec![
+                "src/main.rs".into(),
+                "README.md".into(),
+                "lib.rs".into(),
+                "Cargo.toml".into(),
+            ],
+        };
+        let ctx = make_ctx_with_fs_env(&git, &fs, &env);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let input = HookInput {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let state = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join(format!(
+                "commit-hygiene-{}.json",
+                repo_hash(cwd.to_str().unwrap())
+            ));
+        let default_cooldown = std::env::temp_dir().join("claude-commit-hygiene-default-last");
+        let _ = std::fs::remove_file(&default_cooldown);
+
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!state.exists());
+        assert!(!default_cooldown.exists());
+    }
+
+    #[test]
+    fn concrete_input_session_writes_state_with_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let env = StubEnv::new();
+        let git = TestGit {
+            has_changes: true,
+            files: vec![
+                "src/main.rs".into(),
+                "README.md".into(),
+                "lib.rs".into(),
+                "Cargo.toml".into(),
+            ],
+        };
+        let ctx = make_ctx_with_fs_env(&git, &fs, &env);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let input = HookInput {
+            session_id: Some("commit-hygiene-session".to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let state = state_file(&fs, cwd.to_str().unwrap()).expect("state path");
+        let content = std::fs::read_to_string(state).expect("state");
+        assert!(content.contains("\"session_id\":\"commit-hygiene-session\""));
+        assert!(!content.contains("\"session_id\":\"default\""));
     }
 
     #[test]

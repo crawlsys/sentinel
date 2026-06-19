@@ -28,27 +28,24 @@
 //!   isn't tracked. The hook maps this to a BA3 `Existence` finding
 //!   (Block).
 //! - **File present but unparseable** → `Err(Malformed)` — schema
-//!   mismatch / corrupt JSON. The hook maps to soft-warn (operator
-//!   log only, never block) per spec §8.3 rationale.
+//!   mismatch / corrupt JSON. The hook maps this to a Block-class
+//!   finding because citations cannot be validated.
 //! - **Filesystem error reading the file** → `Err(MatrixUnavailable)`
-//!   — transient IO failure. The hook surfaces a `MatrixStaleness`
-//!   warn per Phase 3c.
+//!   — transient IO failure. The hook maps this to a Block-class
+//!   finding because citations cannot be validated.
 //! - **File parsed; row matches** → `Ok(Some(row))`.
 //! - **File parsed; row doesn't match** → `Ok(None)`. The hook maps
 //!   to BA3 `Existence` finding (Block — phantom row).
 //!
-//! ## `last_known_good` semantics
+//! ## Snapshot semantics
 //!
-//! Per spec §8.3 the adapter is expected to serve from a snapshot
-//! when the live matrix endpoint is unreachable. The file IS the
-//! snapshot — the BA-orchestrator writes it, sentinel reads it. For
-//! Phase 4b there's no separate "live endpoint" path; future
-//! enhancements can add an HTTP-fronted variant that falls back to
-//! the file on network failure.
+//! The file is the authoritative local matrix snapshot. Sentinel has no
+//! network downgrade path: if the snapshot is missing, unreadable, or
+//! malformed, the BA3 gate fails closed.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use sentinel_domain::ba::RequirementRef;
@@ -95,13 +92,7 @@ impl FilesystemRequirementMatrix {
     /// Construct with the default path
     /// (`~/.claude/sentinel/state/requirement_matrix/`).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let base_dir = home
-            .join(".claude")
-            .join("sentinel")
-            .join("state")
-            .join("requirement_matrix");
+        let base_dir = crate::state_store::state_dir().join("requirement_matrix");
         Ok(Self::at_dir(base_dir))
     }
 
@@ -224,11 +215,7 @@ mod tests {
     #[test]
     fn query_returns_none_when_orchestration_exists_but_row_missing() {
         let dir = TempDir::new().unwrap();
-        write_snapshot(
-            &dir,
-            "case-1",
-            vec![req("case-1", "R-001", "h-001", "x")],
-        );
+        write_snapshot(&dir, "case-1", vec![req("case-1", "R-001", "h-001", "x")]);
         let m = matrix(&dir);
         let result = m.query_requirement("case-1", "R-PHANTOM").unwrap();
         assert!(
@@ -331,7 +318,10 @@ mod tests {
             vec![req("case-1", "R-001", "h-v2", "v2 statement")],
         );
         let v2 = m.query_requirement("case-1", "R-001").unwrap().unwrap();
-        assert_eq!(v2.content_hash, "h-v2", "next query should see the updated snapshot");
+        assert_eq!(
+            v2.content_hash, "h-v2",
+            "next query should see the updated snapshot"
+        );
     }
 
     // ---- Path semantics ----
@@ -362,11 +352,7 @@ mod tests {
     #[test]
     fn usable_through_trait_object() {
         let dir = TempDir::new().unwrap();
-        write_snapshot(
-            &dir,
-            "case-1",
-            vec![req("case-1", "R-001", "h", "x")],
-        );
+        write_snapshot(&dir, "case-1", vec![req("case-1", "R-001", "h", "x")]);
         let m = matrix(&dir);
         let port: &dyn RequirementMatrixPort = &m;
         let row = port.query_requirement("case-1", "R-001").unwrap().unwrap();

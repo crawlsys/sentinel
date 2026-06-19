@@ -38,7 +38,7 @@
 //!   * `qa_ceiling`:  any ticket sitting in QA Testing > 5 days
 //!
 //! The QA-ceiling rule needs per-ticket dwell time and lives in the future
-//! poller; the snapshot type carries the field so consumers (dashboard, MCP
+//! poller; the snapshot type carries the field so consumers (local API, MCP
 //! tool) can render it consistently once populated.
 
 use chrono::{DateTime, Utc};
@@ -60,7 +60,7 @@ pub struct BottleneckFlag {
     /// Stable identifier — `review_clog` or `qa_ceiling` today; new rule
     /// kinds add new variants.
     pub kind: String,
-    /// Human-readable detail string for dashboard display + push payload.
+    /// Human-readable detail string for local display + push payload.
     pub detail: String,
 }
 

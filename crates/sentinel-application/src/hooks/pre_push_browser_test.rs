@@ -38,28 +38,69 @@ const TEST_VALIDITY: Duration = constants::BROWSER_TEST_VALIDITY;
 /// Frontend file extensions that trigger browser test requirement
 const FRONTEND_EXTENSIONS: &[&str] = &[".tsx", ".jsx", ".css", ".scss", ".styled"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrePushBrowserDecision {
+    Allow,
+    AllowNoBrowserConfig,
+    AllowNoFrontendChanges,
+    AllowRecentBrowserTest,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrePushBrowserEvaluation {
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub bash_tool: bool,
+    pub command_present: bool,
+    pub git_push: bool,
+    pub repo_browser_test_configured: bool,
+    pub frontend_changes: bool,
+    pub session_id_present: bool,
+    pub recent_browser_test: bool,
+    pub should_block: bool,
+    pub decision: PrePushBrowserDecision,
+}
+
+impl PrePushBrowserEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.bash_tool && self.git_push
+    }
+}
+
 /// Path to the browser test state file for a given session.
 /// **Attack #61 fix**: Moved from world-writable `temp_dir()` to sentinel's
 /// protected directory. Also sanitizes `session_id` to prevent path traversal.
-fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> PathBuf {
-    // Sanitize session_id — only allow alphanumeric, hyphen, underscore
-    let safe_id: String = session_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(128)
-        .collect();
-    let id = if safe_id.is_empty() {
-        "unknown".to_string()
-    } else {
-        safe_id
-    };
+fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let id = concrete_session_id(session_id)?;
+    if id.len() > 128
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
 
-    fs.home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("sentinel")
-        .join("browser-test")
-        .join(format!("{id}.json"))
+    Some(
+        fs.claude_dir()
+            .join("sentinel")
+            .join("browser-test")
+            .join(format!("{id}.json")),
+    )
+}
+
+fn concrete_session_id(session_id: &str) -> Option<&str> {
+    let id = session_id.trim();
+    if id.is_empty() || id == "unknown" {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn input_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(concrete_session_id)
 }
 
 /// Check if a passing browser test exists for this session within the validity window.
@@ -70,7 +111,12 @@ pub fn has_recent_browser_test_pub(fs: &dyn super::FileSystemPort, session_id: &
 
 /// Check if a passing browser test exists for this session within the validity window.
 fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> bool {
-    let path = state_file_path(fs, session_id);
+    let Some(session_id) = concrete_session_id(session_id) else {
+        return false;
+    };
+    let Some(path) = state_file_path(fs, session_id) else {
+        return false;
+    };
     let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -123,7 +169,7 @@ fn repo_name_from_cwd(cwd: &str) -> Option<String> {
 
 /// Check if the current repo matches a project config that has browser test settings.
 /// Scoped check: only returns true if the repo name matches the project's name or aliases
-/// AND that project has `browser_test_email` (or legacy `steel_test_email`) configured.
+/// AND that project has `browser_test_email` configured.
 ///
 /// Accepts an optional override path for testing; uses ~/.claude/skills/linear/projects/ by default.
 fn repo_has_browser_test_config_in(
@@ -172,10 +218,8 @@ fn repo_has_browser_test_config_in(
         }
 
         if let Ok(content) = fs.read_to_string(&path) {
-            // Must have browser_test_email (or legacy steel_test_email) to be
-            // a browser-test-configured project. Legacy field accepted during
-            // migration so old project configs keep working until renamed.
-            if !content.contains("browser_test_email") && !content.contains("steel_test_email") {
+            // Must have browser_test_email to be a browser-test-configured project.
+            if !content.contains("browser_test_email") {
                 continue;
             }
 
@@ -292,10 +336,16 @@ fn diff_has_frontend_files(git: &dyn super::GitStatusPort, cwd: Option<&str>) ->
 /// Write the browser test state file after a successful browser test session.
 /// Called from the `PostToolUse` handler when:
 ///   - `mcp__browserbase__release_session` succeeds (Browserbase remote test), OR
-///   - `mcp__cdp__close_instance` succeeds (CDP local test), OR
-///   - `mcp__steel__release_session` succeeds (legacy Steel, kept for compat).
+///   - `mcp__cdp__close_instance` succeeds (CDP local test).
 pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &str) {
-    let path = state_file_path(fs, session_id);
+    let Some(session_id) = concrete_session_id(session_id) else {
+        tracing::warn!("Refusing to write browser test state without a concrete session id");
+        return;
+    };
+    let Some(path) = state_file_path(fs, session_id) else {
+        tracing::warn!("Refusing to write browser test state for malformed session id");
+        return;
+    };
     // Ensure parent directory exists (Attack #61: now in ~/.claude/sentinel/browser-test/)
     if let Some(parent) = path.parent() {
         let _ = fs.create_dir_all(parent);
@@ -319,9 +369,8 @@ pub fn record_browser_test_passed(fs: &dyn super::FileSystemPort, session_id: &s
 /// Triggers on:
 /// 1. `mcp__browserbase__release_session` — Browserbase remote test completed
 /// 2. `mcp__cdp__close_instance`         — CDP local test completed
-/// 3. `mcp__steel__release_session`      — legacy Steel, kept as defense-in-depth
-/// 4. Bash tool result containing `BROWSER_TEST_PASS` or legacy `STEEL_TEST_PASS`
-///    — CDP/Puppeteer/Playwright script test completed
+/// 3. Bash tool result containing `BROWSER_TEST_PASS` — CDP/Puppeteer/Playwright
+///    script test completed.
 ///
 /// Should be called from the `PostToolUse` event dispatch in `hook_cmd.rs`.
 pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
@@ -330,30 +379,27 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
         None => return HookOutput::allow(),
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = input_session_id(input) else {
+        return HookOutput::allow();
+    };
 
-    // Path 1-3: any MCP browser-test completion signal
+    // Path 1-2: any current MCP browser-test completion signal.
     if matches!(
         tool,
-        "mcp__browserbase__release_session"
-            | "mcp__cdp__close_instance"
-            | "mcp__steel__release_session"
+        "mcp__browserbase__release_session" | "mcp__cdp__close_instance"
     ) {
         record_browser_test_passed(ctx.fs, session_id);
         return HookOutput::allow();
     }
 
-    // Path 4: Bash tool with BROWSER_TEST_PASS marker in output
-    // (or legacy STEEL_TEST_PASS). Supports CDP, Puppeteer, Playwright, or
-    // any browser test that prints the marker on success.
+    // Path 3: Bash tool with BROWSER_TEST_PASS marker in output. Supports CDP,
+    // Puppeteer, Playwright, or any browser test that prints the marker on success.
     if tool == "Bash" {
         let has_marker = input
             .tool_result
             .as_ref()
             .and_then(|r| r.as_str())
-            .is_some_and(|s| {
-                s.contains("BROWSER_TEST_PASS") || s.contains("STEEL_TEST_PASS")
-            });
+            .is_some_and(|s| s.contains("BROWSER_TEST_PASS"));
         if has_marker {
             record_browser_test_passed(ctx.fs, session_id);
         }
@@ -364,48 +410,166 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
 
 /// Process a pre-push browser test hook event (`PreToolUse`).
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
-    // Only act on Bash tool calls
-    let tool = match &input.tool_name {
-        Some(name) if name == "Bash" => name.as_str(),
-        _ => return HookOutput::allow(),
-    };
-    let _ = tool;
+    let evaluation = evaluate(input, ctx);
+    output_from_evaluation(input, &evaluation)
+}
 
-    // Extract command
+pub fn evaluate(input: &HookInput, ctx: &super::HookContext<'_>) -> PrePushBrowserEvaluation {
+    let tool = input.tool_name.clone();
+    let bash_tool = matches!(input.tool_name.as_deref(), Some("Bash"));
     let command = input
         .tool_input
         .as_ref()
         .and_then(|ti| ti.get("command"))
         .and_then(|c| c.as_str())
-        .unwrap_or("");
+        .map(str::to_string);
+    let command_present = command.as_deref().is_some_and(|cmd| !cmd.is_empty());
+    let session_id = input_session_id(input);
+    let session_id_present = session_id.is_some();
+
+    if !bash_tool {
+        return base_evaluation(
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            session_id_present,
+        );
+    }
+    let Some(command_text) = command.as_deref() else {
+        return base_evaluation(
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            session_id_present,
+        );
+    };
 
     // Check if this is a git push
     let push_re = match Regex::new(r"\bgit\s+push\b") {
         Ok(re) => re,
-        Err(_) => return HookOutput::allow(),
+        Err(_) => {
+            return base_evaluation(
+                tool,
+                command,
+                bash_tool,
+                command_present,
+                session_id_present,
+            );
+        }
     };
 
-    if !push_re.is_match(command) {
-        return HookOutput::allow();
+    if !push_re.is_match(command_text) {
+        return base_evaluation(
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            session_id_present,
+        );
     }
 
     // Check if THIS repo's project has browser test config (not all projects globally)
     let cwd = input.cwd.as_deref();
-    if !repo_has_browser_test_config(ctx.fs, cwd) {
-        return HookOutput::allow();
+    let repo_browser_test_configured = repo_has_browser_test_config(ctx.fs, cwd);
+    if !repo_browser_test_configured {
+        return PrePushBrowserEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_push: true,
+            repo_browser_test_configured,
+            frontend_changes: false,
+            session_id_present,
+            recent_browser_test: false,
+            should_block: false,
+            decision: PrePushBrowserDecision::AllowNoBrowserConfig,
+        };
     }
 
     // Check if the diff includes frontend files
-    if !diff_has_frontend_files(ctx.git, cwd) {
+    let frontend_changes = diff_has_frontend_files(ctx.git, cwd);
+    if !frontend_changes {
         // Backend-only change — no browser test needed
-        return HookOutput::allow();
+        return PrePushBrowserEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_push: true,
+            repo_browser_test_configured,
+            frontend_changes,
+            session_id_present,
+            recent_browser_test: false,
+            should_block: false,
+            decision: PrePushBrowserDecision::AllowNoFrontendChanges,
+        };
     }
 
     // Get session ID
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
-
     // Check if a browser test passed recently
-    if has_recent_browser_test(ctx.fs, session_id) {
+    let recent_browser_test =
+        session_id.is_some_and(|session_id| has_recent_browser_test(ctx.fs, session_id));
+    if recent_browser_test {
+        return PrePushBrowserEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            git_push: true,
+            repo_browser_test_configured,
+            frontend_changes,
+            session_id_present,
+            recent_browser_test,
+            should_block: false,
+            decision: PrePushBrowserDecision::AllowRecentBrowserTest,
+        };
+    }
+
+    PrePushBrowserEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        git_push: true,
+        repo_browser_test_configured,
+        frontend_changes,
+        session_id_present,
+        recent_browser_test,
+        should_block: true,
+        decision: PrePushBrowserDecision::Block,
+    }
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    command: Option<String>,
+    bash_tool: bool,
+    command_present: bool,
+    session_id_present: bool,
+) -> PrePushBrowserEvaluation {
+    PrePushBrowserEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        git_push: false,
+        repo_browser_test_configured: false,
+        frontend_changes: false,
+        session_id_present,
+        recent_browser_test: false,
+        should_block: false,
+        decision: PrePushBrowserDecision::Allow,
+    }
+}
+
+pub fn output_from_evaluation(
+    input: &HookInput,
+    evaluation: &PrePushBrowserEvaluation,
+) -> HookOutput {
+    if !matches!(evaluation.decision, PrePushBrowserDecision::Block) {
         return HookOutput::allow();
     }
 
@@ -446,19 +610,33 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -469,10 +647,17 @@ mod tests {
         fn is_dir(&self, p: &std::path::Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, p: &std::path::Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &std::path::Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -531,24 +716,27 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_push_when_no_steel_config() {
-        // Use an empty temp dir — no project config files with steel settings
+    fn test_allows_push_when_no_browser_test_config() {
+        // Use an empty temp dir — no project config files with browser-test settings
         let tmpdir = tempfile::tempdir().unwrap();
         let result = repo_has_browser_test_config_in(
             &RealFsTest,
             Some("/fake/path/some-repo"),
             Some(tmpdir.path()),
         );
-        assert!(!result, "Empty directory should have no steel config");
+        assert!(
+            !result,
+            "Empty directory should have no browser-test config"
+        );
     }
 
     #[test]
-    fn test_detects_steel_config_for_matching_repo() {
+    fn test_detects_browser_test_config_for_matching_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
         let project_file = tmpdir.path().join("firefly.md");
         std::fs::write(
             &project_file,
-            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nsteel_test_email: test@example.com",
+            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nbrowser_test_email: test@example.com",
         )
         .unwrap();
         // Repo name "firefly-pro-crm" contains alias "crm" → match
@@ -564,12 +752,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ignores_steel_config_for_unrelated_repo() {
+    fn test_ignores_browser_test_config_for_unrelated_repo() {
         let tmpdir = tempfile::tempdir().unwrap();
         let project_file = tmpdir.path().join("firefly.md");
         std::fs::write(
             &project_file,
-            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nsteel_test_email: test@example.com",
+            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nbrowser_test_email: test@example.com",
         )
         .unwrap();
         // Repo name "sentinel" doesn't match any alias → no block
@@ -585,10 +773,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ignores_project_without_steel_email() {
+    fn test_ignores_project_without_browser_test_email() {
         let tmpdir = tempfile::tempdir().unwrap();
         let project_file = tmpdir.path().join("myproject.md");
-        // Has staging_url but NOT steel_test_email → should not trigger Steel gate
+        // Has staging_url but NOT browser_test_email → should not trigger browser gate
         std::fs::write(
             &project_file,
             "name: myproject\naliases: [\"myapp\"]\nstaging_url: https://staging.example.com",
@@ -599,7 +787,31 @@ mod tests {
             Some("/fake/path/myproject"),
             Some(tmpdir.path()),
         );
-        assert!(!result, "Should NOT match project without steel_test_email");
+        assert!(
+            !result,
+            "Should NOT match project without browser_test_email"
+        );
+    }
+
+    #[test]
+    fn test_ignores_retired_steel_config_for_matching_repo() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let project_file = tmpdir.path().join("firefly.md");
+        std::fs::write(
+            &project_file,
+            "name: firefly-pro\naliases: [\"firefly\", \"crm\", \"fpcrm\"]\nsteel_test_email: test@example.com",
+        )
+        .unwrap();
+
+        let result = repo_has_browser_test_config_in(
+            &RealFsTest,
+            Some("/fake/path/firefly-pro-crm"),
+            Some(tmpdir.path()),
+        );
+        assert!(
+            !result,
+            "retired steel_test_email must not configure browser-test gating"
+        );
     }
 
     #[test]
@@ -615,9 +827,42 @@ mod tests {
     }
 
     #[test]
+    fn test_browser_test_state_requires_concrete_session_id() {
+        assert!(state_file_path(&RealFsTest, "unknown").is_none());
+        assert!(state_file_path(&RealFsTest, " ../escape ").is_none());
+        assert!(!has_recent_browser_test(&RealFsTest, "unknown"));
+
+        let unknown_path = <RealFsTest as super::super::FileSystemPort>::claude_dir(&RealFsTest)
+            .join("sentinel")
+            .join("browser-test")
+            .join("unknown.json");
+        let _ = std::fs::remove_file(&unknown_path);
+        record_browser_test_passed(&RealFsTest, "unknown");
+        assert!(
+            !unknown_path.exists(),
+            "missing session identity must not write unknown.json"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_treats_unknown_session_as_missing() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "git push origin main"})),
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let evaluation = evaluate(&input, &ctx);
+        assert!(evaluation.git_push);
+        assert!(!evaluation.session_id_present);
+        assert!(!evaluation.recent_browser_test);
+    }
+
+    #[test]
     fn test_allows_push_with_recent_browser_test() {
         let session_id = "test-steel-recent";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
 
         // Write a valid recent state file
         if let Some(parent) = state_path.parent() {
@@ -655,7 +900,7 @@ mod tests {
     #[test]
     fn test_mismatched_session_not_valid() {
         let session_id = "test-steel-mismatch";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
         if let Some(parent) = state_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -705,19 +950,31 @@ mod tests {
     /// methods return safe defaults — the tests exercise only the diff path.
     struct RealTestGit;
     impl super::super::GitStatusPort for RealTestGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -753,6 +1010,17 @@ mod tests {
             }
             String::from_utf8_lossy(&out.stdout).trim().parse().ok()
         }
+        fn rev_list_count_range(&self, repo_path: &str, range: &str) -> Option<u32> {
+            let out = std::process::Command::new("git")
+                .args(["rev-list", "--count", range])
+                .current_dir(repo_path)
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        }
         fn diff_names(&self, repo_path: &str, range: &str) -> Option<Vec<String>> {
             let out = std::process::Command::new("git")
                 .args(["diff", "--name-only", range])
@@ -776,6 +1044,18 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, repo_path: &str) -> Option<String> {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!sha.is_empty()).then_some(sha)
         }
     }
 
@@ -965,7 +1245,7 @@ mod tests {
     #[test]
     fn test_record_browser_test_passed_writes_state_file() {
         let session_id = "test-record-steel";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
 
         // Ensure clean state
         let _ = std::fs::remove_file(&state_path);
@@ -989,13 +1269,13 @@ mod tests {
     #[test]
     fn test_process_post_tool_records_on_release() {
         let session_id = "test-post-tool-release";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
         let _ = std::fs::remove_file(&state_path);
 
         // Claude Code does NOT populate tool_result for MCP tools —
         // PostToolUse firing is sufficient proof the call succeeded
         let input = HookInput {
-            tool_name: Some("mcp__steel__release_session".to_string()),
+            tool_name: Some("mcp__browserbase__release_session".to_string()),
             tool_result: None,
             session_id: Some(session_id.to_string()),
             ..Default::default()
@@ -1012,9 +1292,30 @@ mod tests {
     }
 
     #[test]
+    fn test_process_post_tool_ignores_retired_steel_release() {
+        let session_id = "test-post-tool-steel-release";
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
+        let _ = std::fs::remove_file(&state_path);
+
+        let input = HookInput {
+            tool_name: Some("mcp__steel__release_session".to_string()),
+            tool_result: None,
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        let ctx = real_fs_ctx();
+        let output = process_post_tool(&input, &ctx);
+        assert!(output.blocked.is_none());
+        assert!(
+            !state_path.exists(),
+            "retired Steel release event must not satisfy browser-test evidence"
+        );
+    }
+
+    #[test]
     fn test_process_post_tool_ignores_bash_without_marker() {
         let session_id = "test-post-tool-no-marker";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
@@ -1028,19 +1329,19 @@ mod tests {
         assert!(output.blocked.is_none());
         assert!(
             !state_path.exists(),
-            "State file should NOT be created for Bash without STEEL_TEST_PASS"
+            "State file should NOT be created for Bash without BROWSER_TEST_PASS"
         );
     }
 
     #[test]
     fn test_process_post_tool_records_on_cdp_marker() {
         let session_id = "test-post-tool-cdp";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_result: Some(serde_json::json!("Screenshot saved: C:\\tmp\\screenshot.png\nConsole errors: 0\n  No console errors detected\nSTEEL_TEST_PASS")),
+            tool_result: Some(serde_json::json!("Screenshot saved: C:\\tmp\\screenshot.png\nConsole errors: 0\n  No console errors detected\nBROWSER_TEST_PASS")),
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };
@@ -1049,21 +1350,21 @@ mod tests {
         assert!(output.blocked.is_none());
         assert!(
             has_recent_browser_test(&RealFsTest, session_id),
-            "State file should be written after CDP test with STEEL_TEST_PASS marker"
+            "State file should be written after CDP test with BROWSER_TEST_PASS marker"
         );
 
         let _ = std::fs::remove_file(&state_path);
     }
 
     #[test]
-    fn test_process_post_tool_ignores_non_bash_non_steel() {
+    fn test_process_post_tool_ignores_non_bash_non_browser_test_marker() {
         let session_id = "test-post-tool-read";
-        let state_path = state_file_path(&RealFsTest, session_id);
+        let state_path = state_file_path(&RealFsTest, session_id).expect("concrete session id");
         let _ = std::fs::remove_file(&state_path);
 
         let input = HookInput {
             tool_name: Some("Read".to_string()),
-            tool_result: Some(serde_json::json!("STEEL_TEST_PASS")),
+            tool_result: Some(serde_json::json!("BROWSER_TEST_PASS")),
             session_id: Some(session_id.to_string()),
             ..Default::default()
         };

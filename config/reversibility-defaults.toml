@@ -6,7 +6,7 @@
 # files per the rules in the adapter's module docstring.
 #
 # Per the A6 design (`docs/a6-reversibility-graded-tripwires.md`), every
-# blast-radius gate in sentinel consults the resulting class. Conservative
+# blast-radius gate in sentinel queries the resulting class. Conservative
 # defaults are load-bearing: unknown MCP server/tool falls back to
 # Irreversible; unmatched Bash command falls back to ReversibleWithEffort.
 # These TOML entries make those fallbacks more specific.

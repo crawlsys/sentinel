@@ -373,7 +373,10 @@ mod tests {
             fn home_dir(&self) -> Option<PathBuf> {
                 Some(PathBuf::from("/mock/home"))
             }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            fn read_to_string(
+                &self,
+                p: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 // Inject the cached state file the hook reads on UserPromptSubmit.
                 let state = ReminderState {
                     repo_root: "/repo".to_string(),
@@ -384,16 +387,28 @@ mod tests {
                     serde_json::to_string(&state)
                         .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 } else {
-                    Err(sentinel_domain::port_errors::FileSystemError::NotFound("not found".into()))
+                    Err(sentinel_domain::port_errors::FileSystemError::NotFound(
+                        "not found".into(),
+                    ))
                 }
             }
-            fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(vec![])
             }
             fn exists(&self, _: &Path) -> bool {
@@ -403,10 +418,20 @@ mod tests {
                 // Parent worktrees dir exists; the orphan child does not.
                 !p.to_string_lossy().contains("already-removed")
             }
-            fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Err(sentinel_domain::port_errors::FileSystemError::Backend("not used in this test".into()))
+            fn metadata(
+                &self,
+                _: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
+                Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                    "not used in this test".into(),
+                ))
             }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -415,19 +440,31 @@ mod tests {
         // the hook does. Other methods are unreachable in this code path.
         struct RepoRootGit;
         impl crate::hooks::GitStatusPort for RepoRootGit {
-            fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_uncommitted_changes(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
-            fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+            fn changed_files(
+                &self,
+                _: &str,
+            ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
                 Ok(vec![])
             }
-            fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+            fn current_branch(
+                &self,
+                _: &str,
+            ) -> Result<String, sentinel_domain::port_errors::GitError> {
                 Ok("main".into())
             }
             fn is_worktree(&self, _: &str) -> bool {
                 false
             }
-            fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_unpushed_commits(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
             fn repo_root(&self, _: &str) -> Option<String> {
@@ -442,6 +479,9 @@ mod tests {
             fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
                 None
             }
+            fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 None
             }
@@ -450,6 +490,9 @@ mod tests {
             }
             fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
                 Vec::new()
+            }
+            fn head_sha(&self, _: &str) -> Option<String> {
+                None
             }
         }
 

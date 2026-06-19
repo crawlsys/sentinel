@@ -3,7 +3,7 @@
 //! Two metrics over the cycle-time event stream (SEN-1, `cycle-time.jsonl`):
 //!
 //! * **SEN-5 — Throughput.** Tickets-per-week, tickets-per-month, and a
-//!   60-day daily sparkline of "completions per day". Feeds the dashboard's
+//!   60-day daily sparkline of "completions per day". Feeds local clients'
 //!   `ThroughputPanel` (an SEN-19-side organism).
 //!
 //! * **SEN-16 — First-Time-Pass rate + rework cost.** A ticket is a
@@ -60,7 +60,7 @@ pub struct ThroughputSummary {
     pub completions_scanned: u64,
     pub per_team: Vec<TeamThroughput>,
     /// 60-day daily completion counts across all teams. Used for the
-    /// sparkline on the dashboard.
+    /// sparkline in local clients.
     pub daily_points: Vec<ThroughputPoint>,
 }
 

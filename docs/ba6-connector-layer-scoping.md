@@ -7,7 +7,7 @@
 **Related:**
 - `docs/policy-replay-mining-quarantine.md` (R5)
 - `docs/policy-no-auto-summary-without-critique.md` (R8 / acute in BA context)
-- Consul-side ADRs at `garysomerhalder/legatus-consul-agent:docs/adr/` — ADR-016 (Consul Peer Registration), ADR-017 (Artifact + Requirement Metadata Extensions), forward-reference ADR-018 (Consul-Peer Capability Tokens, not yet drafted).
+- Legatus AI side ADRs at `garysomerhalder/legatus-ai:docs/adr/` — ADR-016 (Legatus AI Peer Registration), ADR-017 (Artifact + Requirement Metadata Extensions), forward-reference ADR-018 (Legatus AI peer Capability Tokens, not yet drafted).
 
 ---
 
@@ -16,7 +16,7 @@
 BA6 is the connector layer that feeds the BA-vertical product its data. The brief calls it S-tier and product-critical: without data, no BA product. This doc scopes — not designs — the connector layer:
 
 - **What connectors first** (Confluence, Notion, Linear, Drive — staged by usage), **why those**, **what shape they take** (MCP servers consumed by the BA-orchestrator, *not* sentinel-internal hooks).
-- **Ownership boundary**: connectors are external MCP servers. Sentinel observes their use (via existing `mcp_health` and audit hooks); consul carries the provenance metadata they produce. **Sentinel does not host connectors.**
+- **Ownership boundary**: connectors are external MCP servers. Sentinel observes their use (via existing `mcp_health` and audit hooks); Legatus AI carries the provenance metadata they produce. **Sentinel does not host connectors.**
 - **Contract every connector must honor**: provenance metadata on every artifact, content-hashing for change detection, scoped capability tokens, audit emission, failure-mode taxonomy.
 - **What is *not* in scope** for this doc: any actual implementation, vendor SDK choice, deployment topology, or commercial connector ecosystem decisions.
 
@@ -32,17 +32,17 @@ BA1 (citation-locked decision artifacts) demands that every claim in BA output h
 
 ### Ownership boundary
 
-Connectors are **external MCP servers** consumed by the AI-factory's BA-orchestrator. They are not sentinel hooks. They are not consul protocol additions. They live as separate processes that:
+Connectors are **external MCP servers** consumed by the AI-factory's BA-orchestrator. They are not sentinel hooks. They are not Legatus AI protocol additions. They live as separate processes that:
 
 - Expose MCP tools (`mcp__confluence__list_pages`, `mcp__notion__read_page`, `mcp__linear__list_issues`, `mcp__drive__search`, etc.).
 - Authenticate to upstream systems with operator-issued credentials.
 - Carry provenance metadata on every artifact they return (per BA1).
 - Hash artifact content at retrieval time for change detection (per BA1).
-- Emit audit hooks consumable by sentinel (per Constitution Rule 10 in consul, mirrored by sentinel's audit-by-construction posture).
+- Emit audit hooks consumable by sentinel (per Constitution Rule 10 in Legatus AI, mirrored by sentinel's audit-by-construction posture).
 
 Sentinel's job is to *observe* connector use (existing `mcp_health` hook) and to *gate* mutating connector calls if applicable (existing `tool_usage_gate` extension). Sentinel does **not** ship the connectors.
 
-Consul's job is to *carry* connector-produced metadata through the `RelayInstruction` and `InstructionResult` messages (per consul ADR-017). Consul does **not** ship the connectors either.
+Legatus AI's job is to *carry* connector-produced metadata through the `RelayInstruction` and `InstructionResult` messages (per Legatus AI ADR-017). Legatus AI does **not** ship the connectors either.
 
 The connectors are their own component class. This scoping doc lives in sentinel because the BA-vertical product strategy lives in sentinel; the connector contract is *consumed* by sentinel-observed flows.
 
@@ -77,12 +77,12 @@ Each connector is an MCP server exposing a small set of tools. The shape of thos
 
 ### 3.1 Provenance metadata on every returned artifact
 
-Every artifact a connector returns carries (matches `ArtifactReference` in consul ADR-017):
+Every artifact a connector returns carries (matches `ArtifactReference` in Legatus AI ADR-017):
 
 - `artifact_id` — opaque, connector-namespaced (e.g., `confluence://space/page-id`).
 - `artifact_type` — Document / Spreadsheet / Slide / EmailThread / ChatThread / CodeFile / Database / Other.
 - `source_uri` — canonical URI the human (or another agent) can paste into a browser to reach the source.
-- `content_hash` — versioned hash (SHA-256 or Blake3 per consul ADR-017's `ContentHash`). Computed over the canonical text content at retrieval time. Enables change detection downstream.
+- `content_hash` — versioned hash (SHA-256 or Blake3 per Legatus AI ADR-017's `ContentHash`). Computed over the canonical text content at retrieval time. Enables change detection downstream.
 - `retrieved_at` — UTC timestamp of the retrieval.
 - `provenance_class` — SystemOfRecord / Interview / Inference / ExternalApi. (Most connector returns are SystemOfRecord; the enum exists so the BA-orchestrator can mix in interview-sourced or inferred artifacts and audit them appropriately.)
 
@@ -104,11 +104,11 @@ Concrete contract:
 - Write scopes are *separately* opt-in and default-off (most BA work is read-only).
 - Token revocation is a connector-side concern (the BA-orchestrator's token is revocable independently of the underlying upstream API key).
 
-This contract aligns with consul's deferred **ADR-018 — Consul-Peer Capability Tokens** (PASETO v4.local). When ADR-018 lands, the same token primitive is used for both consul-peer auth and connector auth. Until then, connectors run in sandbox mode (operator-issued, no fine-grained scoping).
+This contract aligns with Legatus AI's deferred **ADR-018 — Legatus AI peer Capability Tokens** (PASETO v4.local). When ADR-018 lands, the same token primitive is used for both Legatus AI peer auth and connector auth. Until then, connectors run in sandbox mode (operator-issued, no fine-grained scoping).
 
 ### 3.4 Audit emission
 
-Every connector call emits a structured audit event consumable by sentinel and consul. Minimum required fields:
+Every connector call emits a structured audit event consumable by sentinel and Legatus AI. Minimum required fields:
 
 - `connector_name` (e.g., `confluence`)
 - `tool_name` (e.g., `list_pages`)
@@ -118,7 +118,7 @@ Every connector call emits a structured audit event consumable by sentinel and c
 - `latency_ms`
 - `bytes_returned`
 
-Sentinel's existing `mcp_health` hook is the natural sink. Consul's `AuditEvent::ExternalApiCall` (already in the consul taxonomy) is the natural transport when the call traverses consul.
+Sentinel's existing `mcp_health` hook is the natural sink. Legatus AI's `AuditEvent::ExternalApiCall` (already in the Legatus AI taxonomy) is the natural transport when the call traverses Legatus AI.
 
 ### 3.5 Failure-mode taxonomy
 
@@ -129,7 +129,7 @@ Every connector must distinguish and surface, with no error-collapsing:
 - **Capability denied** — connector's own capability check rejected the consumer.
 - **Resource not found** — upstream returned 404 / equivalent.
 - **Rate limited** — upstream returned 429 / equivalent; connector returns retry-after.
-- **Content too large** — connector refuses payloads beyond the 1 MiB envelope limit (consul ADR-013); BA-orchestrator must page or summarize.
+- **Content too large** — connector refuses payloads beyond the 1 MiB envelope limit (Legatus AI ADR-013); BA-orchestrator must page or summarize.
 - **Content redacted** — connector applied a configured redaction rule (PII, secrets); returns metadata-only.
 
 Each is a distinct error class with stable code. The BA-orchestrator's decision tree depends on which class — it should retry rate-limited but escalate auth-failed.
@@ -166,8 +166,8 @@ Sentinel's existing hooks interact with each in well-defined ways:
 
 - Connectors are external processes. They don't live in `sentinel-domain`, `sentinel-application`, or any sentinel crate.
 - Sentinel's interaction with connectors is mediated by `tool_usage_gate` and the new audit hooks. These all live in `sentinel-application/src/hooks/`.
-- Connector contracts (the data shapes returned) are mirrored in consul's `ArtifactReference` (already defined in consul ADR-017). Sentinel and consul agree on the wire shape; the connector's job is to produce it.
-- No new ports in `sentinel-domain`. No new ports in `consul-domain`. The connector layer is *adjacent* to both, consumed by the BA-orchestrator (which is a consul-class peer per consul ADR-016).
+- Connector contracts (the data shapes returned) are mirrored in Legatus AI's `ArtifactReference` (already defined in Legatus AI ADR-017). Sentinel and Legatus AI agree on the wire shape; the connector's job is to produce it.
+- No new ports in `sentinel-domain`. No new ports in `legatus-ai-domain`. The connector layer is *adjacent* to both, consumed by the BA-orchestrator (which is a Legatus AI class peer per Legatus AI ADR-016).
 
 ---
 
@@ -175,13 +175,13 @@ Sentinel's existing hooks interact with each in well-defined ways:
 
 Phase 1 (today through ADR-018 ratification):
 - Connectors accept an operator-issued opaque token at startup (env var, e.g., `CONFLUENCE_TOKEN=...`).
-- Consumer-side identity is `SandboxConsumer { label }` — same shape as consul ADR-016's `DispatcherIdentity::Sandbox`. Non-prod only.
+- Consumer-side identity is `SandboxConsumer { label }` — same shape as Legatus AI ADR-016's `DispatcherIdentity::Sandbox`. Non-prod only.
 - Capability scoping is whatever the upstream API supports natively (per-space, per-page, per-token).
 
-Phase 2 (after consul ADR-018 ratifies):
+Phase 2 (after Legatus AI ADR-018 ratifies):
 - Connectors verify a PASETO v4.local capability token presented by the consumer.
 - The capability set in the token determines what the connector permits (read:confluence:space-X, write:notion:database-Y).
-- Token revocation flows through consul's planned consul-peer revocation mechanism.
+- Token revocation flows through Legatus AI's planned Legatus AI peer revocation mechanism.
 
 This phased approach avoids blocking BA6 on ADR-018. Phase 1 unblocks the BA-vertical product in a sandbox; Phase 2 hardens it for any production deployment.
 
@@ -192,7 +192,7 @@ This phased approach avoids blocking BA6 on ADR-018. Phase 1 unblocks the BA-ver
 ### 6.1 Connector outage during BA workflow
 
 If a connector goes down mid-orchestration, the BA-orchestrator must:
-- Surface the outage as a `SessionBlocked` event to consul (per consul protocol; visible to human operators in their voice/text consul-app).
+- Surface the outage as a `SessionBlocked` event to Legatus AI (per Legatus AI protocol; visible to human operators in their voice/text legatus-ai-app).
 - Not silently fall back to inference. R8 (no auto-summary without critique) applies recursively here — inferred-because-connector-was-down content reaching an exec deck is the catastrophic case.
 - Preserve the partial state so the orchestration can resume when the connector returns.
 
@@ -229,7 +229,7 @@ If a connector binary is itself compromised (supply-chain attack on a vendor MCP
 - **Commercial connector ecosystem decisions.** Whether to build connectors in-house, fork open-source ones, or pay vendors is a business decision orthogonal to the contract.
 - **The BA-orchestrator's internal use of connector output.** That belongs in a separate BA-orchestrator design doc, not this scoping doc.
 - **The two new sentinel hooks** (`audit_extract`, `provenance_validate`). Flagged for a follow-up implementation ADR.
-- **Consul ADR-018 details.** Forward-referenced but not designed here.
+- **Legatus AI ADR-018 details.** Forward-referenced but not designed here.
 
 ---
 
@@ -238,9 +238,9 @@ If a connector binary is itself compromised (supply-chain attack on a vendor MCP
 ADRs commit to specific decisions ("we chose CBOR over JSON because X"). This document instead establishes:
 
 - **Direction** (start with Linear/Confluence/Notion/Drive; not generic framework first).
-- **Boundaries** (connectors live outside sentinel; sentinel observes and audits; consul carries metadata).
+- **Boundaries** (connectors live outside sentinel; sentinel observes and audits; Legatus AI carries metadata).
 - **Contract** (provenance, content-hash, capability tokens, audit, failure modes).
-- **Ownership** (operator owns upstream credentials; orchestrator owns capability tokens; sentinel owns observation; consul owns transport).
+- **Ownership** (operator owns upstream credentials; orchestrator owns capability tokens; sentinel owns observation; Legatus AI owns transport).
 
 Each *specific* decision (which connector first ships, which framework it uses, what exact tool surface it exposes) becomes its own implementation ADR when work starts. This doc exists so those implementation ADRs don't reinvent the contract.
 

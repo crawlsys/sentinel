@@ -254,14 +254,14 @@ fn run_check(
 /// Performs REAL verification via `ctx.process` where possible:
 ///   * COMMIT — a concrete sha is checked for reachability on HEAD with
 ///     `git merge-base --is-ancestor <sha> HEAD`; otherwise the dirty-tree
-///     heuristic is used.
+///     verification is surfaced when no concrete sha is named.
 ///   * PR — the claimed PR is checked with `gh pr view <N> --json state,merged`
 ///     (with `--repo owner/repo` when a URL supplied one); a claimed-merged PR
 ///     that gh reports as open/closed is a hard mismatch.
 ///   * BUILD/TEST — can't be re-run here → soft confirm note (unchanged).
 ///
-/// FAIL OPEN: any subprocess error, missing binary, or non-repo cwd falls back
-/// to the soft heuristic (or silence) — this never blocks `TaskCompleted`.
+/// Verification-unavailable states are reported as explicit warnings instead
+/// of being silently downgraded.
 ///
 /// `first_in_progress` is true when this is the first time the task entered
 /// `in_progress` (suspiciously fast done — claimed complete on the first hop).
@@ -289,9 +289,7 @@ pub(crate) fn verify_claims(
     if claims.commit {
         // If a SPECIFIC sha is named, do the REAL reachability check: is it an
         // ancestor of HEAD? `git merge-base --is-ancestor <sha> HEAD` exits 0
-        // when reachable, 1 when not. Only a confirmed exit-1 (sha resolved but
-        // not on history) is a hard mismatch. Anything else (sha doesn't
-        // resolve, gh/git missing, not a repo) → fall back to the heuristic.
+        // when reachable, 1 when not.
         let real_sha_checked = if let Some(sha) = extract_sha(&lower) {
             match run_check(
                 ctx,
@@ -315,8 +313,12 @@ pub(crate) fn verify_claims(
                         || stderr.contains("malformed")
                         || stderr.contains("ambiguous argument");
                     if unresolved {
-                        // Sha doesn't resolve in this repo → can't verify, no warn.
-                        false
+                        warnings.push(format!(
+                            "claimed commit {sha}, but git could not resolve that sha in this \
+                             repository — confirm the cited commit exists on the checked-out \
+                             history before ✅"
+                        ));
+                        true
                     } else {
                         warnings.push(format!(
                             "claimed commit {sha} is NOT on HEAD's history \
@@ -327,24 +329,44 @@ pub(crate) fn verify_claims(
                         true
                     }
                 }
-                None => false, // git missing / spawn error → fall back
+                None => {
+                    warnings.push(format!(
+                        "claimed commit {sha}, but sentinel could not run git reachability \
+                         verification here — confirm the commit is on HEAD's history before ✅"
+                    ));
+                    true
+                }
             }
         } else {
             false
         };
 
-        // No specific sha verified → fall back to the dirty-tree heuristic:
-        // "committed" but the tree is still dirty is a soft contradiction.
+        // No specific sha verified → require a clean, valid git working tree.
+        // "Committed" while the tree is dirty or git state is unavailable is a
+        // visible verification warning.
         if !real_sha_checked {
-            let dirty = ctx.git.has_uncommitted_changes(cwd).unwrap_or(false);
-            let has_head = ctx.git.head_sha(cwd).is_some();
-            if dirty && has_head {
-                warnings.push(
-                    "claims a commit/push, but the working tree still has \
-                     UNCOMMITTED changes — confirm the work was actually committed \
-                     (run `git status`), not just edited"
-                        .to_string(),
-                );
+            match ctx.git.has_uncommitted_changes(cwd) {
+                Ok(dirty) => {
+                    let has_head = ctx.git.head_sha(cwd).is_some();
+                    if dirty && has_head {
+                        warnings.push(
+                            "claims a commit/push, but the working tree still has \
+                             UNCOMMITTED changes — confirm the work was actually committed \
+                             (run `git status`), not just edited"
+                                .to_string(),
+                        );
+                    } else if !has_head {
+                        warnings.push(
+                            "claims a commit/push, but sentinel could not read HEAD for this \
+                             repository — confirm the work is committed on a real branch before ✅"
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(err) => warnings.push(format!(
+                    "claims a commit/push, but sentinel could not inspect git status ({err}) — \
+                     confirm the working tree and commit history before ✅"
+                )),
             }
         }
     }
@@ -401,7 +423,7 @@ pub(crate) fn verify_claims(
                     ));
                 }
                 None => {
-                    // gh missing / spawn error → fail open to the soft note.
+                    // gh missing / spawn error → verification-unavailable note.
                     warnings.push(format!(
                         "references PR #{n} but sentinel could not run gh here — \
                          confirm the PR exists and is in the claimed state \
@@ -481,7 +503,7 @@ fn first_line(s: &str) -> String {
 /// If the task subject contains `@linear:{ID}`, also injects Linear sync instructions.
 /// Additionally scans the task subject+description for concrete-artifact claims
 /// (commit/push, PR, build/test) and warns on any claim-vs-reality mismatch
-/// (e.g. "committed" but the tree is still dirty). FAIL OPEN on any error.
+/// (e.g. "committed" but the tree is still dirty).
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // SEN-1: drop malformed TaskCompleted events. If the upstream hook
     // dispatcher didn't populate task_id / task_subject / teammate_name with
@@ -552,8 +574,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Claim-vs-reality verification (catch "plausible-but-false done").
     // Scan subject + (optional) description for concrete-artifact claims, then
-    // corroborate against the working tree. FAIL OPEN — wrapped so any panic or
-    // git error can never block the completion gate from injecting context.
+    // corroborate against the working tree. Wrapped so a panic cannot prevent
+    // the completion context from being injected; panic becomes a visible
+    // verification-unavailable warning.
     let claim_warnings = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Optional richer description; harness may not populate it.
         let description = input
@@ -577,7 +600,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         let cwd = input.cwd.as_deref().unwrap_or(".");
         verify_claims(claims, &scan_text, ctx, cwd, first_in_progress)
     }))
-    .unwrap_or_default();
+    .unwrap_or_else(|_| {
+        vec![
+            "sentinel claim verification failed internally — confirm the task's commit/PR/build \
+             claims manually before ✅"
+                .to_string(),
+        ]
+    });
 
     if !claim_warnings.is_empty() {
         let _ = write!(
@@ -647,7 +676,7 @@ mod tests {
     use sentinel_domain::ports::GitStatusPort;
 
     /// Git stub with caller-chosen dirty flag + HEAD presence, and an option to
-    /// make `has_uncommitted_changes` error (to exercise the fail-open path).
+    /// make `has_uncommitted_changes` error.
     struct FakeGit {
         dirty: bool,
         head: Option<String>,
@@ -664,22 +693,34 @@ mod tests {
         }
     }
     impl GitStatusPort for FakeGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             if self.err {
                 return Err(sentinel_domain::port_errors::GitError::backend("git boom"));
             }
             Ok(self.dirty)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -692,6 +733,9 @@ mod tests {
             None
         }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
@@ -714,7 +758,7 @@ mod tests {
     ///
     /// Each closure-free field controls one command family:
     ///   * `git_missing` / `gh_missing` — `run` returns `Err` (binary absent /
-    ///     spawn failure) so the hook must fail open.
+    ///     spawn failure), which should surface as a verification warning.
     ///   * `merge_base_ancestor` — `Some(true)`=exit0 (reachable),
     ///     `Some(false)`=exit1 (not an ancestor, empty stderr),
     ///     `None`=unresolved rev (exit1 with a "bad revision" stderr).
@@ -747,8 +791,12 @@ mod tests {
             _cwd: Option<&str>,
         ) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
             match command {
-                "git" if self.git_missing => Err(sentinel_domain::port_errors::ProcessError::backend("git: command not found")),
-                "gh" if self.gh_missing => Err(sentinel_domain::port_errors::ProcessError::backend("gh: command not found")),
+                "git" if self.git_missing => Err(
+                    sentinel_domain::port_errors::ProcessError::backend("git: command not found"),
+                ),
+                "gh" if self.gh_missing => Err(
+                    sentinel_domain::port_errors::ProcessError::backend("gh: command not found"),
+                ),
                 "git" if args.first() == Some(&"merge-base") => match self.merge_base_ancestor {
                     Some(true) => Ok(ProcessOutput {
                         success: true,
@@ -779,7 +827,11 @@ mod tests {
                 }),
             }
         }
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), sentinel_domain::port_errors::ProcessError> {
+        fn spawn_detached(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> Result<(), sentinel_domain::port_errors::ProcessError> {
             Ok(())
         }
     }
@@ -1128,8 +1180,8 @@ mod tests {
     }
 
     #[test]
-    fn fail_open_on_git_error() {
-        // Claims a commit, but git errors → fail open (no hard warning).
+    fn git_status_error_warns() {
+        // Claims a commit, but git status errors → verification warning.
         let input = claim_input("Committed the fix");
         let git = FakeGit {
             dirty: false,
@@ -1139,17 +1191,14 @@ mod tests {
         let ctx = ctx_with_git(&git);
         let out = process(&input, &ctx);
         let text = injected(&out);
-        // Must not crash, and must not emit the commit-mismatch warning.
-        assert!(
-            !text.contains("UNCOMMITTED"),
-            "git error must fail open (no commit-mismatch warning): {text}"
-        );
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("could not inspect git status"), "{text}");
     }
 
     #[test]
-    fn commit_claim_no_head_no_warn() {
+    fn commit_claim_no_head_warns() {
         // Claims a commit, tree dirty, but HEAD absent (unborn / not a repo) →
-        // can't verify → stay silent.
+        // verification warning.
         let input = claim_input("Committed the fix");
         let git = FakeGit {
             dirty: true,
@@ -1159,7 +1208,8 @@ mod tests {
         let ctx = ctx_with_git(&git);
         let out = process(&input, &ctx);
         let text = injected(&out);
-        assert!(!text.contains("UNCOMMITTED"), "{text}");
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("could not read HEAD"), "{text}");
     }
 
     #[test]
@@ -1292,9 +1342,8 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_sha_no_warn() {
-        // Sha doesn't resolve (bad object) → can't verify → no hard warn,
-        // and no dirty-tree fallback warning since the tree is clean.
+    fn unresolved_sha_warns() {
+        // Sha doesn't resolve (bad object) → verification warning.
         let input = claim_input("Committed at deadbe1f");
         let git = FakeGit::default(); // clean tree
         let proc = FakeProcess {
@@ -1304,10 +1353,9 @@ mod tests {
         let ctx = ctx_with(&git, &proc);
         let out = process(&input, &ctx);
         let text = injected(&out);
-        assert!(
-            !text.contains("NOT on HEAD"),
-            "unresolved sha must not produce the ancestor warning: {text}"
-        );
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("could not resolve"), "{text}");
+        assert!(!text.contains("NOT on HEAD"), "{text}");
     }
 
     #[test]
@@ -1347,8 +1395,8 @@ mod tests {
     }
 
     #[test]
-    fn gh_missing_fails_open_with_soft_note() {
-        // gh binary absent → run errors → fail open to a soft note (NOT silence,
+    fn gh_missing_warns_with_soft_note() {
+        // gh binary absent → run errors → soft note (NOT silence,
         // since a PR was explicitly claimed), and must never panic/block.
         let input = claim_input("Merged PR #42 to main");
         let git = FakeGit::default();
@@ -1359,7 +1407,8 @@ mod tests {
         let ctx = ctx_with(&git, &proc);
         let out = process(&input, &ctx);
         let text = injected(&out);
-        // Fail-open: a soft confirm note, but NOT the hard "claimed MERGED" warn.
+        // Verification-unavailable: a soft confirm note, but NOT the hard
+        // "claimed MERGED" warn.
         assert!(
             !text.contains("PR #42 is claimed MERGED"),
             "gh missing must not produce the hard mismatch warning: {text}"
@@ -1371,9 +1420,8 @@ mod tests {
     }
 
     #[test]
-    fn git_missing_commit_sha_fails_open() {
-        // Named sha but git binary absent → run errors → fall back to dirty
-        // heuristic. Clean tree → no warning at all (fail open, no panic).
+    fn git_missing_commit_sha_warns() {
+        // Named sha but git binary absent → verification warning.
         let input = claim_input("Committed at deadbe1f");
         let git = FakeGit::default(); // clean tree
         let proc = FakeProcess {
@@ -1385,12 +1433,10 @@ mod tests {
         let text = injected(&out);
         assert!(
             !text.contains("NOT on HEAD"),
-            "git missing must fail open (no ancestor warning): {text}"
+            "git missing must not produce the ancestor-mismatch warning: {text}"
         );
-        assert!(
-            !text.contains("UNCOMMITTED"),
-            "clean tree fallback must not warn: {text}"
-        );
+        assert!(text.contains("⚠️ Verify before ✅"), "{text}");
+        assert!(text.contains("could not run git reachability"), "{text}");
     }
 
     #[test]

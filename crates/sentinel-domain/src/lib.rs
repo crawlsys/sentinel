@@ -22,6 +22,7 @@ pub mod file_kind;
 pub mod hooks;
 pub mod interceptor;
 pub mod judge;
+pub mod langgraph_thread;
 pub mod mcp_tool;
 pub mod multi_judge;
 pub mod override_phrase;

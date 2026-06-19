@@ -1,8 +1,10 @@
+#![recursion_limit = "256"]
+
 //! Sentinel — Proof-of-Work Hook Engine + MCP Server
 //!
 //! Usage:
-//!   sentinel daemon     — Start MCP server + hook listener + dashboard API
-//!   sentinel hook       — Thin client, forwards to daemon (or standalone)
+//!   sentinel daemon     — Start MCP server + hook listener + local API
+//!   sentinel hook       — Process a hook event through the LangGraph authority path
 //!   sentinel verify     — Verify a session's proof chain
 //!   sentinel mcp        — MCP server over stdio (Claude Code connects here)
 //!   sentinel scan       — Scan marketplace, output JSON snapshot
@@ -12,40 +14,70 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod api;
+mod ba_cmd;
+mod ba_draft_graph;
+mod browser_test_cmd;
 mod cache_cmd;
+mod cache_efficiency_graph;
 mod claude_md_cmd;
 mod cleanup_cmd;
+mod code_reconciliation_audit;
 mod config_cmd;
-mod ba_cmd;
 mod cost_per_point_cmd;
+mod cost_per_point_graph;
 mod daemon_cmd;
 mod deploy_freq_cmd;
+mod deploy_freq_graph;
 mod dev_scorecard_cmd;
+mod dev_scorecard_graph;
 mod eval_cmd;
+mod eval_graph;
 mod federation_cmd;
-mod manifest_cmd;
-mod policy_cmd;
 mod hook_cmd;
 mod init_cmd;
-mod mcp_cmd;
-mod pr_review_cmd;
-mod project_cmd;
-mod resign_cmd;
 mod linear_audit_cmd;
 mod linear_code_audit_cmd;
 mod linear_health_cmd;
+mod linear_health_graph;
+mod manifest_cmd;
+mod mcp_cmd;
+mod phase_graph_projection;
+mod pm_audit_graph;
+mod policy_cmd;
+mod pr_review_cmd;
+mod pr_review_graph;
+mod project_cmd;
+mod resign_cmd;
 mod roi_cmd;
-mod severity_cmd;
-mod token_cost_cmd;
+mod roi_graph;
 mod rotate_key_cmd;
 mod scan_cmd;
 mod schema_validator;
+mod severity_cmd;
+mod severity_graph_audit;
 mod sla_cmd;
+mod sla_graph;
 mod stage_cmd;
 mod stats_cmd;
-mod browser_test_cmd;
+mod token_cost_cmd;
+mod token_cost_graph;
+mod token_usage_graph;
 mod tokens_cmd;
 mod verify_cmd;
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 /// Sentinel — Proof-of-Work for AI Skill Execution
 #[derive(Parser)]
@@ -57,9 +89,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the sentinel daemon (MCP server + hooks + dashboard API)
+    /// Start the sentinel daemon (MCP server + hooks + local API)
     Daemon {
-        /// Dashboard API port
+        /// Local API port
         #[arg(long, default_value = "3001")]
         port: u16,
     },
@@ -75,7 +107,7 @@ enum Commands {
         wait_secs: u64,
     },
 
-    /// Process a hook event (thin client → daemon, or standalone)
+    /// Process a hook event through the LangGraph authority path
     Hook {
         /// Hook event type
         #[arg(long)]
@@ -84,26 +116,6 @@ enum Commands {
         /// Tool name matcher (for PreToolUse/PostToolUse)
         #[arg(long)]
         matcher: Option<String>,
-
-        /// Run standalone (without daemon)
-        #[arg(long)]
-        standalone: bool,
-    },
-
-    /// Internal hook worker invoked by `sentinel hook`
-    #[command(hide = true)]
-    HookInternal {
-        /// Hook event type
-        #[arg(long)]
-        event: String,
-
-        /// Tool name matcher (for PreToolUse/PostToolUse)
-        #[arg(long)]
-        matcher: Option<String>,
-
-        /// Preserve the old direct execution path for debugging
-        #[arg(long)]
-        standalone: bool,
     },
 
     /// Verify a session's proof chain
@@ -120,9 +132,7 @@ enum Commands {
     },
 
     /// Signed step-config manifests (M2.13). Write or verify a
-    /// `manifest.toml` alongside `<config_dir>/steps/*.toml`. Supports
-    /// hash-only mode (bit-rot protection) and Ed25519-signed mode
-    /// (cryptographic authenticity).
+    /// `manifest.toml` alongside `<config_dir>/steps/*.toml`.
     Manifest {
         #[command(subcommand)]
         action: ManifestAction,
@@ -230,7 +240,7 @@ enum Commands {
     /// Linear PM-enforcement audit — estimate hygiene, oversized tickets,
     /// QA-failed risk, velocity burndown, and estimate-vs-actual calibration
     /// over the Linear issue cache. Codifies the "good PM is good software"
-    /// checks. Writes ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl}.
+    /// checks. Writes ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl,graph-runs.jsonl}.
     LinearAudit {
         #[command(subcommand)]
         action: LinearAuditAction,
@@ -238,9 +248,10 @@ enum Commands {
 
     /// Auto-severity — LLM-judged Linear ticket priority. Asks BOTH Opus 4.8
     /// and GPT-5.5 to rate each cached ticket's severity (1-4) from its
-    /// title+description and reconciles the two verdicts. Shadow by default
-    /// (read-only); --apply gap-fills untriaged tickets via issueUpdate.
-    /// Writes ~/.claude/sentinel/metrics/severity.{json,jsonl}.
+    /// title+description and reconciles the two verdicts. Report-only by
+    /// default; --apply gap-fills untriaged tickets through the severity
+    /// LangGraph before Linear issueUpdate.
+    /// Writes ~/.claude/sentinel/metrics/severity.{json,jsonl,graph-runs.jsonl}.
     Severity {
         #[command(subcommand)]
         action: SeverityAction,
@@ -250,7 +261,7 @@ enum Commands {
     /// cache to score each dev on throughput, first-pass QA, and consistency
     /// (composite 0-100), plus an attribution-divergence check that surfaces
     /// the merge-reassign bug (git delivery with ~0 Linear-assignee
-    /// completions). Writes ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl}.
+    /// completions). Writes ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl,graph-runs.jsonl}.
     DevScorecard {
         #[command(subcommand)]
         action: DevScorecardAction,
@@ -267,7 +278,7 @@ enum Commands {
 
     /// Composite Linear health score — a single 0-100 gauge across hygiene,
     /// structure, data-quality, and flow dimensions (mirrors the by-hand
-    /// 72/100). Writes ~/.claude/sentinel/metrics/linear-health.json.
+    /// 72/100). Writes ~/.claude/sentinel/metrics/linear-health.{json,graph-runs.jsonl}.
     LinearHealth {
         #[command(subcommand)]
         action: LinearHealthAction,
@@ -348,10 +359,9 @@ enum Commands {
 
     /// External-benchmark eval corpus management (A12).
     ///
-    /// Phase 2 ships the corpus loader + `list` subcommand. Future
-    /// phases add the benchmark runner that loads cases, dispatches
-    /// to agents via A2's capability router, scores against the
-    /// rubric, and emits results. See `docs/a12-external-benchmarks.md`.
+    /// Lists the BA-Eval corpus and runs benchmark scoring over supplied
+    /// candidate artifacts, persisting both the run record and durable
+    /// LangGraph audit evidence. See `docs/a12-external-benchmarks.md`.
     Eval {
         #[command(subcommand)]
         action: EvalAction,
@@ -365,7 +375,6 @@ enum Commands {
         #[command(subcommand)]
         action: BaAction,
     },
-
 }
 
 /// `sentinel eval` subcommands.
@@ -386,14 +395,12 @@ enum EvalAction {
         dir: Option<String>,
     },
 
-    /// Execute a benchmark run: load cases, replay recorded
-    /// candidate outputs through the configured `EvalScorerPort`
-    /// (LLM-as-judge by default), persist the run record under
-    /// `~/.claude/sentinel/eval/ba-corpus/runs/{run_id}.json`.
-    ///
-    /// Phase 3e is replay-only — supply candidate outputs in a JSON
-    /// file mapping `case_id -> output_text`. Live-LLM dispatch
-    /// through the A2 router is a future phase.
+    /// Execute a benchmark run: load cases, score supplied candidate
+    /// outputs through the configured `EvalScorerPort` (LLM-as-judge
+    /// by default), persist the run record under
+    /// `~/.claude/sentinel/eval/ba-corpus/runs/{run_id}.json`, then
+    /// authorize the aggregate verdict through the durable eval
+    /// LangGraph at `{run_id}.graph-runs.jsonl`.
     Run {
         /// Name for this run. Persisted at
         /// `{runs_dir}/{run_id}.json`. Same id on a re-run overwrites.
@@ -430,8 +437,8 @@ enum EvalAction {
 #[derive(Subcommand)]
 enum BaAction {
     /// Draft a BA recommendation. Calls the orchestrator's
-    /// `draft()` use case via the Anthropic LLM adapter
-    /// (`ANTHROPIC_API_KEY` required), returns a structured
+    /// `draft()` use case via the standardized OpenRouter LLM adapter
+    /// (`OPENROUTER_API_KEY` required), returns a structured
     /// [`BaRecommendation`] containing the recommendation body,
     /// citations, `requirement_refs`, and a complete A13 spec
     /// challenge. The resulting envelope is exactly what sentinel's
@@ -495,16 +502,15 @@ enum FederationAction {
 #[derive(Subcommand)]
 enum ManifestAction {
     /// Write `<config_dir>/steps/manifest.toml` covering every step
-    /// TOML in the directory. With `--key-env` signs each entry with
-    /// an Ed25519 key whose 32-byte hex seed lives in the named env
-    /// var; without it, writes a hash-only manifest (bit-rot protection
-    /// without cryptographic authenticity).
+    /// TOML in the directory. Signs each entry with an Ed25519 key
+    /// whose 32-byte hex seed lives in `--key-env` or
+    /// `SENTINEL_SIGNING_KEY`.
     Write {
         /// Override the config directory (default: `~/.claude/sentinel/config/`).
         #[arg(long)]
         config_dir: Option<String>,
         /// Name of an env var holding a 32-byte (64 hex char) Ed25519
-        /// seed. When set, signs every entry.
+        /// seed. Defaults to `SENTINEL_SIGNING_KEY`.
         #[arg(long)]
         key_env: Option<String>,
         /// Preview only — print what would be written without touching
@@ -515,8 +521,7 @@ enum ManifestAction {
 
     /// Verify `<config_dir>/steps/manifest.toml` against the current
     /// step TOML files. Re-canonicalizes each source, recomputes hashes,
-    /// and (in strict mode) verifies Ed25519 signatures. Exit 1 on
-    /// failure.
+    /// and verifies Ed25519 signatures. Exit 1 on failure.
     Verify {
         /// Override the config directory (default: `~/.claude/sentinel/config/`).
         #[arg(long)]
@@ -525,17 +530,6 @@ enum ManifestAction {
         /// `public_key` header inside the manifest itself.
         #[arg(long)]
         pubkey: Option<String>,
-        /// Force strict mode (require all signatures to verify) even
-        /// when the manifest looks hash-only. By default, strict is
-        /// auto-enabled when the manifest contains any signed entry
-        /// AND a public key is resolvable.
-        #[arg(long)]
-        strict: bool,
-        /// Force hash-only mode (ignore signatures). Mutually exclusive
-        /// with `--strict`; takes precedence if both are passed (errors
-        /// loudly).
-        #[arg(long)]
-        hash_only: bool,
     },
 
     /// Pretty-print a summary of `<config_dir>/steps/manifest.toml`:
@@ -584,7 +578,7 @@ enum ProjectAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Append a handover stub to `.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
+    /// Append a handover document to `.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
     /// Requires the repo to have been initialized via `sentinel project init`.
     Handover {
         /// Title — becomes the document heading and filename slug.
@@ -678,7 +672,7 @@ enum StatsAction {
 #[derive(Subcommand)]
 enum TokensAction {
     /// Walk ~/.claude/projects/, aggregate per-ticket token cost,
-    /// write ~/.claude/sentinel/metrics/tokens-per-ticket.jsonl.
+    /// write ~/.claude/sentinel/metrics/tokens-per-ticket.{jsonl,graph-runs.jsonl}.
     Scan {
         /// Number of top-cost tickets to print (default 10)
         #[arg(long, default_value_t = 10)]
@@ -689,7 +683,7 @@ enum TokensAction {
 #[derive(Subcommand)]
 enum PrReviewAction {
     /// Walk merged PRs across firefly-pro + sentinel via `gh`,
-    /// write pr-review.jsonl + pr-review-summary.json.
+    /// write pr-review.jsonl + pr-review-summary.{json,graph-runs.jsonl}.
     Scan {
         /// Window in days to scan (default 30)
         #[arg(long, default_value_t = 30)]
@@ -700,14 +694,14 @@ enum PrReviewAction {
 #[derive(Subcommand)]
 enum CostPerPointAction {
     /// Join tokens-per-ticket.jsonl with Linear estimates, write
-    /// ~/.claude/sentinel/metrics/cost-per-point.{jsonl,-summary.json}.
+    /// ~/.claude/sentinel/metrics/cost-per-point.{jsonl,-summary.json,-summary.graph-runs.jsonl}.
     Scan,
 }
 
 #[derive(Subcommand)]
 enum CacheAction {
     /// Walk ~/.claude/projects/, compute per-session cache hit rate,
-    /// write ~/.claude/sentinel/metrics/cache-efficiency.{jsonl,-summary.json}.
+    /// write ~/.claude/sentinel/metrics/cache-efficiency.{jsonl,-summary.json,-summary.graph-runs.jsonl}.
     Scan {
         /// Number of worst sessions to print (default 10)
         #[arg(long, default_value_t = 10)]
@@ -719,7 +713,7 @@ enum CacheAction {
 enum RoiAction {
     /// Join SEN-7 tokens-per-ticket data with SEN-13 cost-per-point
     /// summary, project ROI vs $327/point human baseline, write
-    /// ~/.claude/sentinel/metrics/roi.{jsonl,-summary.json}.
+    /// ~/.claude/sentinel/metrics/roi.{jsonl,-summary.json,-summary.graph-runs.jsonl}.
     Scan,
 }
 
@@ -727,14 +721,14 @@ enum RoiAction {
 enum TokenCostAction {
     /// Price SEN-7 token aggregates at per-model API rates, compute the
     /// cached-vs-uncached cost + cache savings, write
-    /// ~/.claude/sentinel/metrics/token-cost.{json,jsonl}.
+    /// ~/.claude/sentinel/metrics/token-cost.{json,jsonl,graph-runs.jsonl}.
     Scan,
 }
 
 #[derive(Subcommand)]
 enum LinearAuditAction {
     /// Audit the Linear issue cache for PM discipline and write
-    /// ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl}.
+    /// ~/.claude/sentinel/metrics/linear-pm-audit.{json,jsonl,graph-runs.jsonl}.
     Scan {
         /// Measured team velocity in story points per week (enables the
         /// burndown projection when combined with --weeks).
@@ -750,12 +744,12 @@ enum LinearAuditAction {
 #[derive(Subcommand)]
 enum SeverityAction {
     /// Classify each cached ticket's severity (Opus 4.8 + GPT-5.5, reconciled)
-    /// and write ~/.claude/sentinel/metrics/severity.{json,jsonl}.
+    /// and write ~/.claude/sentinel/metrics/severity.{json,jsonl,graph-runs.jsonl}.
     Scan {
-        /// Arm the gap-fill: set the proposed priority on untriaged tickets
-        /// (no current priority) via Linear's issueUpdate. Suggestions for
-        /// tickets that already have a priority are reported, never auto-posted
-        /// (they require human review). Omit for a read-only shadow run.
+        /// Arm the graph-backed gap-fill: set the proposed priority on
+        /// untriaged tickets (no current priority) only after the severity
+        /// LangGraph authorizes Linear issueUpdate. Suggestions for tickets
+        /// that already have a priority are reported, never auto-posted.
         #[arg(long)]
         apply: bool,
     },
@@ -765,7 +759,7 @@ enum SeverityAction {
 enum DevScorecardAction {
     /// Compute per-developer scorecards from
     /// ~/.claude/sentinel/dev-git-stats.json + the Linear cache and write
-    /// ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl}.
+    /// ~/.claude/sentinel/metrics/dev-scorecard.{json,jsonl,graph-runs.jsonl}.
     Scan,
 }
 
@@ -780,7 +774,7 @@ enum LinearCodeAuditAction {
 #[derive(Subcommand)]
 enum LinearHealthAction {
     /// Compute the composite Linear health score over the cache and write
-    /// ~/.claude/sentinel/metrics/linear-health.json.
+    /// ~/.claude/sentinel/metrics/linear-health.{json,graph-runs.jsonl}.
     Scan,
 }
 
@@ -798,7 +792,8 @@ enum SlaAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Roll up sla-breaches.jsonl into 24h/7d/30d counts per SLA.
+    /// Roll up sla-breaches.jsonl into 24h/7d/30d counts per SLA and write
+    /// sla-breaches-summary.{json,graph-runs.jsonl}.
     Aggregate,
     /// Print a starter slas.toml to stdout.
     Template,
@@ -806,7 +801,7 @@ enum SlaAction {
 
 #[derive(Subcommand)]
 enum DeployFreqAction {
-    /// Read deploys.jsonl, write deploys-summary.json, print summary.
+    /// Read deploys.jsonl, write deploys-summary.{json,graph-runs.jsonl}, print summary.
     Aggregate,
     /// Manually append a deploy record (testing + backfill path before
     /// Hookdeck `deployment.success` ingest lands).
@@ -861,16 +856,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Daemon { port } => daemon_cmd::run(port).await,
         Commands::Stop { wait_secs } => daemon_cmd::run_stop(wait_secs),
-        Commands::Hook {
-            event,
-            matcher,
-            standalone,
-        } => hook_cmd::run(&event, matcher.as_deref(), standalone).await,
-        Commands::HookInternal {
-            event,
-            matcher,
-            standalone,
-        } => hook_cmd::run_internal(&event, matcher.as_deref(), standalone).await,
+        Commands::Hook { event, matcher } => hook_cmd::run(&event, matcher.as_deref()).await,
         Commands::Verify { session } => verify_cmd::run(&session),
         Commands::Federation { action } => match action {
             FederationAction::Compose { json, config_dir } => federation_cmd::run(json, config_dir),
@@ -888,14 +874,17 @@ async fn main() -> anyhow::Result<()> {
                 corpus_dir,
                 runs_dir,
                 json,
-            } => eval_cmd::run(eval_cmd::RunArgs {
-                run_id,
-                candidates_path: candidates,
-                case_ids: case_id,
-                corpus_dir,
-                runs_dir,
-                json,
-            }),
+            } => {
+                eval_cmd::run(eval_cmd::RunArgs {
+                    run_id,
+                    candidates_path: candidates,
+                    case_ids: case_id,
+                    corpus_dir,
+                    runs_dir,
+                    json,
+                })
+                .await
+            }
         },
         Commands::Ba { action } => match action {
             BaAction::Draft {
@@ -928,42 +917,42 @@ async fn main() -> anyhow::Result<()> {
             Some(StatsAction::Hooks { limit, hours }) => stats_cmd::run_hooks(limit, hours),
         },
         Commands::Tokens { action } => match action {
-            TokensAction::Scan { top } => tokens_cmd::run(top),
+            TokensAction::Scan { top } => tokens_cmd::run(top).await,
         },
         Commands::PrReview { action } => match action {
-            PrReviewAction::Scan { days } => pr_review_cmd::run(days),
+            PrReviewAction::Scan { days } => pr_review_cmd::run(days).await,
         },
         Commands::CostPerPoint { action } => match action {
-            CostPerPointAction::Scan => cost_per_point_cmd::run(),
+            CostPerPointAction::Scan => cost_per_point_cmd::run().await,
         },
         Commands::Cache { action } => match action {
-            CacheAction::Scan { top } => cache_cmd::run(top),
+            CacheAction::Scan { top } => cache_cmd::run(top).await,
         },
         Commands::Roi { action } => match action {
-            RoiAction::Scan => roi_cmd::run(),
+            RoiAction::Scan => roi_cmd::run().await,
         },
         Commands::TokenCost { action } => match action {
-            TokenCostAction::Scan => token_cost_cmd::run(),
+            TokenCostAction::Scan => token_cost_cmd::run().await,
         },
         Commands::LinearAudit { action } => match action {
             LinearAuditAction::Scan { velocity, weeks } => {
-                linear_audit_cmd::run(velocity, weeks)
+                linear_audit_cmd::run(velocity, weeks).await
             }
         },
         Commands::Severity { action } => match action {
             SeverityAction::Scan { apply } => severity_cmd::run(apply).await,
         },
         Commands::DevScorecard { action } => match action {
-            DevScorecardAction::Scan => dev_scorecard_cmd::run(),
+            DevScorecardAction::Scan => dev_scorecard_cmd::run().await,
         },
         Commands::LinearCodeAudit { action } => match action {
-            LinearCodeAuditAction::Scan => linear_code_audit_cmd::run(),
+            LinearCodeAuditAction::Scan => linear_code_audit_cmd::run().await,
         },
         Commands::LinearHealth { action } => match action {
-            LinearHealthAction::Scan => linear_health_cmd::run(),
+            LinearHealthAction::Scan => linear_health_cmd::run().await,
         },
         Commands::DeployFreq { action } => match action {
-            DeployFreqAction::Aggregate => deploy_freq_cmd::run_aggregate(),
+            DeployFreqAction::Aggregate => deploy_freq_cmd::run_aggregate().await,
             DeployFreqAction::Record {
                 repo,
                 env,
@@ -979,16 +968,19 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
             } => {
                 let cfg = config.unwrap_or_else(|| {
-                    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("slas.toml"), |h| {
+                    dirs::home_dir().map_or_else(
+                        || std::path::PathBuf::from("slas.toml"),
+                        |h| {
                             h.join(".claude")
                                 .join("sentinel")
                                 .join("config")
                                 .join("slas.toml")
-                        })
+                        },
+                    )
                 });
                 sla_cmd::run_check(cfg, subjects, dry_run)
             }
-            SlaAction::Aggregate => sla_cmd::run_aggregate(),
+            SlaAction::Aggregate => sla_cmd::run_aggregate().await,
             SlaAction::Template => {
                 sla_cmd::run_template();
                 Ok(())
@@ -1023,37 +1015,59 @@ async fn main() -> anyhow::Result<()> {
                 force,
                 dry_run,
             } => project_cmd::run(dir.map(std::path::PathBuf::from), force, dry_run),
-            ProjectAction::Handover { title, summary, dir } => {
-                project_cmd::run_handover(
-                    dir.map(std::path::PathBuf::from),
-                    title,
-                    summary,
-                )
-            }
+            ProjectAction::Handover {
+                title,
+                summary,
+                dir,
+            } => project_cmd::run_handover(dir.map(std::path::PathBuf::from), title, summary),
             ProjectAction::Lesson {
                 title,
                 summary,
                 tags,
                 dir,
-            } => project_cmd::run_lesson(
-                dir.map(std::path::PathBuf::from),
-                title,
-                summary,
-                tags,
-            ),
+            } => project_cmd::run_lesson(dir.map(std::path::PathBuf::from), title, summary, tags),
         },
         Commands::RegenerateClaudeMd => {
             let result = claude_md_cmd::regenerate()?;
+            let graph_audit = claude_md_cmd::run_operational_tool_graph_audit(
+                "regenerate_claude_md",
+                &serde_json::json!({}),
+                &result,
+            )
+            .await?;
+            let result = claude_md_cmd::attach_operational_tool_graph_audit(result, graph_audit);
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Commands::EditClaudeMdTemplate { find, replace } => {
             let result = claude_md_cmd::edit_template(&find, &replace)?;
+            let input = serde_json::json!({
+                "find_sha256": sentinel_infrastructure::operational_tool_graph::sha256_json(
+                    &serde_json::json!(find)
+                ),
+                "replace_sha256": sentinel_infrastructure::operational_tool_graph::sha256_json(
+                    &serde_json::json!(replace)
+                ),
+            });
+            let graph_audit = claude_md_cmd::run_operational_tool_graph_audit(
+                "edit_claude_md_template",
+                &input,
+                &result,
+            )
+            .await?;
+            let result = claude_md_cmd::attach_operational_tool_graph_audit(result, graph_audit);
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Commands::RestartAllMcps => {
             let result = claude_md_cmd::restart_all_mcps()?;
+            let graph_audit = claude_md_cmd::run_operational_tool_graph_audit(
+                "restart_all_mcps",
+                &serde_json::json!({}),
+                &result,
+            )
+            .await?;
+            let result = claude_md_cmd::attach_operational_tool_graph_audit(result, graph_audit);
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
@@ -1084,45 +1098,31 @@ fn run_manifest(action: ManifestAction) -> anyhow::Result<()> {
                 dry_run,
             })
         }
-        ManifestAction::Verify {
-            config_dir,
-            pubkey,
-            strict,
-            hash_only,
-        } => {
-            if strict && hash_only {
-                anyhow::bail!("--strict and --hash-only are mutually exclusive");
-            }
-            let strict_override = if strict {
-                Some(true)
-            } else if hash_only {
-                Some(false)
-            } else {
-                None
-            };
+        ManifestAction::Verify { config_dir, pubkey } => {
             let cd = resolve_config_dir(config_dir);
             let report = manifest_cmd::run_verify(manifest_cmd::VerifyOptions {
                 config_dir: cd,
                 pubkey_hex: pubkey,
-                strict: strict_override,
             })?;
             use sentinel_domain::step_manifest::ManifestCheck;
             for entry in &report.entries {
                 let tag = match &entry.result {
                     Ok(ManifestCheck::SignedOk) => "OK (signed)".to_string(),
-                    Ok(ManifestCheck::HashOnlyOk) => "OK (hash)".to_string(),
+                    Ok(ManifestCheck::HashOnlyOk) => "FAIL: hash-only entry".to_string(),
                     Err(e) => format!("FAIL: {e}"),
                 };
                 println!("  {} {tag}", entry.name);
             }
             println!(
-                "summary: {} signed-ok, {} hash-ok, {} failures",
+                "summary: {} signed-ok, {} failures",
                 report.signed_ok,
-                report.hash_only_ok,
                 report.failures.len()
             );
             if !report.ok() {
-                anyhow::bail!("manifest verify failed for {} entries", report.failures.len());
+                anyhow::bail!(
+                    "manifest verify failed for {} entries",
+                    report.failures.len()
+                );
             }
             Ok(())
         }

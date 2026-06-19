@@ -25,16 +25,14 @@
 //! next step's step_gate sees the proof, allows the next tool call
 //! ```
 //!
-//! # What this hook does today (M1.4 stub scope)
+//! # What this hook does
 //!
 //! 1. Detects `PostToolUse` for a step tool (same `mcp__skills__<skill>__step_<id>`
 //!    naming as `step_gate`).
 //! 2. Resolves the step's description from the loaded step config (so the
 //!    judge prompt knows what "sufficient" looks like for this specific step).
 //! 3. Gathers a step-shaped [`Evidence`] from the tool input/output.
-//! 4. Invokes the [`JudgeService`] trait (default impl falls through to the
-//!    existing `evaluate` so `MultiModelJudge` and `FallbackJudge` keep
-//!    working without changes).
+//! 4. Invokes the [`JudgeService`] trait.
 //! 5. Returns the [`JudgeVerdict`] inside a [`StepJudgeOutcome`] struct that
 //!    M1.5's `submit_step_complete` will consume.
 //!
@@ -60,7 +58,7 @@
 
 use std::collections::HashMap;
 
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_domain::evidence::{Evidence, ToolCallEvidence, ToolResultEvidence};
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::state::{BaselineCounter, SessionState};
@@ -97,13 +95,12 @@ impl StepToolRef {
 pub enum StepJudgeOutcome {
     /// Hook fired but the tool wasn't a step tool — no verdict, no-op.
     NotAStepTool,
-    /// Skill has no step config registered — backwards-compat, no verdict.
-    NoStepConfig,
+    /// Skill has no step config registered. Step tools must have a loaded
+    /// LangGraph/StepProof plan.
+    MissingStepConfig { skill: String },
     /// Skill has a step config but the specific `step_id` wasn't found in any
     /// phase. Possible misconfig or stale tool name.
     UnknownStep { skill: String, step_id: String },
-    /// The judge was skipped for this invocation — no verdict produced.
-    Skipped,
     /// Judge ran, here's the verdict + the resolved coordinates so M1.5 can
     /// build the `StepProof` without reparsing the tool name.
     Judged {
@@ -215,8 +212,7 @@ fn gather_evidence(input: &HookInput) -> Evidence {
         // or a top-level boolean false ⇒ failure. Otherwise assume success.
         // Real M1.5 evidence work will replace this with structured exit
         // codes from sentinel's tool-result capture path.
-        let success =
-            tool_result.get("error").is_none() && tool_result.as_bool().is_none_or(|b| b);
+        let success = tool_result.get("error").is_none() && tool_result.as_bool().is_none_or(|b| b);
         evidence.tool_results.push(ToolResultEvidence {
             tool: tool_name.clone(),
             result_summary: truncate_json_summary(tool_result, 500),
@@ -269,15 +265,36 @@ pub async fn process(
 
     let skill_steps = match step_configs.get(&step_ref.skill) {
         Some(s) => s,
-        None => return (HookOutput::allow(), StepJudgeOutcome::NoStepConfig),
+        None => {
+            let message = format!(
+                "[Sentinel-Authority] step_judge: no verdict for skill '{}' \
+                 step '{}' — no step config is loaded. Step tools must be \
+                 backed by a configured LangGraph/StepProof plan; \
+                 submit_step_complete will not seal this step.",
+                step_ref.skill, step_ref.step_id,
+            );
+            return (
+                HookOutput::inject_context(HookEvent::PostToolUse, message),
+                StepJudgeOutcome::MissingStepConfig {
+                    skill: step_ref.skill,
+                },
+            );
+        }
     };
 
     let (phase_id, step_description, baseline_threshold, step_judge_model) =
         match locate_step(skill_steps, &step_ref.step_id) {
             Some((p, d, t, j)) => (p.to_string(), d.to_string(), t, j),
             None => {
+                let message = format!(
+                    "[Sentinel-Authority] step_judge: no verdict for skill '{}' \
+                     step '{}' — the step is not declared in the loaded \
+                     LangGraph/StepProof plan; submit_step_complete will not \
+                     seal this step.",
+                    step_ref.skill, step_ref.step_id,
+                );
                 return (
-                    HookOutput::allow(),
+                    HookOutput::inject_context(HookEvent::PostToolUse, message),
                     StepJudgeOutcome::UnknownStep {
                         skill: step_ref.skill,
                         step_id: step_ref.step_id,
@@ -371,7 +388,15 @@ pub async fn process(
             }
         }
         Err(e) => (
-            HookOutput::allow(),
+            HookOutput::inject_context(
+                HookEvent::PostToolUse,
+                format!(
+                    "[Sentinel-Authority] step_judge: judge failed for skill '{}' \
+                     step '{}' — submit_step_complete will not seal this step. \
+                     Error: {e:#}",
+                    step_ref.skill, step_ref.step_id,
+                ),
+            ),
             StepJudgeOutcome::JudgeError {
                 skill: step_ref.skill,
                 step_id: step_ref.step_id,
@@ -426,8 +451,7 @@ mod tests {
             Ok(self.verdict.clone())
         }
         // Intentionally NOT overriding evaluate_step — exercises the trait's
-        // default impl that delegates to evaluate, ensuring backwards
-        // compat for existing implementers (FallbackJudge, MultiModelJudge).
+        // shared implementation that delegates to evaluate.
     }
 
     struct ErroringJudge;
@@ -515,18 +539,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_step_config_for_skill_is_a_quiet_noop() {
+    async fn no_step_config_for_skill_surfaces_authority_context() {
         let judge = RecordingJudge::passing();
         let configs = HashMap::new(); // empty — no skill registered
         let mut state = fresh_state();
-        let (_, outcome) = process(
+        let (out, outcome) = process(
             &step_input("mcp__skills__deploy__step_1"),
             &mut state,
             &configs,
             &judge,
         )
         .await;
-        assert!(matches!(outcome, StepJudgeOutcome::NoStepConfig));
+        assert!(matches!(
+            outcome,
+            StepJudgeOutcome::MissingStepConfig { skill } if skill == "deploy"
+        ));
+        let context = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .expect("missing step config must inject authority context");
+        assert!(
+            context.contains("no step config is loaded")
+                && context.contains("submit_step_complete will not seal"),
+            "unexpected context: {context}"
+        );
         assert_eq!(judge.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -534,7 +570,7 @@ mod tests {
     async fn unknown_step_id_in_known_skill_reports_error_outcome() {
         let judge = RecordingJudge::passing();
         let mut state = fresh_state();
-        let (_, outcome) = process(
+        let (out, outcome) = process(
             &step_input("mcp__skills__linear__step_99"),
             &mut state,
             &linear_step_config(),
@@ -548,6 +584,15 @@ mod tests {
             }
             other => panic!("expected UnknownStep, got {other:?}"),
         }
+        let context = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .expect("unknown step must inject authority context");
+        assert!(
+            context.contains("not declared in the loaded LangGraph/StepProof plan")
+                && context.contains("submit_step_complete will not"),
+            "unexpected context: {context}"
+        );
         assert_eq!(judge.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -617,7 +662,7 @@ mod tests {
     async fn judge_call_failure_surfaces_as_judge_error() {
         let judge = ErroringJudge;
         let mut state = fresh_state();
-        let (_, outcome) = process(
+        let (out, outcome) = process(
             &step_input("mcp__skills__linear__step_1"),
             &mut state,
             &linear_step_config(),
@@ -636,6 +681,15 @@ mod tests {
             }
             other => panic!("expected JudgeError, got {other:?}"),
         }
+        let context = out
+            .hook_specific_output
+            .and_then(|h| h.additional_context)
+            .expect("judge failure must inject authority context");
+        assert!(
+            context.contains("judge failed")
+                && context.contains("submit_step_complete will not seal"),
+            "unexpected context: {context}"
+        );
     }
 
     // ── M1.8 cold-start baseline tests ─────────────────────────────────

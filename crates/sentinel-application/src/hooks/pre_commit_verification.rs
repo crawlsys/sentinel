@@ -52,11 +52,59 @@ fn session_has_recorded_evidence(fs: &dyn super::FileSystemPort, session_id: &st
     }
 }
 
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+}
+
 // `BUILD_CONFIG_MARKERS`, `DOCS_ONLY_EXTENSIONS`, and the `is_docs_only_path`
 // classifier live in `sentinel_domain::repo_kind` — pure rules with no IO.
 // The hook keeps the IO half of `is_content_only_repo` (does file X exist?)
-// and consults the marker list from the domain.
+// and queries the marker list from the domain.
 use sentinel_domain::repo_kind::{is_docs_only_path, BUILD_CONFIG_MARKERS};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreCommitAction {
+    None,
+    Commit,
+    Push,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreCommitDecision {
+    Allow,
+    AllowContentOnlyRepo,
+    AllowDocsOnly,
+    AllowSignedOverride,
+    AllowRecordedEvidence,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreCommitVerificationEvaluation {
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub bash_tool: bool,
+    pub command_present: bool,
+    pub action: PreCommitAction,
+    pub content_only_repo: bool,
+    pub docs_only_change: bool,
+    pub signed_override_active: bool,
+    pub recorded_evidence_present: bool,
+    pub session_id_present: bool,
+    pub should_block: bool,
+    pub decision: PreCommitDecision,
+}
+
+impl PreCommitVerificationEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.bash_tool && !matches!(self.action, PreCommitAction::None)
+    }
+}
 
 /// Check if the current working directory is a content-only repo
 /// (no build config files → no test toolchain → nothing to verify).
@@ -110,13 +158,25 @@ pub fn process(
     ctx: &super::HookContext<'_>,
     state: &SessionState,
 ) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
-    let override_path = default_override_path(ctx.fs, session_id);
-    process_with_override(input, &override_path, session_id, ctx.fs, ctx.git, state)
+    let evaluation = evaluate(input, ctx, state);
+    output_from_evaluation(input, &evaluation)
+}
+
+pub fn evaluate(
+    input: &HookInput,
+    ctx: &super::HookContext<'_>,
+    state: &SessionState,
+) -> PreCommitVerificationEvaluation {
+    let session_id = concrete_session_id(input);
+    let override_path = session_id
+        .map(|session_id| default_override_path(ctx.fs, session_id))
+        .unwrap_or_default();
+    evaluate_with_override(input, &override_path, session_id, ctx.fs, ctx.git, state)
 }
 
 /// Internal: process with explicit override path + git port (for testability).
 /// Tests call this directly with a stub `GitStatusPort` for diff determinism.
+#[cfg(test)]
 fn process_with_override(
     input: &HookInput,
     override_path: &std::path::Path,
@@ -125,12 +185,21 @@ fn process_with_override(
     git: &dyn super::GitStatusPort,
     _state: &SessionState,
 ) -> HookOutput {
-    // Only act on Bash tool calls
-    let tool = match &input.tool_name {
-        Some(name) if name == "Bash" => name.as_str(),
-        _ => return HookOutput::allow(),
-    };
-    let _ = tool;
+    let evaluation =
+        evaluate_with_override(input, override_path, Some(session_id), fs, git, _state);
+    output_from_evaluation(input, &evaluation)
+}
+
+pub fn evaluate_with_override(
+    input: &HookInput,
+    override_path: &std::path::Path,
+    session_id: Option<&str>,
+    fs: &dyn super::FileSystemPort,
+    git: &dyn super::GitStatusPort,
+    _state: &SessionState,
+) -> PreCommitVerificationEvaluation {
+    let tool = input.tool_name.clone();
+    let bash_tool = matches!(input.tool_name.as_deref(), Some("Bash"));
 
     // Extract command from tool_input
     let command = input
@@ -138,62 +207,190 @@ fn process_with_override(
         .as_ref()
         .and_then(|ti| ti.get("command"))
         .and_then(|c| c.as_str())
-        .unwrap_or("");
+        .map(str::to_string);
+    let command_present = command.as_deref().is_some_and(|cmd| !cmd.is_empty());
+
+    if !bash_tool {
+        return base_evaluation(
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            PreCommitAction::None,
+            session_id,
+        );
+    }
+    let Some(command_text) = command.as_deref() else {
+        return base_evaluation(
+            tool,
+            command,
+            bash_tool,
+            command_present,
+            PreCommitAction::None,
+            session_id,
+        );
+    };
 
     // Check if this is a git commit or git push
     let git_re = match Regex::new(r"\bgit\s+(commit|push)\b") {
         Ok(re) => re,
-        Err(_) => return HookOutput::allow(),
+        Err(_) => {
+            return base_evaluation(
+                tool,
+                command,
+                bash_tool,
+                command_present,
+                PreCommitAction::None,
+                session_id,
+            );
+        }
     };
 
-    let caps = match git_re.captures(command) {
+    let caps = match git_re.captures(command_text) {
         Some(c) => c,
-        None => return HookOutput::allow(),
+        None => {
+            return base_evaluation(
+                tool,
+                command,
+                bash_tool,
+                command_present,
+                PreCommitAction::None,
+                session_id,
+            );
+        }
     };
 
-    let action = caps.get(1).map_or("commit", |m| m.as_str());
-    let action_gerund = if action == "commit" {
-        "Committing"
+    let action = if caps.get(1).is_some_and(|m| m.as_str() == "push") {
+        PreCommitAction::Push
     } else {
-        "Pushing"
+        PreCommitAction::Commit
     };
 
     // Skip verification for content-only repos (no package.json, Cargo.toml, etc.)
     // These repos have no test toolchain — requiring evidence is nonsensical.
-    if is_content_only_repo(input.cwd.as_deref()) {
-        eprintln!("[sentinel] pre-commit-verify: content-only repo (no build config), skipping");
-        return HookOutput::allow();
-    }
+    let content_only_repo = is_content_only_repo(input.cwd.as_deref());
 
     // Skip verification for docs-only commits/pushes (markdown, config, YAML, etc.)
     // These files have no tests to run — requiring evidence is nonsensical.
     let cwd = input.cwd.as_deref().unwrap_or(".");
-    if is_docs_only_commit_with(command, git, cwd) {
-        return HookOutput::allow();
-    }
+    let docs_only_change = !content_only_repo && is_docs_only_commit_with(command_text, git, cwd);
 
     // Check signed override file (Attack #47: replaces mtime-only check)
-    if super::hygiene_override::is_signed_override_active(
-        fs,
-        override_path,
-        "verification",
-        session_id,
-    ) {
-        return HookOutput::allow();
-    }
+    let signed_override_active = !content_only_repo
+        && !docs_only_change
+        && session_id.is_some_and(|session_id| {
+            super::hygiene_override::is_signed_override_active(
+                fs,
+                override_path,
+                "verification",
+                session_id,
+            )
+        });
 
     // Look up sentinel-recorded evidence for THIS session_id. The recorder
     // hook writes the file on PostToolUse with the same session_id we get
     // here, so the lookup is exact — no transcript parsing required.
-    if session_has_recorded_evidence(fs, session_id) {
-        eprintln!("[sentinel] pre-commit-verify: evidence file present for session '{session_id}'");
-        return HookOutput::allow();
+    let recorded_evidence_present = !content_only_repo
+        && !docs_only_change
+        && !signed_override_active
+        && session_id.is_some_and(|session_id| session_has_recorded_evidence(fs, session_id));
+
+    let decision = if content_only_repo {
+        PreCommitDecision::AllowContentOnlyRepo
+    } else if docs_only_change {
+        PreCommitDecision::AllowDocsOnly
+    } else if signed_override_active {
+        PreCommitDecision::AllowSignedOverride
+    } else if recorded_evidence_present {
+        PreCommitDecision::AllowRecordedEvidence
+    } else {
+        PreCommitDecision::Block
+    };
+
+    PreCommitVerificationEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        action,
+        content_only_repo,
+        docs_only_change,
+        signed_override_active,
+        recorded_evidence_present,
+        session_id_present: session_id.is_some(),
+        should_block: matches!(decision, PreCommitDecision::Block),
+        decision,
+    }
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    command: Option<String>,
+    bash_tool: bool,
+    command_present: bool,
+    action: PreCommitAction,
+    session_id: Option<&str>,
+) -> PreCommitVerificationEvaluation {
+    PreCommitVerificationEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present,
+        action,
+        content_only_repo: false,
+        docs_only_change: false,
+        signed_override_active: false,
+        recorded_evidence_present: false,
+        session_id_present: session_id.is_some(),
+        should_block: false,
+        decision: PreCommitDecision::Allow,
+    }
+}
+
+pub fn output_from_evaluation(
+    input: &HookInput,
+    evaluation: &PreCommitVerificationEvaluation,
+) -> HookOutput {
+    match evaluation.decision {
+        PreCommitDecision::Allow => return HookOutput::allow(),
+        PreCommitDecision::AllowContentOnlyRepo => {
+            eprintln!(
+                "[sentinel] pre-commit-verify: content-only repo (no build config), skipping"
+            );
+            return HookOutput::allow();
+        }
+        PreCommitDecision::AllowDocsOnly | PreCommitDecision::AllowSignedOverride => {
+            return HookOutput::allow();
+        }
+        PreCommitDecision::AllowRecordedEvidence => {
+            if let Some(session_id) = concrete_session_id(input) {
+                eprintln!(
+                    "[sentinel] pre-commit-verify: evidence file present for session '{session_id}'"
+                );
+            } else {
+                eprintln!(
+                    "[sentinel] pre-commit-verify: evidence decision produced without a session id"
+                );
+            }
+            return HookOutput::allow();
+        }
+        PreCommitDecision::Block => {}
     }
 
+    let action_gerund = match evaluation.action {
+        PreCommitAction::Push => "Pushing",
+        _ => "Committing",
+    };
     // No evidence found — BLOCK
-    eprintln!(
-        "[sentinel] pre-commit-verify: BLOCKING — no recorded test evidence for session '{session_id}'"
-    );
+    if let Some(session_id) = concrete_session_id(input) {
+        eprintln!(
+            "[sentinel] pre-commit-verify: BLOCKING — no recorded test evidence for session '{session_id}'"
+        );
+    } else {
+        eprintln!(
+            "[sentinel] pre-commit-verify: BLOCKING — no recorded test evidence; session id missing"
+        );
+    }
     let message = format!(
         "\
 +============================================================+
@@ -237,19 +434,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &Path) -> bool {
@@ -258,10 +468,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
@@ -351,19 +568,31 @@ mod tests {
         // Stub git: pretend there are code files changed (not docs-only).
         struct StubCodeDiff;
         impl super::super::GitStatusPort for StubCodeDiff {
-            fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_uncommitted_changes(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
-            fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+            fn changed_files(
+                &self,
+                _: &str,
+            ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
                 Ok(vec![])
             }
-            fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+            fn current_branch(
+                &self,
+                _: &str,
+            ) -> Result<String, sentinel_domain::port_errors::GitError> {
                 Ok("main".into())
             }
             fn is_worktree(&self, _: &str) -> bool {
                 false
             }
-            fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_unpushed_commits(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
             fn repo_root(&self, _: &str) -> Option<String> {
@@ -378,6 +607,9 @@ mod tests {
             fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
                 None
             }
+            fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 Some(vec!["src/main.rs".to_string()])
             }
@@ -386,6 +618,9 @@ mod tests {
             }
             fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
                 Vec::new()
+            }
+            fn head_sha(&self, _: &str) -> Option<String> {
+                None
             }
         }
         let output = process_with_override(
@@ -442,6 +677,59 @@ mod tests {
         };
         let output = process_with_override(&input, &override_path, session_id, &fs, &git, &nb());
         assert_eq!(output.blocked, Some(true));
+    }
+
+    #[test]
+    fn test_missing_session_id_ignores_unknown_evidence_and_override() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmpdir.path().join("Cargo.toml"),
+            "[package]\nname = \"pre-commit-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        seed_evidence(tmpdir.path(), "unknown", "cargo test");
+
+        let fs = ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        };
+        let override_path = tmpdir.path().join("unknown-override");
+        hygiene_override::write_signed_override_for_test(
+            &fs,
+            &override_path,
+            "verification",
+            "unknown",
+        );
+
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": "git commit -m 'no session'"})),
+            cwd: Some(tmpdir.path().to_string_lossy().to_string()),
+            session_id: None,
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_with_override(
+            &input,
+            &override_path,
+            None,
+            &fs,
+            &crate::hooks::test_support::StubGit,
+            &nb(),
+        );
+
+        assert!(!evaluation.session_id_present);
+        assert!(!evaluation.signed_override_active);
+        assert!(!evaluation.recorded_evidence_present);
+        assert_eq!(evaluation.decision, PreCommitDecision::Block);
+        assert!(evaluation.should_block);
+
+        let output = output_from_evaluation(&input, &evaluation);
+        assert_eq!(output.blocked, Some(true));
+        assert!(!output
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unknown"));
     }
 
     #[test]
@@ -582,19 +870,31 @@ mod tests {
     fn test_is_docs_only_not_commit() {
         struct NoFiles;
         impl super::super::GitStatusPort for NoFiles {
-            fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_uncommitted_changes(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
-            fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+            fn changed_files(
+                &self,
+                _: &str,
+            ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
                 Ok(vec![])
             }
-            fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+            fn current_branch(
+                &self,
+                _: &str,
+            ) -> Result<String, sentinel_domain::port_errors::GitError> {
                 Ok("main".into())
             }
             fn is_worktree(&self, _: &str) -> bool {
                 false
             }
-            fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            fn has_unpushed_commits(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
                 Ok(false)
             }
             fn repo_root(&self, _: &str) -> Option<String> {
@@ -609,6 +909,9 @@ mod tests {
             fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
                 None
             }
+            fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
             fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
                 Some(vec![])
             }
@@ -617,6 +920,9 @@ mod tests {
             }
             fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
                 Vec::new()
+            }
+            fn head_sha(&self, _: &str) -> Option<String> {
+                None
             }
         }
         // Non-commit/push commands short-circuit before touching git.

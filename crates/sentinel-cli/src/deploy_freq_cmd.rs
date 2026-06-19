@@ -11,33 +11,45 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
-use sentinel_application::deploy_freq::{append_deploy, aggregate, DeployRecord, DoraTier};
+use sentinel_application::deploy_freq::{aggregate, append_deploy, DeployRecord, DoraTier};
 use std::path::PathBuf;
 
 fn metrics_dir() -> Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    Ok(home.join(".claude").join("sentinel").join("metrics"))
+    Ok(sentinel_infrastructure::paths::sentinel_root().join("metrics"))
 }
 
 /// Run `sentinel deploy-freq aggregate`.
 ///
 /// # Errors
 /// Returns the aggregation error (IO, parse, or write).
-pub fn run_aggregate() -> Result<()> {
+pub async fn run_aggregate() -> Result<()> {
     let dir = metrics_dir()?;
     let deploys = dir.join("deploys.jsonl");
     let summary = dir.join("deploys-summary.json");
+    let graph_runs = summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Deploy Frequency".bold());
     println!("Source:  {}", deploys.display());
     println!("Summary: {}", summary.display());
+    println!("Graph:   {}", graph_runs.display());
     println!();
 
     let s = aggregate(&deploys, &summary).context("aggregate deploys")?;
+    let graph_audit = crate::deploy_freq_graph::run_deploy_frequency_graph_audit(&s, &graph_runs)
+        .await
+        .context("deploy frequency graph audit failed")?;
     println!("{}", "Summary".bold());
     println!("  Records scanned:    {}", s.records_scanned);
     println!("  Repo/env pairs:     {}", s.aggregates.len());
+    println!(
+        "  Graph decision:     {} ({})",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("deploy frequency graph audit requires checkpoint")
+            .dimmed()
+    );
     println!();
 
     if s.aggregates.is_empty() {
@@ -50,7 +62,10 @@ pub fn run_aggregate() -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", "Per repo/env (sorted by 30d rate, descending):".bold());
+    println!(
+        "{}",
+        "Per repo/env (sorted by 30d rate, descending):".bold()
+    );
     println!(
         "  {:<26}  {:>8}  {:>6}  {:>6}  {:>10}  {:>10}",
         "repo/env", "tier", "7d", "30d", "rate/d 7d", "rate/d 30d"
@@ -142,4 +157,3 @@ fn tier_label(tier: DoraTier) -> colored::ColoredString {
         DoraTier::Low => "low".red(),
     }
 }
-

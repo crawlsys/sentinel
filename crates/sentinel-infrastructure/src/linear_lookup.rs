@@ -2,23 +2,23 @@
 //!
 //! Implements [`LinearLookupPort`](sentinel_domain::ports::LinearLookupPort)
 //! with a **blocking** HTTP call so the synchronous `linear_pm_gate` hook can
-//! consult live Linear at pickup without an async runtime. It fetches exactly
+//! query live Linear at pickup without an async runtime. It fetches exactly
 //! the one ticket being started and normalizes the response into the same JSON
 //! shape as the on-disk cache, so the gate's existing parsers work unchanged.
 //!
-//! Fast + fail-soft by design: a short timeout, and `None` on any error
-//! (missing token, network failure, ticket not found) so the gate falls back
-//! to the cache rather than blocking pickup on a flaky network.
+//! Fast + fail-closed by design: a short timeout, and typed errors for lookup
+//! failures so PM enforcement never substitutes stale local state for live
+//! Linear authority.
 
 use std::time::Duration;
 
-use sentinel_domain::ports::LinearLookupPort;
+use sentinel_domain::ports::{LinearLookupError, LinearLookupPort};
 use serde_json::Value;
 
 /// Linear GraphQL endpoint.
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
-/// Per-request timeout — the gate has a tight budget; better to fall back to
-/// the cache than to stall a pickup.
+/// Per-request timeout. The gate has a tight budget and blocks the start when
+/// Linear cannot answer within it.
 const TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// Blocking single-issue Linear lookup. Holds a reqwest blocking client and
@@ -29,56 +29,85 @@ pub struct LinearLookup {
 }
 
 impl LinearLookup {
-    /// Build from the `SENTINEL_LINEAR_TOKEN` env var. Returns `None` when the
-    /// token is absent (so the gate simply uses the cache) or the blocking
-    /// client can't be constructed.
-    #[must_use]
-    pub fn from_env() -> Option<Self> {
-        let token = std::env::var("SENTINEL_LINEAR_TOKEN")
+    /// Build from the `SENTINEL_LINEAR_TOKEN` env var. Returns `Ok(None)` only
+    /// when the token is absent; the PM gate will fail closed for targeted
+    /// Linear start attempts until live authority is configured.
+    pub fn from_env() -> Result<Option<Self>, LinearLookupError> {
+        let Some(token) = std::env::var("SENTINEL_LINEAR_TOKEN")
             .ok()
-            .filter(|t| !t.is_empty())?;
+            .filter(|t| !t.is_empty())
+        else {
+            return Ok(None);
+        };
         let client = reqwest::blocking::Client::builder()
             .timeout(TIMEOUT)
             .build()
-            .ok()?;
-        Some(Self { client, token })
+            .map_err(|err| {
+                LinearLookupError::Transport(format!("failed to build Linear HTTP client: {err}"))
+            })?;
+        Ok(Some(Self { client, token }))
     }
 
     /// Construct from an explicit token (used in tests against a mock server).
-    #[must_use]
-    pub fn with_token(token: String) -> Option<Self> {
+    pub fn with_token(token: String) -> Result<Self, LinearLookupError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(TIMEOUT)
             .build()
-            .ok()?;
-        Some(Self { client, token })
+            .map_err(|err| {
+                LinearLookupError::Transport(format!("failed to build Linear HTTP client: {err}"))
+            })?;
+        Ok(Self { client, token })
     }
 }
 
 impl LinearLookupPort for LinearLookup {
-    fn fetch_issue(&self, identifier: &str) -> Option<Value> {
+    fn fetch_issue(&self, identifier: &str) -> Result<Value, LinearLookupError> {
         // Single-issue query covering every field the gate reads. Mirrors the
         // enforcer's readiness query so the two stay consistent.
+        let id_literal = serde_json::to_string(identifier).map_err(|err| {
+            LinearLookupError::Decode(format!("failed to encode Linear issue id: {err}"))
+        })?;
         let query = format!(
-            r#"{{"query":"query{{issue(id:\"{identifier}\"){{identifier estimate priority \
+            "query{{issue(id:{id_literal}){{identifier estimate priority \
 description state{{name type}} labels{{nodes{{name}}}} assignee{{id displayName}} \
 projectMilestone{{id name}} project{{id projectMilestones{{nodes{{id}}}}}} \
-inverseRelations{{nodes{{type issue{{identifier state{{type}}}}}}}}}}}}"}}"#
+inverseRelations{{nodes{{type issue{{identifier state{{type}}}}}}}}}}}}"
         );
+        let body = serde_json::json!({ "query": query });
         let resp = self
             .client
             .post(LINEAR_GRAPHQL_URL)
             .header("Authorization", &self.token)
             .header("Content-Type", "application/json")
-            .body(query)
+            .json(&body)
             .send()
-            .ok()?;
-        let json: Value = resp.json().ok()?;
-        let issue = json.get("data")?.get("issue")?;
-        if issue.is_null() {
-            return None;
+            .map_err(|err| LinearLookupError::Transport(err.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LinearLookupError::Transport(format!(
+                "Linear GraphQL returned HTTP {status}"
+            )));
         }
-        Some(normalize(issue))
+        let json: Value = resp
+            .json()
+            .map_err(|err| LinearLookupError::Decode(err.to_string()))?;
+        if let Some(errors) = json.get("errors").and_then(Value::as_array) {
+            if !errors.is_empty() {
+                return Err(LinearLookupError::MalformedResponse(format!(
+                    "GraphQL errors for {identifier}: {errors:?}"
+                )));
+            }
+        }
+        let issue = json
+            .get("data")
+            .and_then(|data| data.get("issue"))
+            .ok_or_else(|| {
+                LinearLookupError::MalformedResponse(format!("missing data.issue for {identifier}"))
+            })?;
+        if issue.is_null() {
+            return Err(LinearLookupError::MissingIssue(identifier.to_string()));
+        }
+        Ok(normalize(issue))
     }
 }
 

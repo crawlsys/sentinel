@@ -35,8 +35,7 @@ fn every_registered_hook_is_dispatched_or_a_known_helper() {
         // (`mk_ctx("<name>")`) — both forms appear at real call-sites.
         let module_call = format!("hooks::{hook}::");
         let metrics_ctx = format!("mk_ctx(\"{hook}\")");
-        let dispatched =
-            HOOK_CMD_SRC.contains(&module_call) || HOOK_CMD_SRC.contains(&metrics_ctx);
+        let dispatched = HOOK_CMD_SRC.contains(&module_call) || HOOK_CMD_SRC.contains(&metrics_ctx);
         if !dispatched {
             dormant.push(hook);
         }

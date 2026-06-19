@@ -187,7 +187,7 @@ pub struct WorkflowStep {
 
     /// **Circuit breaker (M4.4)**. See [`CircuitBreaker`]. Default
     /// (`failure_threshold=0`) means no breaker — opt-in for skills
-    /// that may degrade and need fallback routing.
+    /// that should trip to a declared recovery path after repeated failures.
     #[serde(default)]
     pub circuit_breaker: CircuitBreaker,
 
@@ -195,7 +195,7 @@ pub struct WorkflowStep {
     //
     // Cross-skill handoff contracts for the federated step namespace.
     // All four are optional; existing TOML configs without them load
-    // unchanged. Future federation compose validation passes consult
+    // unchanged. Future federation compose validation passes query
     // these to verify cross-skill contracts hold.
     /// **`@provides`** — artifact types this step's `StepProof` exposes
     /// for downstream consumers. Strings are skill-namespaced (e.g.
@@ -464,9 +464,9 @@ pub struct WorkflowState {
     #[serde(default)]
     pub current_step: Option<String>,
 
-    /// Recorded role-dyad sub-verdicts, keyed by phase id. Populated by
-    /// `record_reviewer_pass` / `record_tester_pass`, consulted by
-    /// `advance_sequential` when a phase declares `required_dyad`.
+    /// Recorded role-dyad sub-verdicts, keyed by phase id. The durable
+    /// LangGraph phase authority imports and enforces these verdicts when a
+    /// phase declares `required_dyad`.
     #[serde(default)]
     pub dyad_verdicts: BTreeMap<String, DyadVerdicts>,
 }
@@ -508,7 +508,7 @@ impl DyadVerdicts {
 }
 
 /// Runtime state of a single step within a phase
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepState {
     /// Step identifier (e.g., "0.1", "3.L2.3")
     pub step_id: String,
@@ -534,7 +534,7 @@ pub struct StepState {
 
 /// Status of a workflow step
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Pending,
     InProgress,
@@ -599,11 +599,12 @@ impl WorkflowState {
         }
     }
 
-    /// Advance to the next phase (idempotent — no-op if already completed).
+    /// Test-only direct phase transition helper.
     ///
-    /// **Sequential enforcement**: Only advances if all prior required phases
-    /// in the workflow are already complete. This prevents out-of-order phase
-    /// reads from unlocking tools (Attack #21). Returns true if advanced.
+    /// Production phase progression is owned by the durable LangGraph authority
+    /// in `sentinel-graph`; exposing this helper outside tests would recreate a
+    /// direct `WorkflowState` bypass around graph checkpoints.
+    #[cfg(test)]
     pub fn advance_sequential(
         &mut self,
         completed_phase_id: &str,
@@ -1206,8 +1207,10 @@ mod tests {
         // binary (2.1.114 decompile: handler `r7H` at line 1666), despite being
         // omitted from the public `sdk-tools.d.ts` type union. Must be exempt
         // so plan-mode entry isn't phase-gated.
-        assert!(state.should_block(&wf, "EnterPlanMode").is_none(),
-            "EnterPlanMode must be exempt — real tool in compiled binary, just hidden from sdk-tools.d.ts");
+        assert!(
+            state.should_block(&wf, "EnterPlanMode").is_none(),
+            "EnterPlanMode must be exempt — real tool in compiled binary, just hidden from sdk-tools.d.ts"
+        );
     }
 
     #[test]
@@ -1241,7 +1244,10 @@ mod tests {
                     required: true,
                     judge: JudgeModel::Opus,
                     description: "Review".to_string(),
-                    required_dyad: Some(RoleDyad { reviewer: true, tester: false }),
+                    required_dyad: Some(RoleDyad {
+                        reviewer: true,
+                        tester: false,
+                    }),
                 },
             ],
             blocked_tool_prefixes: Vec::new(),
@@ -1252,13 +1258,19 @@ mod tests {
 
     #[test]
     fn dyad_satisfied_logic() {
-        let both = RoleDyad { reviewer: true, tester: true };
+        let both = RoleDyad {
+            reviewer: true,
+            tester: true,
+        };
         assert!(!both.satisfied(false, false));
         assert!(!both.satisfied(true, false));
         assert!(!both.satisfied(false, true));
         assert!(both.satisfied(true, true));
         // Only-reviewer required: tester state is irrelevant.
-        let rev = RoleDyad { reviewer: true, tester: false };
+        let rev = RoleDyad {
+            reviewer: true,
+            tester: false,
+        };
         assert!(rev.satisfied(true, false));
         assert!(!rev.satisfied(false, false));
     }
@@ -1332,10 +1344,19 @@ mod tests {
             required: true,
             judge: JudgeModel::Opus,
             description: "r".into(),
-            required_dyad: Some(RoleDyad { reviewer: true, tester: true }),
+            required_dyad: Some(RoleDyad {
+                reviewer: true,
+                tester: true,
+            }),
         };
         let json = serde_json::to_string(&with_dyad).unwrap();
         let back: WorkflowPhase = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.required_dyad, Some(RoleDyad { reviewer: true, tester: true }));
+        assert_eq!(
+            back.required_dyad,
+            Some(RoleDyad {
+                reviewer: true,
+                tester: true
+            })
+        );
     }
 }

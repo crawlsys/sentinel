@@ -1,7 +1,7 @@
 //! Reversibility classification for actions.
 //!
 //! Per the A6 design (`docs/a6-reversibility-graded-tripwires.md`), every
-//! blast-radius gate in sentinel consults a single shared axis: the
+//! blast-radius gate in sentinel queries a single shared axis: the
 //! reversibility class of the action being gated. This module defines the
 //! four-value enum that consumers reason about. Subsequent phases add the
 //! `ReversibilityClassifierPort` trait and the layered classifier adapter

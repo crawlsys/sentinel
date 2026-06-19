@@ -59,7 +59,7 @@ use std::path::Path;
 /// every `require_*` filter AND its age exceeds `target_minutes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlaRule {
-    /// Human-readable identifier surfaced in breach records + dashboards.
+    /// Human-readable identifier surfaced in breach records + reports.
     /// Not required to be unique — duplicates fire independently.
     pub name: String,
     /// Allowed time-in-state before this rule trips, in minutes.

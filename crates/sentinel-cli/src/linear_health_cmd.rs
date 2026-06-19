@@ -8,20 +8,24 @@ use std::path::PathBuf;
 
 use sentinel_application::linear_health_score::scan_health_score;
 
-pub fn run() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+pub async fn run() -> Result<()> {
+    let sentinel_dir: PathBuf = sentinel_infrastructure::paths::sentinel_root();
     let linear_cache = sentinel_dir.join("linear-assigned.json");
     let output_summary = sentinel_dir.join("metrics").join("linear-health.json");
+    let graph_runs = output_summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Linear Health Score".bold());
     println!("Linear cache:   {}", linear_cache.display());
     println!("Output summary: {}", output_summary.display());
+    println!("Graph audit:    {}", graph_runs.display());
     println!();
 
-    let summary = scan_health_score(&linear_cache, &output_summary)
-        .context("scan_health_score failed")?;
+    let summary =
+        scan_health_score(&linear_cache, &output_summary).context("scan_health_score failed")?;
+    let graph_audit =
+        crate::linear_health_graph::run_linear_health_graph_audit(&summary, &graph_runs)
+            .await
+            .context("Linear health graph audit failed")?;
 
     if summary.issues_total == 0 {
         println!(
@@ -44,6 +48,15 @@ pub fn run() -> Result<()> {
         "  {} issues · score {} / 100 → {band}",
         summary.issues_total,
         summary.total_score.to_string().bold()
+    );
+    println!(
+        "  graph decision {} · {}",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("health graph audit requires checkpoint")
+            .dimmed()
     );
     println!();
     println!("  {:14} {:.1} / 30", "hygiene", summary.hygiene_score);

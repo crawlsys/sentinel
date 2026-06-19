@@ -23,7 +23,7 @@ Sentinel today is excellent scaffolding against an agent trying to help, and alm
 
 ## A-tier — high impact (8 items)
 
-A2 capability-aware routing • BA2 two-mode discovery • BA4 stakeholder interrogation protocol • A13 spec-challenge • A6+R3 reversibility-graded tripwires (replacing novelty) • A1 Magentic-One dual-ledger in Consul • A12 TheAgentCompany + BA-eval baseline • BA7 outcome attribution
+A2 capability-aware routing • BA2 two-mode discovery • BA4 stakeholder interrogation protocol • A13 spec-challenge • A6+R3 reversibility-graded tripwires (replacing novelty) • A1 Magentic-One dual-ledger in Legatus AI • A12 TheAgentCompany + BA-eval baseline • BA7 outcome attribution
 
 ## B-tier — medium impact (15 items)
 

@@ -10,14 +10,341 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use sentinel_domain::workflow::{SkillWorkflow, StepStatus, WorkflowState};
 
 use crate::judge_service::JudgeService;
+
+#[cfg(test)]
+fn test_graph_run_with_authority(mut graph_run: serde_json::Value) -> serde_json::Value {
+    let graph_state = graph_run
+        .get("state")
+        .cloned()
+        .expect("test graph run must include state");
+    let obj = graph_run
+        .as_object_mut()
+        .expect("test graph run must be an object");
+    obj.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_state".to_string(), graph_state);
+    graph_run
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestStepGraphAuthority {
+    states: std::sync::Mutex<std::collections::BTreeMap<(String, String), WorkflowState>>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl StepGraphAuthority for TestStepGraphAuthority {
+    async fn apply_step_status(
+        &self,
+        skill: &str,
+        session_id: &str,
+        _workflow: &SkillWorkflow,
+        phase_id: &str,
+        step_id: &str,
+        status: StepStatus,
+        summary: Option<String>,
+    ) -> Result<StepGraphApplyResult> {
+        let mut states = self.states.lock().unwrap();
+        let workflow_state = states
+            .entry((skill.to_string(), session_id.to_string()))
+            .or_insert_with(|| WorkflowState::new(skill, session_id));
+        if let Some(existing) = workflow_state
+            .step_states
+            .iter()
+            .find(|step| step.phase_id == phase_id && step.step_id == step_id)
+            .filter(|step| matches!(step.status, StepStatus::Completed | StepStatus::Skipped))
+        {
+            bail!(
+                "step '{step_id}' in phase '{phase_id}' for skill '{skill}' is already terminal with status '{:?}' in session '{session_id}'; replay the phase before changing sealed step state",
+                existing.status
+            );
+        }
+        workflow_state.update_step(phase_id, step_id, status, summary);
+        let workflow_state = workflow_state.clone();
+        let graph_state = serde_json::to_value(&workflow_state)?;
+        let checkpoint_id = format!("test-{session_id}-{phase_id}-{step_id}");
+        let graph_run = test_graph_run_with_authority(serde_json::json!({
+            "state": graph_state.clone(),
+            "latest_checkpoint": {
+                "checkpoint_id": checkpoint_id,
+                "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                "step_number": 1,
+                "state": graph_state.clone(),
+                "writes": [{
+                    "node_id": "START",
+                    "channel": "state",
+                    "ts": "2026-06-17T00:00:00Z",
+                }],
+            },
+            "checkpoints": [{
+                "checkpoint_id": checkpoint_id,
+                "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                "step_number": 1,
+                "state": graph_state.clone(),
+            }],
+            "writes": [{
+                "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                "checkpoint_id": checkpoint_id,
+                "step_number": 1,
+                "channel": "state",
+                "value": graph_state,
+            }],
+            "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
+        }));
+        Ok(StepGraphApplyResult {
+            workflow_state,
+            graph_run,
+        })
+    }
+}
+
+#[cfg(test)]
+fn test_step_workflow(skill: &str, phase_id: &str) -> SkillWorkflow {
+    SkillWorkflow {
+        skill: skill.to_string(),
+        phases: vec![sentinel_domain::workflow::WorkflowPhase {
+            id: phase_id.to_string(),
+            file: format!("{phase_id}.md"),
+            required: true,
+            judge: JudgeModel::Sonnet,
+            description: phase_id.to_string(),
+            required_dyad: None,
+        }],
+        blocked_tool_prefixes: Vec::new(),
+        blocked_bash_patterns: Vec::new(),
+        bash_allowlist: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn test_graph_topology(skill: &str, session_id: &str, phase_order: &[&str]) -> serde_json::Value {
+    let nodes: Vec<_> = phase_order
+        .iter()
+        .map(|phase| {
+            serde_json::json!({
+                "id": phase,
+                "deferred": false,
+                "barrier_on": [],
+                "metadata": {
+                    "sentinel.graph": "phase",
+                    "sentinel.node": phase,
+                    "sentinel.skill": skill,
+                    "sentinel.phase": phase,
+                    "sentinel.checkpointer_backend": "test",
+                    "sentinel.checkpointer_scope": "memory:test"
+                },
+                "has_error_handler": true,
+                "has_timeout_policy": true,
+                "interrupt_before": false,
+                "interrupt_after": true
+            })
+        })
+        .collect();
+    let mut edges = vec![serde_json::json!({
+        "from": "__start__",
+        "kind": "conditional",
+        "to": null
+    })];
+    edges.extend(phase_order.iter().map(|phase| {
+        serde_json::json!({
+            "from": phase,
+            "kind": "conditional",
+            "to": null
+        })
+    }));
+    serde_json::json!({
+        "skill": skill,
+        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+        "phase_order": phase_order,
+        "durable_checkpointer": true,
+        "checkpointer_backend": "test",
+        "checkpointer_scope": "memory:test",
+        "auto_checkpoint": true,
+        "max_iterations": 100,
+        "schemas": {
+            "state": {
+                "type": "object",
+                "x-sentinel": {
+                    "graph": "phase",
+                    "workflow_skill": skill,
+                    "authority": "langgraph"
+                }
+            },
+            "input": {
+                "type": "object"
+            },
+            "output": {
+                "type": "object"
+            },
+            "context": null
+        },
+        "nodes": nodes,
+        "edges": edges
+    })
+}
+
+#[cfg(test)]
+fn test_nonterminal_phase_graph_run(
+    skill: &str,
+    session_id: &str,
+    phase_id: &str,
+    custom_payload: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let graph_state = serde_json::json!({
+        "skill": skill,
+        "session_id": session_id,
+        "phase_order": [phase_id],
+        "current_phase": 0,
+        "completed_phases": [],
+        "complete": false,
+        "last_verdict": "fail"
+    });
+    let checkpoint_id = format!("checkpoint-{phase_id}");
+    let mut stream = vec![
+        serde_json::json!({
+            "event_type": "ExecutionComplete",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "values",
+            "payload_json": graph_state.clone()
+        }),
+        serde_json::json!({
+            "event_type": "Checkpoint",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "checkpoints",
+            "payload_json": {
+                "checkpoint_id": checkpoint_id,
+                "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                "step_number": 1,
+                "source": {
+                    "type": "stream_update",
+                    "node": phase_id
+                },
+                "state": graph_state.clone()
+            }
+        }),
+    ];
+    if let Some(payload) = custom_payload {
+        stream.push(serde_json::json!({
+            "event_type": "Custom",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "custom",
+            "payload_json": payload
+        }));
+    }
+
+    test_graph_run_with_authority(serde_json::json!({
+        "state": graph_state.clone(),
+        "latest_checkpoint": {
+            "checkpoint_id": checkpoint_id,
+            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+            "step_number": 1,
+            "state": graph_state.clone(),
+            "writes": [{
+                "node_id": phase_id,
+                "channel": "state",
+                "ts": "2026-06-17T00:00:00Z"
+            }]
+        },
+        "checkpoints": [{
+            "checkpoint_id": checkpoint_id,
+            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+            "step_number": 1,
+            "state": graph_state.clone()
+        }],
+        "writes": [{
+            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+            "checkpoint_id": checkpoint_id,
+            "step_number": 1,
+            "channel": "state",
+            "value": graph_state
+        }],
+        "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
+        "stream": stream
+    }))
+}
+
+/// Production authority for phase progression.
+///
+/// Implementations must drive the durable LangGraph phase graph and return the
+/// workflow projection that should be written back to [`SessionState`]. This
+/// keeps `ProofEngine` independent of filesystem/config details while making
+/// graph checkpointing the only phase-advance path.
+#[async_trait::async_trait]
+pub trait PhaseGraphAuthority: Send + Sync {
+    async fn apply_verdict(
+        &self,
+        skill: &str,
+        session_id: &str,
+        workflow: &SkillWorkflow,
+        phase_id: &str,
+        passed: bool,
+    ) -> Result<PhaseGraphApplyResult>;
+}
+
+/// Result of applying a phase verdict through the durable graph authority.
+#[derive(Debug, Clone)]
+pub struct PhaseGraphApplyResult {
+    pub workflow_state: WorkflowState,
+    pub graph_run: serde_json::Value,
+}
+
+/// Result of a successful phase proof submission plus graph execution evidence.
+#[derive(Debug, Clone)]
+pub struct PhaseSubmissionReport {
+    pub proof: PhaseProof,
+    pub phase_graph: PhaseGraphApplyResult,
+}
+
+/// Production authority for step-status persistence.
+///
+/// Step completion is proof-chain state and workflow state. Implementations
+/// must persist the workflow mutation through the durable LangGraph graph and
+/// return the checkpoint/write evidence that proves it happened.
+#[async_trait::async_trait]
+pub trait StepGraphAuthority: Send + Sync {
+    async fn apply_step_status(
+        &self,
+        skill: &str,
+        session_id: &str,
+        workflow: &SkillWorkflow,
+        phase_id: &str,
+        step_id: &str,
+        status: StepStatus,
+        summary: Option<String>,
+    ) -> Result<StepGraphApplyResult>;
+}
+
+/// Result of applying a step status through the durable graph authority.
+#[derive(Debug, Clone)]
+pub struct StepGraphApplyResult {
+    pub workflow_state: WorkflowState,
+    pub graph_run: serde_json::Value,
+}
+
+/// Result of a successful step proof submission plus graph mutation evidence.
+#[derive(Debug, Clone)]
+pub struct StepSubmissionReport {
+    pub proof: StepProof,
+    pub step_graph: StepGraphApplyResult,
+}
 
 /// Proof engine — builds and verifies proof chains
 pub struct ProofEngine {
@@ -27,12 +354,12 @@ pub struct ProofEngine {
     /// AI judge service
     judge: Arc<dyn JudgeService>,
 
-    /// Optional Ed25519 signing key (#4 — proof attestation). When present,
-    /// every sealed `StepProof` is signed over its `combined_hash`, so verifiers
+    /// Ed25519 signing key (#4 — proof attestation). When present,
+    /// every sealed phase/step proof is signed over its `combined_hash`, so verifiers
     /// can confirm "the holder of this key authored this chain entry" — beyond
     /// the SHA-256 hash chain. Loaded from `SENTINEL_SIGNING_KEY` by the CLI
-    /// layer (sentinel-domain stays pure / key-agnostic). `None` = unsigned
-    /// (hash-chain integrity only), the back-compat default.
+    /// layer (sentinel-domain stays pure / key-agnostic). `None` is accepted
+    /// only when a test/local caller has explicitly disabled mandatory signing.
     signing_key: Option<SigningKey>,
 
     /// When true, sealing REFUSES to proceed without a signing key — the
@@ -41,15 +368,25 @@ pub struct ProofEngine {
     /// rather than silently writing an unsigned (un-attestable) proof.
     signing_required: bool,
 
-    /// Optional Ed25519 PUBLIC key for verifying signatures during chain
+    /// Ed25519 PUBLIC key for verifying signatures during chain
     /// verification. Loaded from `SENTINEL_VERIFY_KEY` by the CLI layer. When
-    /// present, `verify_chain` checks every signed `StepProof` and fails closed
-    /// on a present-but-invalid signature (and on unsigned entries when
-    /// `signing_required`). Deliberately independent of `signing_key`: deriving
-    /// the verify key from the signing key would let whoever holds the signing
-    /// key (potentially the agent) re-sign a forged chain. `None` = signatures
-    /// not checked (hash-chain integrity only).
+    /// present, `verify_chain` checks every signable proof entry and fails
+    /// closed on unsigned or invalid signatures. Deliberately independent of
+    /// `signing_key`: deriving the verify key from the signing key would let
+    /// whoever holds the signing key (potentially the agent) re-sign a forged
+    /// chain. `None` makes verification invalid.
     verify_key: Option<VerifyingKey>,
+
+    /// Durable LangGraph phase authority. Phase-level proof submission fails
+    /// closed when a workflow definition is provided but this authority is not
+    /// wired; direct `WorkflowState::advance_sequential` mutation is not a
+    /// production alternate path.
+    phase_graph: Option<Arc<dyn PhaseGraphAuthority>>,
+
+    /// Durable LangGraph step authority. Step proof submission fails closed
+    /// when this authority is not wired; direct proof-chain appends are not a
+    /// production alternate path.
+    step_graph: Option<Arc<dyn StepGraphAuthority>>,
 }
 
 impl ProofEngine {
@@ -58,16 +395,19 @@ impl ProofEngine {
             state,
             judge,
             signing_key: None,
-            signing_required: false,
+            signing_required: true,
             verify_key: None,
+            phase_graph: None,
+            step_graph: None,
         }
     }
 
     /// Wire an Ed25519 signing key + the mandatory-signing posture (#4).
-    /// When `key` is `Some`, every sealed `StepProof` is signed. When
+    /// When `key` is `Some`, every sealed phase/step proof is signed. When
     /// `required` is true, sealing without a key is refused (error) — the
-    /// audit-grade attestation guarantee. Builder shape; existing callers
-    /// keep the unsigned default.
+    /// audit-grade attestation guarantee. Builder shape; tests and local
+    /// tooling can construct non-authoritative unsigned material only by
+    /// explicitly disabling the required posture.
     #[must_use]
     pub fn with_signing(mut self, key: Option<SigningKey>, required: bool) -> Self {
         self.signing_key = key;
@@ -76,13 +416,53 @@ impl ProofEngine {
     }
 
     /// Wire the Ed25519 PUBLIC verifying key used by [`verify_chain`]. When
-    /// `Some`, chain verification additionally checks every signed `StepProof`
-    /// and fails closed on a bad signature (and on unsigned entries when the
-    /// mandatory-signing posture is set). Loaded from `SENTINEL_VERIFY_KEY`.
+    /// `Some`, chain verification checks every signable proof entry and fails
+    /// closed on unsigned or invalid signatures. Loaded from
+    /// `SENTINEL_VERIFY_KEY`.
     #[must_use]
     pub fn with_verify_key(mut self, key: Option<VerifyingKey>) -> Self {
         self.verify_key = key;
         self
+    }
+
+    /// Wire the durable LangGraph phase authority used by
+    /// [`submit_evidence`](Self::submit_evidence).
+    #[must_use]
+    pub fn with_phase_graph_authority(mut self, authority: Arc<dyn PhaseGraphAuthority>) -> Self {
+        self.phase_graph = Some(authority);
+        self
+    }
+
+    /// Wire the durable LangGraph step authority used by
+    /// [`submit_step_evidence_report`](Self::submit_step_evidence_report).
+    #[must_use]
+    pub fn with_step_graph_authority(mut self, authority: Arc<dyn StepGraphAuthority>) -> Self {
+        self.step_graph = Some(authority);
+        self
+    }
+
+    /// Whether phase proof sealing has a durable LangGraph phase authority.
+    ///
+    /// Used by startup validators to make incomplete MCP/CLI authority wiring
+    /// fail before the first production tool call.
+    #[must_use]
+    pub fn has_phase_graph_authority(&self) -> bool {
+        self.phase_graph.is_some()
+    }
+
+    /// Whether step proof sealing has a durable LangGraph step authority.
+    ///
+    /// Used by startup validators to make incomplete MCP/CLI authority wiring
+    /// fail before the first production tool call.
+    #[must_use]
+    pub fn has_step_graph_authority(&self) -> bool {
+        self.step_graph.is_some()
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_test_step_graph_authority(self) -> Self {
+        self.with_step_graph_authority(Arc::new(TestStepGraphAuthority::default()))
     }
 
     /// Minimum seconds between resubmissions after a failure.
@@ -104,6 +484,34 @@ impl ProofEngine {
         workflow: Option<&sentinel_domain::workflow::SkillWorkflow>,
         dual: bool,
     ) -> Result<PhaseProof> {
+        Ok(self
+            .submit_evidence_report(
+                skill,
+                phase_id,
+                phase_objectives,
+                evidence,
+                judge_model,
+                started_at,
+                workflow,
+                dual,
+            )
+            .await?
+            .proof)
+    }
+
+    /// Submit evidence for a phase and return the sealed proof plus durable
+    /// LangGraph execution evidence.
+    pub async fn submit_evidence_report(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        phase_objectives: &str,
+        evidence: Evidence,
+        judge_model: JudgeModel,
+        started_at: chrono::DateTime<Utc>,
+        workflow: Option<&sentinel_domain::workflow::SkillWorkflow>,
+        dual: bool,
+    ) -> Result<PhaseSubmissionReport> {
         // Check resubmission rate limit. Cooldown logic + state inspection
         // both live on `SessionState` — we just ask whether a wait is needed.
         let phase_key = format!("{skill}:{phase_id}");
@@ -121,12 +529,31 @@ impl ProofEngine {
             }
         }
 
+        let workflow = workflow.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Phase '{phase_id}' for skill '{skill}' cannot be judged or advanced — no workflow definition provided. \
+                 ProofEngine requires workflow context for LangGraph phase authority."
+            )
+        })?;
+        if self.phase_graph.is_none() {
+            bail!(
+                "Phase '{phase_id}' for skill '{skill}' cannot be judged or advanced — LangGraph phase authority is not configured"
+            );
+        }
+
         // Ask AI judge to evaluate the evidence. For high-stakes (`dual`)
         // phases the verdict comes from the cross-vendor DualFrontier tier
         // (Opus 4.8 + GPT-5.5), folded conservatively into a single verdict;
         // otherwise the single configured `judge_model` runs.
         let verdict = self
-            .judge_verdict_for(skill, phase_id, phase_objectives, &evidence, judge_model, dual)
+            .judge_verdict_for(
+                skill,
+                phase_id,
+                phase_objectives,
+                &evidence,
+                judge_model,
+                dual,
+            )
             .await?;
 
         info!(
@@ -138,6 +565,10 @@ impl ProofEngine {
         );
 
         if !verdict.sufficient {
+            // Failed judge verdicts are graph state too: persist the Fail verdict
+            // through LangGraph before touching local cooldown counters.
+            self.apply_phase_graph_verdict(skill, phase_id, workflow, false)
+                .await?;
             self.state
                 .write()
                 .await
@@ -155,17 +586,22 @@ impl ProofEngine {
             .await
             .clear_submission_failure(&phase_key);
 
-        // Compute hashes, build proof, and add to chain under a single write lock
-        // to prevent TOCTOU races on concurrent submissions
+        // Graph authority must accept and persist the phase transition before
+        // a success proof is sealed. Otherwise an out-of-order or dyad-rejected
+        // phase could leave behind a valid-looking PhaseProof for work the
+        // graph refused to advance.
+        let phase_graph = self
+            .apply_phase_graph_verdict(skill, phase_id, workflow, true)
+            .await?;
+
+        // Compute hashes, build proof, and add to chain under a single write
+        // lock to prevent TOCTOU races on concurrent submissions.
         let (proof, combined_hash) = {
             let mut state = self.state.write().await;
             let completed_at = Utc::now();
 
             let evidence_hash = PhaseProof::compute_evidence_hash(&evidence);
-            let previous_hash = state.proof_chains.get(skill).map_or_else(
-                || sentinel_domain::proof::GENESIS_HASH.to_string(),
-                |chain| chain.head_hash().to_string(),
-            );
+            let previous_hash = state.proof_chain_head_hash(skill).to_string();
             let combined_hash = PhaseProof::compute_combined_hash(
                 phase_id,
                 skill,
@@ -184,6 +620,7 @@ impl ProofEngine {
                 combined_hash: combined_hash.clone(),
                 judge_model: judge_model.to_string(),
                 judge_verdict: verdict,
+                signature: None,
                 started_at,
                 completed_at,
                 duration_ms: (completed_at - started_at)
@@ -191,45 +628,20 @@ impl ProofEngine {
                     .unsigned_abs(),
             };
 
-            // Add to chain
-            let session_id = state.session_id.clone();
-            let chain = state
-                .proof_chains
-                .entry(skill.to_string())
-                .or_insert_with(|| ProofChain::new(skill, &session_id));
-            chain.add_proof(proof.clone())?;
-
-            // **Attack #62 fix**: Use advance_sequential() when workflow definition
-            // is available. This prevents out-of-order phase completion even if the
-            // AI judge approves evidence for a later phase.
-            if let Some(wf) = state.workflows.get_mut(skill) {
-                if wf.is_phase_complete(phase_id) {
-                    // Already complete — idempotent, no-op
-                } else if let Some(wf_def) = workflow {
-                    // Sequential enforcement: phase must be the next required one
-                    if wf.advance_sequential(phase_id, wf_def) {
-                        eprintln!(
-                            "[sentinel] ProofEngine: Sequentially advanced phase '{}' for skill '{}' \
-                             (now {} completed phases)",
-                            phase_id, skill, wf.completed_phases.len()
-                        );
-                    } else {
-                        bail!(
-                            "Phase '{phase_id}' cannot be advanced — prior required phases are incomplete. \
-                             Phases must be completed in order."
-                        );
-                    }
-                } else {
-                    // **Attack #79 fix**: No workflow definition available — fail closed.
-                    // Previously fell back to advance_unchecked() which bypasses sequential
-                    // enforcement. Now refuse to advance without a workflow definition.
-                    // ProofEngine callers MUST provide a workflow parameter.
-                    bail!(
-                        "Phase '{phase_id}' for skill '{skill}' cannot be advanced — no workflow definition provided. \
-                         ProofEngine requires workflow context for sequential enforcement."
-                    );
-                }
+            let mut proof = proof;
+            match (&self.signing_key, self.signing_required) {
+                (Some(key), _) => proof.sign_with(key),
+                (None, true) => bail!(
+                    "SENTINEL_SIGNING_REQUIRED is set but no SENTINEL_SIGNING_KEY \
+                     is configured — refusing to seal an unsigned PhaseProof for \
+                     '{phase_id}' (skill '{skill}'). Provide a 32-byte hex \
+                     Ed25519 seed in SENTINEL_SIGNING_KEY."
+                ),
+                (None, false) => {}
             }
+
+            // Add to chain
+            state.append_phase_proof(skill, proof.clone())?;
 
             (proof, combined_hash)
         };
@@ -240,7 +652,695 @@ impl ProofEngine {
             "Proof added to chain"
         );
 
-        Ok(proof)
+        Ok(PhaseSubmissionReport { proof, phase_graph })
+    }
+
+    async fn apply_phase_graph_verdict(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        workflow: &SkillWorkflow,
+        passed: bool,
+    ) -> Result<PhaseGraphApplyResult> {
+        let authority = self.phase_graph.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Phase '{phase_id}' for skill '{skill}' cannot be advanced — LangGraph phase authority is not configured"
+            )
+        })?;
+        let session_id = {
+            let state = self.state.read().await;
+            state.session_id.clone()
+        };
+        let graph_result = authority
+            .apply_verdict(skill, &session_id, workflow, phase_id, passed)
+            .await?;
+        Self::validate_phase_graph_apply_result(skill, &session_id, phase_id, &graph_result)?;
+
+        {
+            let mut state = self.state.write().await;
+            state.set_graph_projected_workflow(
+                skill.to_string(),
+                graph_result.workflow_state.clone(),
+            );
+        }
+
+        Ok(graph_result)
+    }
+
+    fn langgraph_tenant_scope_from_env() -> Result<Option<String>> {
+        let value = match std::env::var(sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed to read {}: {err}",
+                    sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV
+                ));
+            }
+        };
+        let tenant = value.trim();
+        sentinel_domain::langgraph_thread::validate_tenant_scope(tenant)
+            .map_err(anyhow::Error::msg)?;
+        Ok(Some(tenant.to_string()))
+    }
+
+    fn expected_phase_thread_id(skill: &str, session_id: &str) -> Result<String> {
+        sentinel_domain::langgraph_thread::phase_thread_id(
+            skill,
+            session_id,
+            Self::langgraph_tenant_scope_from_env()?.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
+    /// Validate the serialized LangGraph evidence returned by the phase graph
+    /// authority before Sentinel accepts its workflow projection.
+    fn validate_phase_graph_apply_result(
+        skill: &str,
+        session_id: &str,
+        phase_id: &str,
+        result: &PhaseGraphApplyResult,
+    ) -> Result<()> {
+        let graph = result.graph_run.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph phase authority for '{skill}/{phase_id}' returned non-object graph evidence"
+            )
+        })?;
+        let state_value = graph.get("state").ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph phase authority for '{skill}/{phase_id}' returned graph evidence without state"
+            )
+        })?;
+        let state = state_value.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph phase authority for '{skill}/{phase_id}' returned non-object graph state"
+            )
+        })?;
+        Self::validate_graph_authority_fields(
+            graph,
+            state_value,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+        let graph_skill = state
+            .get("skill")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted state.skill"
+                )
+            })?;
+        if graph_skill != skill {
+            bail!(
+                "LangGraph phase evidence skill mismatch for '{skill}/{phase_id}': got '{graph_skill}'"
+            );
+        }
+        let graph_session = state
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted state.session_id"
+                )
+            })?;
+        if graph_session != session_id {
+            bail!(
+                "LangGraph phase evidence session mismatch for '{skill}/{phase_id}': got '{graph_session}'"
+            );
+        }
+        let completed = state
+            .get("completed_phases")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted state.completed_phases"
+                )
+            })?;
+        let completed: Vec<String> = completed
+            .iter()
+            .map(|value| {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph phase evidence for '{skill}/{phase_id}' has non-string completed phase"
+                    )
+                })
+            })
+            .collect::<Result<_>>()?;
+        if completed != result.workflow_state.completed_phases {
+            bail!("LangGraph phase evidence completed_phases mismatch for '{skill}/{phase_id}'");
+        }
+        let graph_complete = state
+            .get("complete")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted state.complete"
+                )
+            })?;
+        if graph_complete != result.workflow_state.complete {
+            bail!("LangGraph phase evidence complete flag mismatch for '{skill}/{phase_id}'");
+        }
+        match (
+            state.get("current_phase"),
+            result.workflow_state.current_phase,
+        ) {
+            (Some(serde_json::Value::Null) | None, None) => {}
+            (Some(value), Some(expected)) if value.as_u64() == Some(expected as u64) => {}
+            _ => bail!("LangGraph phase evidence current_phase mismatch for '{skill}/{phase_id}'"),
+        }
+        let latest_checkpoint = graph
+            .get("latest_checkpoint")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted latest checkpoint"
+                )
+            })?;
+        let checkpoint_id = latest_checkpoint
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted latest checkpoint id"
+                )
+            })?;
+        if checkpoint_id.is_empty() {
+            bail!("LangGraph phase evidence for '{skill}/{phase_id}' had empty checkpoint id");
+        }
+        let latest_checkpoint_state = latest_checkpoint.get("state").ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' omitted latest checkpoint state"
+            )
+        })?;
+        if latest_checkpoint_state != state_value {
+            bail!(
+                "LangGraph phase evidence latest checkpoint state mismatch for '{skill}/{phase_id}'"
+            );
+        }
+        let checkpoints = graph
+            .get("checkpoints")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' omitted checkpoint history"
+                )
+            })?;
+        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
+        Self::validate_checkpoint_history_evidence(
+            latest_checkpoint,
+            checkpoints,
+            checkpoint_id,
+            &expected_thread_id,
+            state_value,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+        Self::validate_latest_checkpoint_write_evidence(
+            graph,
+            latest_checkpoint,
+            checkpoint_id,
+            &expected_thread_id,
+            state_value,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+        Self::validate_graph_topology(
+            graph,
+            skill,
+            session_id,
+            phase_id,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+
+        let stream = graph
+            .get("stream")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase authority for '{skill}/{phase_id}' returned graph evidence without stream"
+                )
+            })?;
+        if stream.is_empty() {
+            if graph_complete {
+                return Ok(());
+            }
+            bail!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' has no stream for a non-terminal transition"
+            );
+        }
+
+        let has_values = stream.iter().any(|part| {
+            part.get("payload_kind").and_then(serde_json::Value::as_str) == Some("values")
+        });
+        if !has_values {
+            bail!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' stream omitted values payload"
+            );
+        }
+        let current_phase = result.workflow_state.current_phase.ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' non-terminal stream omitted current_phase"
+            )
+        })?;
+        let expected_gate_phase = state
+            .get("phase_order")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|phases| phases.get(current_phase))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' could not resolve current gate phase from phase_order"
+                )
+            })?;
+        Self::validate_phase_stream_checkpoint_evidence(
+            stream,
+            latest_checkpoint,
+            checkpoint_id,
+            &expected_thread_id,
+            expected_gate_phase,
+            state_value,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+        let has_custom_gate = stream.iter().any(|part| {
+            let payload = part.get("payload_json");
+            part.get("payload_kind").and_then(serde_json::Value::as_str) == Some("custom")
+                && payload
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("sentinel.phase_gate")
+                && payload
+                    .and_then(|payload| payload.get("skill"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(skill)
+                && payload
+                    .and_then(|payload| payload.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(session_id)
+                && payload
+                    .and_then(|payload| payload.get("phase_id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected_gate_phase)
+                && payload
+                    .and_then(|payload| payload.get("phase_index"))
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(current_phase as u64)
+        });
+        if !has_custom_gate {
+            bail!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' stream omitted custom phase-gate payload for '{expected_gate_phase}'"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_phase_stream_checkpoint_evidence(
+        stream: &[serde_json::Value],
+        latest_checkpoint: &serde_json::Map<String, serde_json::Value>,
+        checkpoint_id: &str,
+        expected_thread_id: &str,
+        expected_gate_phase: &str,
+        state_value: &serde_json::Value,
+        evidence_label: &str,
+    ) -> Result<()> {
+        let latest_step = latest_checkpoint
+            .get("step_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} latest checkpoint omitted numeric step_number"
+                )
+            })?;
+        let part = stream
+            .iter()
+            .find(|part| {
+                part.get("payload_kind").and_then(serde_json::Value::as_str)
+                    == Some("checkpoints")
+                    && part
+                        .get("payload_json")
+                        .and_then(|payload| payload.get("checkpoint_id"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(checkpoint_id)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream omitted latest checkpoint payload for checkpoint '{checkpoint_id}'"
+                )
+            })?;
+        let stream_node = part
+            .get("node_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint payload omitted node_id"
+                )
+            })?;
+        if stream_node != expected_gate_phase {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint node mismatch: got '{stream_node}', expected '{expected_gate_phase}'"
+            );
+        }
+        let payload = part
+            .get("payload_json")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint payload was not an object"
+                )
+            })?;
+        let stream_thread = payload
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted thread_id"
+                )
+            })?;
+        if stream_thread != expected_thread_id {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' thread mismatch: got '{stream_thread}', expected '{expected_thread_id}'"
+            );
+        }
+        let stream_step = payload
+            .get("step_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted numeric step_number"
+                )
+            })?;
+        if stream_step != latest_step {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' step mismatch: latest_checkpoint={latest_step}, stream={stream_step}"
+            );
+        }
+        let source_type = payload
+            .get("source")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|source| source.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted source type"
+                )
+            })?;
+        if source_type != "stream_update" {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' source type mismatch: got '{source_type}', expected 'stream_update'"
+            );
+        }
+        let source_node = payload
+            .get("source")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|source| source.get("node"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted source node"
+                )
+            })?;
+        if source_node != expected_gate_phase {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' source node mismatch: got '{source_node}', expected '{expected_gate_phase}'"
+            );
+        }
+        let stream_state = payload.get("state").ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted state"
+            )
+        })?;
+        if stream_state != state_value {
+            bail!("LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' state mismatch");
+        }
+
+        Ok(())
+    }
+
+    fn validate_graph_topology(
+        graph: &serde_json::Map<String, serde_json::Value>,
+        skill: &str,
+        session_id: &str,
+        phase_id: &str,
+        evidence_label: &str,
+    ) -> Result<()> {
+        let topology = graph
+            .get("graph_topology")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} omitted compiled graph topology")
+            })?;
+        let topology_skill = topology
+            .get("skill")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} topology omitted skill"))?;
+        if topology_skill != skill {
+            bail!("LangGraph {evidence_label} topology skill mismatch: got '{topology_skill}'");
+        }
+        let thread_id = topology
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted thread_id")
+            })?;
+        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
+        if thread_id != expected_thread_id {
+            bail!(
+                "LangGraph {evidence_label} topology thread mismatch: got '{thread_id}', expected '{expected_thread_id}'"
+            );
+        }
+        if topology
+            .get("durable_checkpointer")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            bail!("LangGraph {evidence_label} topology did not prove a durable checkpointer");
+        }
+        if topology
+            .get("auto_checkpoint")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            bail!("LangGraph {evidence_label} topology did not prove LangGraph auto-checkpointing");
+        }
+        let phase_order = topology
+            .get("phase_order")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted phase_order")
+            })?;
+        if phase_order.is_empty() || phase_order.iter().any(|phase| phase.as_str().is_none()) {
+            bail!("LangGraph {evidence_label} topology had invalid phase_order");
+        }
+        if !phase_order
+            .iter()
+            .any(|phase| phase.as_str() == Some(phase_id))
+        {
+            bail!("LangGraph {evidence_label} topology phase_order omitted phase '{phase_id}'");
+        }
+        let phase_ids: Vec<&str> = phase_order
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        let max_iterations = topology
+            .get("max_iterations")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted max_iterations")
+            })?;
+        if max_iterations <= phase_ids.len() as u64 {
+            bail!(
+                "LangGraph {evidence_label} topology max_iterations {max_iterations} does not leave phase routing headroom"
+            );
+        }
+        let schemas = topology
+            .get("schemas")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted schemas")
+            })?;
+        let state_schema = schemas
+            .get("state")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted state schema")
+            })?;
+        let schema_marker = |key: &str| {
+            state_schema
+                .get("x-sentinel")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|marker| marker.get(key))
+                .and_then(serde_json::Value::as_str)
+        };
+        if schema_marker("graph") != Some("phase") {
+            bail!("LangGraph {evidence_label} topology state schema did not prove phase graph identity");
+        }
+        if schema_marker("workflow_skill") != Some(skill) {
+            bail!("LangGraph {evidence_label} topology state schema workflow skill mismatch");
+        }
+        if schema_marker("authority") != Some("langgraph") {
+            bail!("LangGraph {evidence_label} topology state schema did not prove LangGraph authority");
+        }
+        if schemas.get("input").is_none_or(serde_json::Value::is_null) {
+            bail!("LangGraph {evidence_label} topology omitted input schema");
+        }
+        if schemas.get("output").is_none_or(serde_json::Value::is_null) {
+            bail!("LangGraph {evidence_label} topology omitted output schema");
+        }
+        let backend = topology
+            .get("checkpointer_backend")
+            .and_then(serde_json::Value::as_str)
+            .filter(|backend| !backend.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted checkpointer backend")
+            })?;
+        let scope = topology
+            .get("checkpointer_scope")
+            .and_then(serde_json::Value::as_str)
+            .filter(|scope| !scope.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} topology omitted checkpointer scope")
+            })?;
+        let nodes = topology
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} topology omitted nodes"))?;
+        if nodes.is_empty() {
+            bail!("LangGraph {evidence_label} topology had no nodes");
+        }
+        for phase in &phase_ids {
+            let node = nodes
+                .iter()
+                .find(|node| node.get("id").and_then(serde_json::Value::as_str) == Some(*phase))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} topology omitted phase node '{phase}'"
+                    )
+                })?;
+            let metadata = node
+                .get("metadata")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} topology node '{phase}' omitted metadata"
+                    )
+                })?;
+            let metadata_value = |key: &str| metadata.get(key).and_then(serde_json::Value::as_str);
+            if metadata_value("sentinel.graph") != Some("phase") {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' did not prove phase graph identity"
+                );
+            }
+            if metadata_value("sentinel.node") != Some(*phase) {
+                bail!("LangGraph {evidence_label} topology node '{phase}' metadata node mismatch");
+            }
+            if metadata_value("sentinel.skill") != Some(skill) {
+                bail!("LangGraph {evidence_label} topology node '{phase}' metadata skill mismatch");
+            }
+            if metadata_value("sentinel.phase") != Some(*phase) {
+                bail!("LangGraph {evidence_label} topology node '{phase}' metadata phase mismatch");
+            }
+            if metadata_value("sentinel.checkpointer_backend") != Some(backend) {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' omitted matching checkpointer backend metadata"
+                );
+            }
+            if metadata_value("sentinel.checkpointer_scope") != Some(scope) {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' omitted matching checkpointer scope metadata"
+                );
+            }
+            if node
+                .get("has_error_handler")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                bail!("LangGraph {evidence_label} topology node '{phase}' omitted error handler");
+            }
+            if node
+                .get("has_timeout_policy")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                bail!("LangGraph {evidence_label} topology node '{phase}' omitted timeout policy");
+            }
+            if node
+                .get("interrupt_before")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' must not interrupt before execution"
+                );
+            }
+            if node
+                .get("interrupt_after")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' omitted post-node interrupt"
+                );
+            }
+        }
+        let edges = topology
+            .get("edges")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} topology omitted edges"))?;
+        if edges.is_empty() {
+            bail!("LangGraph {evidence_label} topology had no edges");
+        }
+        let is_start_source = |source: &str| source == "START" || source == "__start__";
+        let start_count = edges
+            .iter()
+            .filter(|edge| {
+                edge.get("from")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_start_source)
+                    && edge.get("kind").and_then(serde_json::Value::as_str) == Some("conditional")
+            })
+            .count();
+        if start_count == 0 {
+            bail!("LangGraph {evidence_label} topology omitted conditional routing from 'START'");
+        }
+        if start_count > 1 {
+            bail!(
+                "LangGraph {evidence_label} topology duplicated conditional routing from 'START'"
+            );
+        }
+        let required_sources: Vec<&str> = phase_ids.to_vec();
+        for source in &required_sources {
+            let count = edges
+                .iter()
+                .filter(|edge| {
+                    edge.get("from").and_then(serde_json::Value::as_str) == Some(*source)
+                        && edge.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("conditional")
+                })
+                .count();
+            if count == 0 {
+                bail!(
+                    "LangGraph {evidence_label} topology omitted conditional routing from '{source}'"
+                );
+            }
+            if count > 1 {
+                bail!(
+                    "LangGraph {evidence_label} topology duplicated conditional routing from '{source}'"
+                );
+            }
+        }
+        for edge in edges {
+            let source = edge
+                .get("from")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("LangGraph {evidence_label} topology edge omitted source")
+                })?;
+            if !is_start_source(source) && !required_sources.contains(&source) {
+                bail!("LangGraph {evidence_label} topology edge had unexpected source '{source}'");
+            }
+            if edge.get("kind").and_then(serde_json::Value::as_str) != Some("conditional") {
+                bail!(
+                    "LangGraph {evidence_label} topology edge from '{source}' was not conditional"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Obtain the completion verdict for a phase. When `dual` is set, run the
@@ -297,34 +1397,66 @@ impl ProofEngine {
         })
     }
 
-    /// Submit a verdict for a single step within a phase. Builds the
-    /// [`StepProof`], appends it to the active chain via
-    /// [`ProofChain::add_step_proof`], and returns the sealed proof.
+    /// Direct step submission is a guarded wrapper, not a production write path.
     ///
-    /// Differs from [`submit_evidence`](Self::submit_evidence) in three ways:
-    ///
-    /// 1. **Verdict is supplied, not produced.** Caller has already run the
-    ///    judge (typically via [`step_judge`](crate::hooks::step_judge),
-    ///    which returns `StepJudgeOutcome::Judged { verdict, .. }`). This
-    ///    keeps the judge call out of the write lock and lets cross-vendor
-    ///    parallel judging (#73) happen upstream without changing this
-    ///    method's signature.
-    ///
-    /// 2. **No phase-advancement side effect.** Step granularity is finer
-    ///    than phase boundaries; we don't touch `WorkflowState` phase
-    ///    progress here. `step_gate` (M1.3) consumes the step proofs we
-    ///    write to know when to allow the next tool call.
-    ///
-    /// 3. **Insufficient verdicts hard-fail with no chain mutation.** If
-    ///    `verdict.sufficient == false`, we return an error without
-    ///    appending — the chain only carries verdicts that passed. Failed
-    ///    verdicts are still observable via the `JudgeError` surface in
-    ///    `step_judge` and via tracing logs.
-    ///
-    /// On success, returns the sealed `StepProof` so callers can hash its
-    /// `combined_hash` into downstream artifacts (e.g. virtual skill pack
-    /// edge metadata in M7).
+    /// Step completion must be accepted by the durable LangGraph step
+    /// authority before a `StepProof` is appended. Call
+    /// [`submit_step_evidence_report`](Self::submit_step_evidence_report)
+    /// with workflow context instead.
     pub async fn submit_step_evidence(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        step_description: &str,
+        _evidence: Evidence,
+        _verdict: JudgeVerdict,
+        _judge_model: JudgeModel,
+        _artifact: serde_json::Value,
+        _account_context: Option<String>,
+        _started_at: chrono::DateTime<Utc>,
+    ) -> Result<StepProof> {
+        #[cfg(test)]
+        {
+            let workflow = test_step_workflow(skill, phase_id);
+            Ok(self
+                .submit_step_evidence_report(
+                    skill,
+                    phase_id,
+                    step_id,
+                    step_description,
+                    _evidence,
+                    _verdict,
+                    _judge_model,
+                    _artifact,
+                    _account_context,
+                    _started_at,
+                    &workflow,
+                    Some(step_description.to_string()),
+                )
+                .await?
+                .proof)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (
+                step_description,
+                _evidence,
+                _verdict,
+                _judge_model,
+                _artifact,
+                _account_context,
+                _started_at,
+            );
+            bail!(
+                "Step '{phase_id}.{step_id}' (skill '{skill}') cannot be sealed through the direct non-graph path — durable LangGraph step authority and workflow context are required"
+            )
+        }
+    }
+
+    /// Submit a verdict for a single step and return the sealed proof plus
+    /// durable LangGraph checkpoint/write evidence.
+    pub async fn submit_step_evidence_report(
         &self,
         skill: &str,
         phase_id: &str,
@@ -336,7 +1468,9 @@ impl ProofEngine {
         artifact: serde_json::Value,
         account_context: Option<String>,
         started_at: chrono::DateTime<Utc>,
-    ) -> Result<StepProof> {
+        workflow: &SkillWorkflow,
+        summary: Option<String>,
+    ) -> Result<StepSubmissionReport> {
         info!(
             skill,
             phase = phase_id,
@@ -355,18 +1489,20 @@ impl ProofEngine {
             );
         }
 
-        // Hash + chain mutation under a single write lock to prevent TOCTOU
-        // races on concurrent submissions, mirroring submit_evidence.
-        let proof = {
+        let authority = self.step_graph.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Step '{phase_id}.{step_id}' for skill '{skill}' cannot be completed — LangGraph step authority is not configured"
+            )
+        })?;
+
+        let (proof, step_graph) = {
             let mut state = self.state.write().await;
             let completed_at = Utc::now();
+            let session_id = state.session_id.clone();
 
             let evidence_hash = StepProof::compute_evidence_hash(&evidence);
             let artifact_hash = StepProof::compute_artifact_hash(&artifact);
-            let previous_hash = state.proof_chains.get(skill).map_or_else(
-                || sentinel_domain::proof::GENESIS_HASH.to_string(),
-                |chain| chain.head_hash().to_string(),
-            );
+            let previous_hash = state.proof_chain_head_hash(skill).to_string();
             let combined_hash = StepProof::compute_combined_hash(
                 step_id,
                 phase_id,
@@ -403,8 +1539,8 @@ impl ProofEngine {
             // #4 — Ed25519 attestation. Mandatory-signing posture: refuse to
             // seal an unsigned proof when signing is required but no key is
             // configured (audit-grade must be attestable, never silently
-            // unsigned). Otherwise sign when a key is present; leave unsigned
-            // (hash-chain only) when neither key nor requirement is set.
+            // unsigned). Tests/local callers may disable the posture
+            // explicitly, but verification still rejects unsigned chains.
             let mut proof = proof;
             match (&self.signing_key, self.signing_required) {
                 (Some(key), _) => proof.sign_with(key),
@@ -414,13 +1550,39 @@ impl ProofEngine {
                 (None, false) => {}
             }
 
-            // Append to chain — creates a fresh ProofChain on first step.
-            let session_id = state.session_id.clone();
-            let chain = state
-                .proof_chains
-                .entry(skill.to_string())
-                .or_insert_with(|| ProofChain::new(skill, &session_id));
-            chain.add_step_proof(proof.clone())?;
+            let mut validation_chain = state
+                .proof_chain(skill)
+                .cloned()
+                .unwrap_or_else(|| ProofChain::new(skill, &session_id));
+            validation_chain.add_step_proof(proof.clone())?;
+
+            let step_graph = authority
+                .apply_step_status(
+                    skill,
+                    &session_id,
+                    workflow,
+                    phase_id,
+                    step_id,
+                    StepStatus::Completed,
+                    summary,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "LangGraph step authority failed for '{skill}/{phase_id}.{step_id}': {e:#}"
+                    )
+                })?;
+            Self::validate_step_graph_apply_result(
+                skill,
+                &session_id,
+                phase_id,
+                step_id,
+                &step_graph,
+            )?;
+
+            state.append_step_proof(skill, proof.clone())?;
+            state
+                .set_graph_projected_workflow(skill.to_string(), step_graph.workflow_state.clone());
 
             debug!(
                 skill,
@@ -430,10 +1592,398 @@ impl ProofEngine {
                 "StepProof added to chain"
             );
 
-            proof
+            (proof, step_graph)
         };
 
-        Ok(proof)
+        Ok(StepSubmissionReport { proof, step_graph })
+    }
+
+    /// Validate the serialized LangGraph evidence returned by the step graph
+    /// authority before Sentinel accepts its workflow projection.
+    fn validate_step_graph_apply_result(
+        skill: &str,
+        session_id: &str,
+        phase_id: &str,
+        step_id: &str,
+        result: &StepGraphApplyResult,
+    ) -> Result<()> {
+        let graph = result.graph_run.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph step authority for '{skill}/{phase_id}.{step_id}' returned non-object graph evidence"
+            )
+        })?;
+        let state_value = graph.get("state").ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph step authority for '{skill}/{phase_id}.{step_id}' returned graph evidence without state"
+            )
+        })?;
+        let state = state_value.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph step authority for '{skill}/{phase_id}.{step_id}' returned non-object graph state"
+            )
+        })?;
+        Self::validate_graph_authority_fields(
+            graph,
+            state_value,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
+        let graph_skill = state
+            .get("skill")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted state.skill"
+                )
+            })?;
+        if graph_skill != skill {
+            bail!(
+                "LangGraph step evidence skill mismatch for '{skill}/{phase_id}.{step_id}': got '{graph_skill}'"
+            );
+        }
+        let graph_session = state
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted state.session_id"
+                )
+            })?;
+        if graph_session != session_id {
+            bail!(
+                "LangGraph step evidence session mismatch for '{skill}/{phase_id}.{step_id}': got '{graph_session}'"
+            );
+        }
+        let step_states = state
+            .get("step_states")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted state.step_states"
+                )
+            })?;
+        let completed_step = step_states.iter().any(|step| {
+            step.get("phase_id").and_then(serde_json::Value::as_str) == Some(phase_id)
+                && step.get("step_id").and_then(serde_json::Value::as_str) == Some(step_id)
+                && step.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        });
+        if !completed_step {
+            bail!(
+                "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' did not record the completed step"
+            );
+        }
+        let projected_step = result.workflow_state.step_states.iter().any(|step| {
+            step.phase_id == phase_id
+                && step.step_id == step_id
+                && step.status == StepStatus::Completed
+        });
+        if !projected_step {
+            bail!(
+                "LangGraph step projection for '{skill}/{phase_id}.{step_id}' did not include the completed step"
+            );
+        }
+        let latest_checkpoint = graph
+            .get("latest_checkpoint")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted latest checkpoint"
+                )
+            })?;
+        let checkpoint_id = latest_checkpoint
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted latest checkpoint id"
+                )
+            })?;
+        if checkpoint_id.is_empty() {
+            bail!(
+                "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' had empty checkpoint id"
+            );
+        }
+        let latest_checkpoint_state = latest_checkpoint
+            .get("state")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted latest checkpoint state"
+                )
+            })?;
+        if latest_checkpoint_state != state_value {
+            bail!(
+                "LangGraph step evidence latest checkpoint state mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
+        let checkpoints = graph
+            .get("checkpoints")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted checkpoint history"
+                )
+            })?;
+        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
+        Self::validate_checkpoint_history_evidence(
+            latest_checkpoint,
+            checkpoints,
+            checkpoint_id,
+            &expected_thread_id,
+            state_value,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
+        Self::validate_latest_checkpoint_write_evidence(
+            graph,
+            latest_checkpoint,
+            checkpoint_id,
+            &expected_thread_id,
+            state_value,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
+        Self::validate_graph_topology(
+            graph,
+            skill,
+            session_id,
+            phase_id,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
+        Ok(())
+    }
+
+    fn validate_checkpoint_history_evidence(
+        latest_checkpoint: &serde_json::Map<String, serde_json::Value>,
+        checkpoints: &[serde_json::Value],
+        checkpoint_id: &str,
+        expected_thread_id: &str,
+        state_value: &serde_json::Value,
+        evidence_label: &str,
+    ) -> Result<()> {
+        if checkpoints.is_empty() {
+            bail!("LangGraph {evidence_label} had empty checkpoint history");
+        }
+
+        let latest_thread = latest_checkpoint
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} latest checkpoint omitted thread_id")
+            })?;
+        if latest_thread != expected_thread_id {
+            bail!(
+                "LangGraph {evidence_label} latest checkpoint thread mismatch: got '{latest_thread}', expected '{expected_thread_id}'"
+            );
+        }
+        let latest_step = latest_checkpoint
+            .get("step_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} latest checkpoint omitted numeric step_number"
+                )
+            })?;
+
+        let mut previous_step = None;
+        let mut previous_checkpoint_id = None;
+        for checkpoint in checkpoints {
+            let checkpoint = checkpoint.as_object().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} checkpoint history contained a non-object checkpoint"
+                )
+            })?;
+            let history_checkpoint_id = checkpoint
+                .get("checkpoint_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} history checkpoint omitted checkpoint_id"
+                    )
+                })?;
+            let history_thread = checkpoint
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} history checkpoint '{history_checkpoint_id}' omitted thread_id"
+                    )
+                })?;
+            if history_thread != expected_thread_id {
+                bail!(
+                    "LangGraph {evidence_label} checkpoint history contains thread '{history_thread}', expected '{expected_thread_id}'"
+                );
+            }
+            let history_step = checkpoint
+                .get("step_number")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} history checkpoint '{history_checkpoint_id}' omitted numeric step_number"
+                    )
+                })?;
+            if let Some(previous_step) = previous_step {
+                if previous_step > history_step {
+                    bail!(
+                        "LangGraph {evidence_label} checkpoint history is not oldest-first: checkpoint '{}' step {} appears before checkpoint '{}' step {}",
+                        previous_checkpoint_id.unwrap_or("<missing>"),
+                        previous_step,
+                        history_checkpoint_id,
+                        history_step
+                    );
+                }
+            }
+            previous_step = Some(history_step);
+            previous_checkpoint_id = Some(history_checkpoint_id);
+        }
+
+        let history_latest = checkpoints
+            .last()
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} ended with a non-object checkpoint")
+            })?;
+        let history_latest_id = history_latest
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} latest history checkpoint omitted checkpoint_id"
+                )
+            })?;
+        if history_latest_id != checkpoint_id {
+            bail!(
+                "LangGraph {evidence_label} latest checkpoint mismatch: latest_checkpoint={checkpoint_id}, history_latest={history_latest_id}"
+            );
+        }
+        let history_latest_step = history_latest
+            .get("step_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} latest history checkpoint omitted numeric step_number"
+                )
+            })?;
+        if history_latest_step != latest_step {
+            bail!(
+                "LangGraph {evidence_label} latest checkpoint step mismatch: latest_checkpoint={latest_step}, history_latest={history_latest_step}"
+            );
+        }
+        if history_latest.get("state") != Some(state_value) {
+            bail!("LangGraph {evidence_label} latest history state mismatch");
+        }
+
+        Ok(())
+    }
+
+    fn validate_graph_authority_fields(
+        graph: &serde_json::Map<String, serde_json::Value>,
+        state_value: &serde_json::Value,
+        evidence_label: &str,
+    ) -> Result<()> {
+        let authority = graph
+            .get("workflow_authority")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("LangGraph {evidence_label} omitted workflow_authority")
+            })?;
+        if authority != "langgraph" {
+            bail!(
+                "LangGraph {evidence_label} workflow_authority mismatch: got '{authority}', expected 'langgraph'"
+            );
+        }
+        let graph_state = graph
+            .get("graph_state")
+            .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} omitted graph_state"))?;
+        if graph_state != state_value {
+            bail!("LangGraph {evidence_label} graph_state mismatch");
+        }
+        Ok(())
+    }
+
+    fn validate_latest_checkpoint_write_evidence(
+        graph: &serde_json::Map<String, serde_json::Value>,
+        latest_checkpoint: &serde_json::Map<String, serde_json::Value>,
+        checkpoint_id: &str,
+        expected_thread_id: &str,
+        state_value: &serde_json::Value,
+        evidence_label: &str,
+    ) -> Result<()> {
+        let checkpoint_writes = latest_checkpoint
+            .get("writes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} latest checkpoint omitted write metadata"
+                )
+            })?;
+        if checkpoint_writes
+            .iter()
+            .all(|write| write.get("channel").and_then(serde_json::Value::as_str) != Some("state"))
+        {
+            bail!(
+                "LangGraph {evidence_label} latest checkpoint omitted state-channel write metadata"
+            );
+        }
+
+        let writes = graph
+            .get("writes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} omitted write history"))?;
+        if let Some(mismatched) = writes.iter().find(|write| {
+            write.get("thread_id").and_then(serde_json::Value::as_str) != Some(expected_thread_id)
+        }) {
+            let thread_id = mismatched
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing>");
+            bail!(
+                "LangGraph {evidence_label} write history contains thread '{thread_id}', expected '{expected_thread_id}'"
+            );
+        }
+        for pair in writes.windows(2) {
+            let previous_step = pair[0]
+                .get("step_number")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} write history omitted numeric step_number"
+                    )
+                })?;
+            let next_step = pair[1]
+                .get("step_number")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} write history omitted numeric step_number"
+                    )
+                })?;
+            if previous_step > next_step {
+                let previous_checkpoint = pair[0]
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>");
+                let next_checkpoint = pair[1]
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>");
+                bail!(
+                    "LangGraph {evidence_label} write history is not oldest-first: checkpoint '{previous_checkpoint}' step {previous_step} appears before checkpoint '{next_checkpoint}' step {next_step}"
+                );
+            }
+        }
+        let state_write_records_graph_state = writes.iter().any(|write| {
+            let write_value = write.get("value").or_else(|| write.get("value_json"));
+            write.get("thread_id").and_then(serde_json::Value::as_str) == Some(expected_thread_id)
+                && write
+                    .get("checkpoint_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(checkpoint_id)
+                && write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
+                && write_value == Some(state_value)
+        });
+        if !state_write_records_graph_state {
+            bail!(
+                "LangGraph {evidence_label} omitted a latest-checkpoint state-channel write containing the accepted graph state"
+            );
+        }
+        Ok(())
     }
 
     /// Verify a skill's proof chain
@@ -443,29 +1993,30 @@ impl ProofEngine {
     ) -> Result<sentinel_domain::proof::ChainVerification> {
         let state = self.state.read().await;
         let chain = state
-            .proof_chains
-            .get(skill)
+            .proof_chain(skill)
             .ok_or_else(|| anyhow::anyhow!("No proof chain for skill '{skill}'"))?;
         let mut verification = chain.verify();
 
-        // Fold in Ed25519 signature verification when a verify key is
-        // configured. Without this, a signed entry whose combined_hash was
-        // altered (or whose signature is forged) still passes the hash-only
-        // chain check. Fail closed: any signature failure invalidates the chain.
+        // Fold in Ed25519 signature verification. Without this, a signed entry
+        // whose combined_hash was altered (or whose signature is forged) still
+        // passes the hash-chain consistency check. Fail closed: missing verify
+        // material or any signature failure invalidates the chain.
         if let Some(key) = &self.verify_key {
-            let report = chain.verify_signatures(key, self.signing_required);
+            let report = chain.verify_signatures(key);
             if !report.is_ok() {
                 verification.valid = false;
                 for entry_id in report.failures {
-                    verification
-                        .errors
-                        .push(format!("signature verification failed for entry {entry_id}"));
+                    verification.errors.push(format!(
+                        "signature verification failed for entry {entry_id}"
+                    ));
                 }
             }
+        } else {
+            verification.valid = false;
+            verification.errors.push(
+                "SENTINEL_VERIFY_KEY is required for proof signature verification".to_string(),
+            );
         }
-        // When no verify key is configured, behavior is unchanged (hash-only) —
-        // back-compat. Surfacing "signatures not verified" is the display
-        // layer's job (verify_cmd), not a chain error.
 
         Ok(verification)
     }
@@ -486,11 +2037,11 @@ mod step_evidence_tests {
 
     /// Test double: returns whatever verdict it was constructed with.
     /// submit_step_evidence doesn't actually call the judge — the judge
-    /// runs in step_judge (M1.4) upstream — so this stub mostly exists
-    /// to satisfy ProofEngine::new's signature.
-    struct StubJudge;
+    /// runs in step_judge (M1.4) upstream — so this only satisfies
+    /// ProofEngine::new's signature.
+    struct TestJudge;
     #[async_trait::async_trait]
-    impl JudgeService for StubJudge {
+    impl JudgeService for TestJudge {
         async fn evaluate(
             &self,
             _skill: &str,
@@ -505,19 +2056,581 @@ mod step_evidence_tests {
 
     fn engine() -> ProofEngine {
         let state = Arc::new(RwLock::new(SessionState::new("test-session")));
-        ProofEngine::new(state, Arc::new(StubJudge))
+        ProofEngine::new(state, Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_test_step_graph_authority()
+    }
+
+    fn engine_without_step_graph() -> ProofEngine {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        ProofEngine::new(state, Arc::new(TestJudge)).with_signing(None, false)
+    }
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[31u8; 32])
+    }
+
+    fn signed_engine() -> ProofEngine {
+        let key = test_signing_key();
+        let verifying = key.verifying_key();
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        ProofEngine::new(state, Arc::new(TestJudge))
+            .with_signing(Some(key), true)
+            .with_verify_key(Some(verifying))
+            .with_test_step_graph_authority()
+    }
+
+    static LANGGRAPH_TENANT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_langgraph_tenant_env<R>(tenant: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _guard = LANGGRAPH_TENANT_ENV_LOCK
+            .lock()
+            .expect("langgraph tenant env lock poisoned");
+        let key = sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV;
+        let previous = std::env::var_os(key);
+        match tenant {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn expected_phase_thread_id_uses_tenant_namespace() {
+        with_langgraph_tenant_env(Some("legatus_ai"), || {
+            let thread_id = ProofEngine::expected_phase_thread_id("linear", "session-123")
+                .expect("valid tenant thread id");
+
+            assert_eq!(
+                thread_id,
+                "tenant:legatus_ai:sentinel.phase.linear.session-123"
+            );
+        });
+    }
+
+    #[test]
+    fn expected_phase_thread_id_rejects_malformed_tenant_namespace() {
+        with_langgraph_tenant_env(Some("tenant:escape"), || {
+            let err = ProofEngine::expected_phase_thread_id("linear", "session-123")
+                .expect_err("tenant delimiter injection must fail");
+            assert!(err
+                .to_string()
+                .contains(sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV));
+            assert!(err.to_string().contains("invalid characters"));
+        });
+    }
+
+    struct StepGraphWithForgedWrite;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithForgedWrite {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let checkpoint_id = format!("forged-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state: workflow_state.clone(),
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": {
+                            "skill": skill,
+                            "session_id": session_id,
+                            "step_states": []
+                        }
+                    }],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithPreviousCheckpointWrite;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithPreviousCheckpointWrite {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let latest_checkpoint_id = format!("latest-{session_id}-{phase_id}-{step_id}");
+            let previous_checkpoint_id = format!("previous-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": latest_checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 2,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": latest_checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 2,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": previous_checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state
+                    }],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithMismatchedWriteThread;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithMismatchedWriteThread {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let checkpoint_id = format!("mismatched-thread-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.other-session",
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state
+                    }],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithOutOfOrderWriteHistory;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithOutOfOrderWriteHistory {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let latest_checkpoint_id =
+                format!("out-of-order-latest-{session_id}-{phase_id}-{step_id}");
+            let previous_checkpoint_id =
+                format!("out-of-order-previous-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": latest_checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 2,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": latest_checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 2,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [
+                        {
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "checkpoint_id": latest_checkpoint_id,
+                            "step_number": 2,
+                            "channel": "state",
+                            "value": graph_state.clone()
+                        },
+                        {
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "checkpoint_id": previous_checkpoint_id,
+                            "step_number": 1,
+                            "channel": "state",
+                            "value": graph_state
+                        }
+                    ],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithOutOfOrderCheckpointHistory;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithOutOfOrderCheckpointHistory {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let latest_checkpoint_id =
+                format!("out-of-order-checkpoint-latest-{session_id}-{phase_id}-{step_id}");
+            let previous_checkpoint_id =
+                format!("out-of-order-checkpoint-previous-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": latest_checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 2,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [
+                        {
+                            "checkpoint_id": latest_checkpoint_id,
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "step_number": 2,
+                            "state": graph_state.clone()
+                        },
+                        {
+                            "checkpoint_id": previous_checkpoint_id,
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "step_number": 1,
+                            "state": graph_state.clone()
+                        }
+                    ],
+                    "writes": [
+                        {
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "checkpoint_id": previous_checkpoint_id,
+                            "step_number": 1,
+                            "channel": "state",
+                            "value": graph_state.clone()
+                        },
+                        {
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "checkpoint_id": latest_checkpoint_id,
+                            "step_number": 2,
+                            "channel": "state",
+                            "value": graph_state
+                        }
+                    ],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithStaleLatestCheckpoint;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithStaleLatestCheckpoint {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let stale_state = serde_json::json!({
+                "skill": skill,
+                "session_id": session_id,
+                "step_states": []
+            });
+            let checkpoint_id = format!("stale-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": stale_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": stale_state
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state
+                    }],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithoutTopology;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithoutTopology {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let checkpoint_id = format!("no-topology-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state
+                    }]
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithForgedTopology {
+        mutate: fn(&mut serde_json::Value),
+    }
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithForgedTopology {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = serde_json::to_value(&workflow_state)?;
+            let checkpoint_id = format!("forged-topology-{session_id}-{phase_id}-{step_id}");
+            let mut graph_topology = test_graph_topology(skill, session_id, &[phase_id]);
+            (self.mutate)(&mut graph_topology);
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "START",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state
+                    }],
+                    "graph_topology": graph_topology
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithoutWorkflowAuthority;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithoutWorkflowAuthority {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let authority = TestStepGraphAuthority::default();
+            let mut result = authority
+                .apply_step_status(
+                    skill, session_id, workflow, phase_id, step_id, status, summary,
+                )
+                .await?;
+            result
+                .graph_run
+                .as_object_mut()
+                .expect("test graph run must be an object")
+                .remove("workflow_authority");
+            Ok(result)
+        }
     }
 
     /// A judge whose `evaluate_multi` returns a fixed two-judge verdict (Opus +
     /// Codex), so the dual fold in `judge_verdict_for` can be exercised without
     /// the network. `evaluate` (single path) is unreachable here.
-    struct DualStubJudge {
+    struct DualTestJudge {
         opus_sufficient: bool,
         codex_sufficient: bool,
     }
 
     #[async_trait::async_trait]
-    impl JudgeService for DualStubJudge {
+    impl JudgeService for DualTestJudge {
         async fn evaluate(
             &self,
             _s: &str,
@@ -560,7 +2673,7 @@ mod step_evidence_tests {
         let state = Arc::new(RwLock::new(SessionState::new("dual-session")));
         ProofEngine::new(
             state,
-            Arc::new(DualStubJudge {
+            Arc::new(DualTestJudge {
                 opus_sufficient: opus,
                 codex_sufficient: codex,
             }),
@@ -586,12 +2699,15 @@ mod step_evidence_tests {
             .judge_verdict_for("s", "p", "o", &Evidence::default(), JudgeModel::Opus, true)
             .await
             .unwrap();
-        assert!(!v.sufficient, "a single dissent must fail the completion verdict");
+        assert!(
+            !v.sufficient,
+            "a single dissent must fail the completion verdict"
+        );
     }
 
     #[tokio::test]
     async fn passing_verdict_seals_step_proof_into_chain() {
-        let eng = engine();
+        let eng = signed_engine();
         let result = eng
             .submit_step_evidence(
                 "linear",
@@ -615,7 +2731,7 @@ mod step_evidence_tests {
         assert_eq!(result.account_context.as_deref(), Some("firefly-pro"));
 
         let state = eng.state.read().await;
-        let chain = state.proof_chains.get("linear").expect("chain exists");
+        let chain = state.proof_chain("linear").expect("chain exists");
         assert_eq!(chain.entries.len(), 1, "exactly one step entry sealed");
         match &chain.entries[0] {
             ProofEntry::Step(s) => {
@@ -624,6 +2740,518 @@ mod step_evidence_tests {
             }
             _ => panic!("expected Step entry"),
         }
+    }
+
+    #[tokio::test]
+    async fn step_submission_without_graph_authority_fails_before_chain_mutation() {
+        let eng = engine_without_step_graph();
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("missing step graph authority must fail closed");
+
+        assert!(
+            err.to_string().contains("LangGraph step authority"),
+            "error must name the missing authority: {err:#}"
+        );
+        let state = eng.state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "missing step graph authority must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "missing step graph authority must not mutate workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_graph_run_without_workflow_authority() {
+        let state = Arc::new(RwLock::new(SessionState::new("missing-authority-step")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithoutWorkflowAuthority));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("step graph evidence without authority must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted workflow_authority"),
+            "error must identify missing graph authority marker: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "unauthorized graph evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "unauthorized graph evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_accepted_graph_state_in_write_history() {
+        let state = Arc::new(RwLock::new(SessionState::new("forged-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithForgedWrite));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("forged write history must fail closed");
+
+        assert!(
+            err.to_string().contains("accepted graph state"),
+            "error must identify missing accepted graph-state write: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "invalid graph write evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "invalid graph write evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_write_history_for_latest_checkpoint() {
+        let state = Arc::new(RwLock::new(SessionState::new("spliced-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithPreviousCheckpointWrite));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("write history spliced from an older checkpoint must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("latest-checkpoint state-channel write"),
+            "error must identify missing latest-checkpoint write evidence: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "spliced graph write evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "spliced graph write evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_write_history_for_matching_thread() {
+        let state = Arc::new(RwLock::new(SessionState::new("mismatched-step-thread")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithMismatchedWriteThread));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("write history from another thread must fail closed");
+
+        assert!(
+            err.to_string().contains("write history contains thread"),
+            "error must identify mismatched write thread: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "mismatched graph write thread must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "mismatched graph write thread must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_oldest_first_write_history() {
+        let state = Arc::new(RwLock::new(SessionState::new("out-of-order-step-writes")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithOutOfOrderWriteHistory));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("out-of-order write history must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("write history is not oldest-first"),
+            "error must identify out-of-order write history: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "out-of-order graph write history must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "out-of-order graph write history must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_oldest_first_checkpoint_history() {
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "out-of-order-step-checkpoints",
+        )));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithOutOfOrderCheckpointHistory));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("out-of-order checkpoint history must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("checkpoint history is not oldest-first"),
+            "error must identify out-of-order checkpoint history: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "out-of-order graph checkpoint history must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "out-of-order graph checkpoint history must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_stale_latest_checkpoint_state() {
+        let state = Arc::new(RwLock::new(SessionState::new("stale-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithStaleLatestCheckpoint));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("stale latest checkpoint must fail closed");
+
+        assert!(
+            err.to_string().contains("latest checkpoint state mismatch"),
+            "error must identify stale latest checkpoint state: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "stale graph checkpoint evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "stale graph checkpoint evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_requires_compiled_graph_topology() {
+        let state = Arc::new(RwLock::new(SessionState::new("no-topology-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithoutTopology));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("missing graph topology must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted compiled graph topology"),
+            "error must identify missing compiled graph topology: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "missing topology evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "missing topology evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_topology_without_langgraph_edges() {
+        fn remove_edges(topology: &mut serde_json::Value) {
+            topology["edges"] = serde_json::json!([]);
+        }
+
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "bad-topology-edge-step-session",
+        )));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithForgedTopology {
+                mutate: remove_edges,
+            }));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("empty topology edges must fail closed");
+
+        assert!(
+            err.to_string().contains("topology had no edges"),
+            "error must identify missing LangGraph edges: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(state.proof_chain("linear").is_none());
+        assert!(!state.has_graph_workflow("linear"));
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_topology_without_node_timeout_policy() {
+        fn remove_timeout(topology: &mut serde_json::Value) {
+            topology["nodes"][0]["has_timeout_policy"] = serde_json::json!(false);
+        }
+
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "bad-topology-node-step-session",
+        )));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithForgedTopology {
+                mutate: remove_timeout,
+            }));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("missing timeout metadata must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted timeout policy"),
+            "error must identify missing timeout policy: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(state.proof_chain("linear").is_none());
+        assert!(!state.has_graph_workflow("linear"));
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_topology_without_auto_checkpointing() {
+        fn disable_auto_checkpoint(topology: &mut serde_json::Value) {
+            topology["auto_checkpoint"] = serde_json::json!(false);
+        }
+
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "bad-topology-runtime-step-session",
+        )));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithForgedTopology {
+                mutate: disable_auto_checkpoint,
+            }));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("disabled auto-checkpointing must fail closed");
+
+        assert!(
+            err.to_string().contains("auto-checkpointing"),
+            "error must identify missing auto-checkpointing: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(state.proof_chain("linear").is_none());
+        assert!(!state.has_graph_workflow("linear"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_step_submission_rejected_before_second_step_proof() {
+        let eng = signed_engine();
+
+        eng.submit_step_evidence(
+            "linear",
+            "claim",
+            "1",
+            "fetch ticket",
+            Evidence::default(),
+            JudgeVerdict::pass(0.93, "evidence sufficient"),
+            JudgeModel::Sonnet,
+            serde_json::Value::Null,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("initial step proof");
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket again",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("duplicate step must be rejected by graph authority");
+
+        assert!(
+            err.to_string().contains("already terminal"),
+            "duplicate step error must come from graph terminal-step authority: {err:#}"
+        );
+        let state = eng.state.read().await;
+        let chain = state.proof_chain("linear").expect("chain");
+        assert_eq!(
+            chain.entries.len(),
+            1,
+            "duplicate step submit must not seal a second StepProof"
+        );
     }
 
     // #4 — Ed25519 attestation tests.
@@ -686,17 +3314,57 @@ mod step_evidence_tests {
         );
         let state = eng.state.read().await;
         assert!(
-            state.proof_chains.get("linear").is_none(),
+            state.proof_chain("linear").is_none(),
             "refused seal must not mutate the chain"
         );
     }
 
     #[tokio::test]
-    async fn no_key_no_requirement_seals_unsigned_backcompat() {
-        let eng = engine(); // default: no key, not required
+    async fn default_signing_posture_refuses_unsigned_step_seal() {
+        let state = Arc::new(RwLock::new(SessionState::new("default-signing-session")));
+        let eng =
+            ProofEngine::new(state.clone(), Arc::new(TestJudge)).with_test_step_graph_authority();
+
+        let result = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "step",
+                Evidence::default(),
+                JudgeVerdict::pass(0.95, "ok"),
+                JudgeModel::Opus,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "ProofEngine::new must default to mandatory signing"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("SENTINEL_SIGNING_KEY") && msg.contains("unsigned StepProof"),
+            "error must explain the default missing-key refusal: {msg}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "default signing refusal must not mutate the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_unsigned_seal_is_not_authoritative_verification_material() {
+        let eng = engine(); // local construction: no key, required posture disabled
         let proof = eng
             .submit_step_evidence(
-                "linear", "claim", "1", "step",
+                "linear",
+                "claim",
+                "1",
+                "step",
                 Evidence::default(),
                 JudgeVerdict::pass(0.95, "ok"),
                 JudgeModel::Opus,
@@ -705,13 +3373,53 @@ mod step_evidence_tests {
                 Utc::now(),
             )
             .await
-            .expect("unsigned seal is the back-compat default");
-        assert!(proof.signature.is_none(), "no key => unsigned (hash-chain only)");
+            .expect("local unsigned seal can be constructed");
+        assert!(
+            proof.signature.is_none(),
+            "local unsigned material has no authority signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_without_verify_key_fails_chain_verification() {
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        let eng = engine().with_signing(Some(key), true);
+        eng.submit_step_evidence(
+            "linear",
+            "claim",
+            "1",
+            "step",
+            Evidence::default(),
+            JudgeVerdict::pass(0.95, "ok"),
+            JudgeModel::Opus,
+            serde_json::Value::Null,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("signing key allows sealing");
+
+        let verification = eng
+            .verify_chain("linear")
+            .await
+            .expect("verification report");
+        assert!(
+            !verification.valid,
+            "verification must fail without SENTINEL_VERIFY_KEY"
+        );
+        assert!(
+            verification
+                .errors
+                .iter()
+                .any(|error| error.contains("SENTINEL_VERIFY_KEY")),
+            "verification errors must explain the missing verify key: {:?}",
+            verification.errors
+        );
     }
 
     #[tokio::test]
     async fn insufficient_verdict_hard_fails_without_mutating_chain() {
-        let eng = engine();
+        let eng = signed_engine();
         let res = eng
             .submit_step_evidence(
                 "linear",
@@ -745,14 +3453,14 @@ mod step_evidence_tests {
         // No chain mutation on failure.
         let state = eng.state.read().await;
         assert!(
-            !state.proof_chains.contains_key("linear"),
+            !state.has_proof_chain("linear"),
             "no chain should be created when verdict fails",
         );
     }
 
     #[tokio::test]
     async fn sequential_step_proofs_chain_via_head_hash() {
-        let eng = engine();
+        let eng = signed_engine();
 
         // Each step's `started_at` must be >= the prior step's
         // `completed_at` (chain temporal ordering — Attack #170 parity).
@@ -814,10 +3522,10 @@ mod step_evidence_tests {
     #[tokio::test]
     async fn step_after_existing_phase_proof_chains_correctly() {
         // Realistic mixed chain: skill starts with a phase-level claim
-        // proof (legacy `proofs` Vec), then drops into step-level work
-        // (mixed `entries` Vec). The step's previous_hash must point at
+        // proof (`proofs` Vec), then drops into step-level work (mixed
+        // `entries` Vec). The step's previous_hash must point at
         // the phase's combined_hash via head_hash().
-        let eng = engine();
+        let eng = signed_engine();
 
         // Pre-seed the chain with a PhaseProof to simulate prior phase
         // execution. We bypass submit_evidence here because that calls
@@ -834,7 +3542,7 @@ mod step_evidence_tests {
                 sentinel_domain::proof::GENESIS_HASH,
                 true, // matches judge_verdict: JudgeVerdict::pass(..) below
             );
-            let phase_proof = PhaseProof {
+            let mut phase_proof = PhaseProof {
                 phase_id: "claim".into(),
                 skill: "linear".into(),
                 session_id: "test-session".into(),
@@ -844,25 +3552,22 @@ mod step_evidence_tests {
                 combined_hash: combined_hash.clone(),
                 judge_model: "sonnet".into(),
                 judge_verdict: JudgeVerdict::pass(0.95, "claimed"),
+                signature: None,
                 started_at: Utc::now() - chrono::Duration::seconds(10),
                 completed_at: Utc::now() - chrono::Duration::seconds(5),
                 duration_ms: 5000,
             };
+            phase_proof.sign_with(&test_signing_key());
             chain.add_proof(phase_proof).expect("seed phase");
-            state.proof_chains.insert("linear".into(), chain);
+            state.restore_proof_chain("linear", chain);
         }
 
         // Now submit a step. Its previous_hash should match the phase's
-        // combined_hash because head_hash() prefers entries-tail then
-        // proofs-tail, and there's no entries-tail yet.
+        // combined_hash because phase proofs live in the canonical entries
+        // chain.
         let phase_combined = {
             let state = eng.state.read().await;
-            state
-                .proof_chains
-                .get("linear")
-                .unwrap()
-                .head_hash()
-                .to_string()
+            state.proof_chain("linear").unwrap().head_hash().to_string()
         };
 
         let step = eng
@@ -943,5 +3648,1760 @@ mod step_evidence_tests {
             "different artifacts must produce different combined hashes",
         );
         assert_ne!(a.artifact_hash, b.artifact_hash);
+    }
+}
+
+#[cfg(test)]
+mod phase_evidence_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::judge_service::JudgeService;
+    use sentinel_domain::evidence::Evidence;
+    use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
+    use sentinel_domain::workflow::{SkillWorkflow, StepStatus, WorkflowPhase, WorkflowState};
+
+    struct PhaseTestJudge {
+        verdict: JudgeVerdict,
+    }
+
+    #[async_trait::async_trait]
+    impl JudgeService for PhaseTestJudge {
+        async fn evaluate(
+            &self,
+            _skill: &str,
+            _phase_id: &str,
+            _phase_objectives: &str,
+            _evidence: &Evidence,
+            _model: JudgeModel,
+        ) -> Result<JudgeVerdict> {
+            Ok(self.verdict.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPhaseGraph {
+        calls: Mutex<Vec<(String, bool)>>,
+        fail_with: Mutex<Option<String>>,
+        seed_state: Mutex<Option<WorkflowState>>,
+        graph_run_override: Mutex<Option<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PhaseGraphAuthority for RecordingPhaseGraph {
+        async fn apply_verdict(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            passed: bool,
+        ) -> Result<PhaseGraphApplyResult> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((phase_id.to_string(), passed));
+            if let Some(message) = self.fail_with.lock().unwrap().take() {
+                bail!("{message}");
+            }
+            let mut state = self
+                .seed_state
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| WorkflowState::new(skill, session_id));
+            state.current_phase = Some(if passed { 1 } else { 0 });
+            if passed && !state.completed_phases.iter().any(|p| p == phase_id) {
+                state.completed_phases.push(phase_id.to_string());
+            }
+            state.complete = passed;
+            let graph_run = self
+                .graph_run_override
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let graph_state = serde_json::json!({
+                        "skill": skill,
+                        "session_id": session_id,
+                        "phase_order": ["claim"],
+                        "current_phase": state.current_phase,
+                        "completed_phases": state.completed_phases.clone(),
+                        "complete": state.complete,
+                        "last_verdict": if passed { "pass" } else { "fail" },
+                    });
+                    let checkpoint_id = format!("checkpoint-{phase_id}");
+                    test_graph_run_with_authority(serde_json::json!({
+                        "state": graph_state.clone(),
+                        "latest_checkpoint": {
+                            "checkpoint_id": checkpoint_id,
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "step_number": 1,
+                            "state": graph_state.clone(),
+                            "writes": [{
+                                "node_id": phase_id,
+                                "channel": "state",
+                                "ts": "2026-06-17T00:00:00Z",
+                            }],
+                        },
+                        "checkpoints": [{
+                            "checkpoint_id": checkpoint_id,
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "step_number": 1,
+                            "state": graph_state.clone(),
+                        }],
+                        "writes": [{
+                            "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                            "checkpoint_id": checkpoint_id,
+                            "step_number": 1,
+                            "channel": "state",
+                            "value": graph_state.clone(),
+                        }],
+                        "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
+                        "stream": if state.complete {
+                            serde_json::json!([])
+                        } else {
+                            serde_json::json!([
+                                {
+                                    "event_type": "ExecutionComplete",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "values",
+                                    "payload_json": {
+                                        "skill": skill,
+                                        "session_id": session_id
+                                    }
+                                },
+                                {
+                                    "event_type": "Checkpoint",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "checkpoints",
+                                    "payload_json": {
+                                        "checkpoint_id": checkpoint_id,
+                                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                                        "step_number": 1,
+                                        "source": {
+                                            "type": "stream_update",
+                                            "node": phase_id
+                                        },
+                                        "state": graph_state.clone()
+                                    }
+                                },
+                                {
+                                    "event_type": "Custom",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "custom",
+                                    "payload_json": {
+                                        "type": "sentinel.phase_gate",
+                                        "skill": skill,
+                                        "session_id": session_id,
+                                        "phase_id": phase_id,
+                                        "phase_index": state.current_phase,
+                                        "last_verdict": "pending"
+                                    }
+                                }
+                        ])
+                        }
+                    }))
+                });
+            Ok(PhaseGraphApplyResult {
+                workflow_state: state,
+                graph_run,
+            })
+        }
+    }
+
+    fn workflow() -> SkillWorkflow {
+        SkillWorkflow {
+            skill: "linear".to_string(),
+            phases: vec![WorkflowPhase {
+                id: "claim".to_string(),
+                file: "claim.md".to_string(),
+                required: true,
+                judge: JudgeModel::Sonnet,
+                description: "claim phase".to_string(),
+                required_dyad: None,
+            }],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn phase_submission_projects_langgraph_authority_state() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph::default());
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+        let mut graph_projection = WorkflowState::new("linear", "phase-session");
+        graph_projection.update_step(
+            "claim",
+            "0.1",
+            StepStatus::Completed,
+            Some("step done".into()),
+        );
+        *authority.seed_state.lock().unwrap() = Some(graph_projection);
+
+        engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect("phase proof seals and graph advances");
+
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)]
+        );
+        let state = state.read().await;
+        let workflow_state = state
+            .graph_workflow("linear")
+            .expect("workflow projected from graph");
+        assert_eq!(workflow_state.completed_phases, vec!["claim".to_string()]);
+        assert!(workflow_state.complete);
+        assert_eq!(workflow_state.step_states.len(), 1);
+        assert_eq!(workflow_state.step_states[0].step_id, "0.1");
+        assert_eq!(workflow_state.step_states[0].status, StepStatus::Completed);
+        assert_eq!(
+            state
+                .proof_chain("linear")
+                .expect("proof chain")
+                .phase_count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_with_signing_key_signs_phase_proof() {
+        let state = Arc::new(RwLock::new(SessionState::new("signed-phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph::default());
+        let key = SigningKey::from_bytes(&[41u8; 32]);
+        let verifying = key.verifying_key();
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(Some(key), true)
+        .with_phase_graph_authority(authority);
+        let wf = workflow();
+
+        let proof = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect("signed phase proof seals");
+
+        assert!(
+            proof.signature.is_some(),
+            "configured signing key must sign PhaseProof"
+        );
+        assert!(
+            proof
+                .verify_signature(&verifying)
+                .expect("phase signature verifies"),
+            "phase signature must verify against configured public key"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_phase_submission_persists_fail_verdict_through_graph() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph::default());
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec!["add log".into()]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("insufficient phase proof must fail");
+
+        assert!(
+            err.to_string().contains("evidence insufficient"),
+            "error must still surface insufficient evidence: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "failed verdict must be committed through LangGraph authority"
+        );
+        let state = state.read().await;
+        let workflow_state = state
+            .graph_workflow("linear")
+            .expect("failed graph verdict still projects workflow state");
+        assert_eq!(workflow_state.current_phase, Some(0));
+        assert!(workflow_state.completed_phases.is_empty());
+        assert!(!workflow_state.complete);
+        assert_eq!(
+            state
+                .submission_attempts("linear:claim")
+                .map(|attempts| attempts.count),
+            Some(1),
+            "failure counter is recorded after graph accepts the fail verdict"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "failed verdict must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_missing_custom_gate_stream_fails_closed() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": {
+                        "skill": "linear",
+                        "session_id": "phase-session",
+                        "phase_order": ["claim"],
+                        "current_phase": 0,
+                        "completed_phases": [],
+                        "complete": false
+                    },
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "phase_order": ["claim"],
+                            "current_phase": 0,
+                            "completed_phases": [],
+                            "complete": false
+                        },
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "phase_order": ["claim"],
+                            "current_phase": 0,
+                            "completed_phases": [],
+                            "complete": false
+                        }
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "phase_order": ["claim"],
+                            "current_phase": 0,
+                            "completed_phases": [],
+                            "complete": false
+                        }
+                    }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
+                    "stream": [
+                        {
+                            "event_type": "ExecutionComplete",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "values",
+                            "payload_json": {
+                                "skill": "linear",
+                                "session_id": "phase-session"
+                            }
+                        },
+                        {
+                            "event_type": "Checkpoint",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "checkpoints",
+                            "payload_json": {
+                                "checkpoint_id": "checkpoint-claim",
+                                "thread_id": "sentinel.phase.linear.phase-session",
+                                "step_number": 1,
+                                "source": {
+                                    "type": "stream_update",
+                                    "node": "claim"
+                                },
+                                "state": {
+                                    "skill": "linear",
+                                    "session_id": "phase-session",
+                                    "phase_order": ["claim"],
+                                    "current_phase": 0,
+                                    "completed_phases": [],
+                                    "complete": false
+                                }
+                            }
+                        }
+                    ]
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("missing custom stream evidence must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted custom phase-gate"),
+            "error must identify missing custom gate stream: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then evidence validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "invalid graph evidence must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "local failure counters must not advance when graph evidence is invalid"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "invalid graph evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_rejects_mismatched_graph_state_authority() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let mut graph_run = test_nonterminal_phase_graph_run(
+            "linear",
+            "phase-session",
+            "claim",
+            Some(serde_json::json!({
+                "type": "sentinel.phase_gate",
+                "skill": "linear",
+                "session_id": "phase-session",
+                "phase_id": "claim",
+                "phase_index": 0,
+                "last_verdict": "pending"
+            })),
+        );
+        graph_run
+            .as_object_mut()
+            .expect("test graph run must be an object")
+            .insert(
+                "graph_state".to_string(),
+                serde_json::json!({
+                    "skill": "linear",
+                    "session_id": "phase-session",
+                    "phase_order": ["claim"],
+                    "current_phase": 1,
+                    "completed_phases": ["claim"],
+                    "complete": true,
+                    "last_verdict": "pass"
+                }),
+            );
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(graph_run)),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("mismatched graph_state authority must fail closed");
+
+        assert!(
+            err.to_string().contains("graph_state mismatch"),
+            "error must identify forged graph_state authority: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then authority-field validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "mismatched graph_state must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "mismatched graph_state must not advance local failure counters"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "mismatched graph_state must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_rejects_cross_session_custom_gate_stream() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_nonterminal_phase_graph_run(
+                "linear",
+                "phase-session",
+                "claim",
+                Some(serde_json::json!({
+                    "type": "sentinel.phase_gate",
+                    "skill": "linear",
+                    "session_id": "other-session",
+                    "phase_id": "claim",
+                    "phase_index": 0,
+                    "last_verdict": "pending"
+                })),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("cross-session custom stream evidence must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted custom phase-gate"),
+            "error must identify mismatched custom gate stream: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then custom stream identity validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "cross-session custom stream evidence must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "local failure counters must not advance when custom stream evidence is invalid"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "cross-session custom stream evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_latest_checkpoint_stream_payload() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let graph_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 0,
+            "completed_phases": [],
+            "complete": false,
+            "last_verdict": "fail"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state.clone()
+                    }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
+                    "stream": [
+                        {
+                            "event_type": "ExecutionComplete",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "values",
+                            "payload_json": graph_state.clone()
+                        },
+                        {
+                            "event_type": "Checkpoint",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "checkpoints",
+                            "payload_json": {
+                                "checkpoint_id": "previous-checkpoint-claim",
+                                "thread_id": "sentinel.phase.linear.phase-session",
+                                "step_number": 1,
+                                "source": {
+                                    "type": "stream_update",
+                                    "node": "claim"
+                                },
+                                "state": graph_state.clone()
+                            }
+                        },
+                        {
+                            "event_type": "Custom",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "custom",
+                            "payload_json": {
+                                "type": "sentinel.phase_gate",
+                                "skill": "linear",
+                                "session_id": "phase-session",
+                                "phase_id": "claim",
+                                "phase_index": 0,
+                                "last_verdict": "pending"
+                            }
+                        }
+                    ]
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("stream from a different checkpoint must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("stream omitted latest checkpoint payload"),
+            "error must identify missing latest stream checkpoint: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then stream checkpoint validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "invalid stream checkpoint evidence must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "local failure counters must not advance when stream evidence is invalid"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "invalid stream checkpoint evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_stream_checkpoint_state_match() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let graph_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 0,
+            "completed_phases": [],
+            "complete": false,
+            "last_verdict": "fail"
+        });
+        let forged_stream_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 0,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": graph_state.clone()
+                    }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
+                    "stream": [
+                        {
+                            "event_type": "ExecutionComplete",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "values",
+                            "payload_json": graph_state.clone()
+                        },
+                        {
+                            "event_type": "Checkpoint",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "checkpoints",
+                            "payload_json": {
+                                "checkpoint_id": "checkpoint-claim",
+                                "thread_id": "sentinel.phase.linear.phase-session",
+                                "step_number": 1,
+                                "source": {
+                                    "type": "stream_update",
+                                    "node": "claim"
+                                },
+                                "state": forged_stream_state
+                            }
+                        },
+                        {
+                            "event_type": "Custom",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "custom",
+                            "payload_json": {
+                                "type": "sentinel.phase_gate",
+                                "skill": "linear",
+                                "session_id": "phase-session",
+                                "phase_id": "claim",
+                                "phase_index": 0,
+                                "last_verdict": "pending"
+                            }
+                        }
+                    ]
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("forged stream checkpoint state must fail closed");
+
+        assert!(
+            err.to_string().contains("stream checkpoint")
+                && err.to_string().contains("state mismatch"),
+            "error must identify forged stream checkpoint state: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then stream state validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "forged stream checkpoint state must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "local failure counters must not advance when stream state is invalid"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "forged stream checkpoint state must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_rejects_stale_latest_checkpoint_state() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": {
+                        "skill": "linear",
+                        "session_id": "phase-session",
+                        "phase_order": ["claim"],
+                        "current_phase": 1,
+                        "completed_phases": ["claim"],
+                        "complete": true
+                    },
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "phase_order": ["claim"],
+                            "current_phase": 0,
+                            "completed_phases": [],
+                            "complete": false
+                        }
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "phase_order": ["claim"],
+                            "current_phase": 0,
+                            "completed_phases": [],
+                            "complete": false
+                        }
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "completed_phases": ["claim"]
+                        }
+                    }],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("stale latest checkpoint must fail closed");
+
+        assert!(
+            err.to_string().contains("latest checkpoint state mismatch"),
+            "error must identify stale latest checkpoint state: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then evidence validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "stale graph checkpoint evidence must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "stale graph checkpoint evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_accepted_graph_state_in_write_history() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": {
+                            "skill": "linear",
+                            "session_id": "phase-session",
+                            "completed_phases": ["claim"]
+                        }
+                    }],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("forged phase write history must fail closed");
+
+        assert!(
+            err.to_string().contains("accepted graph state"),
+            "error must identify missing accepted graph-state write: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then write evidence validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "invalid graph write evidence must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "invalid graph write evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_write_history_for_latest_checkpoint() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 2,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 2,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "previous-checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": accepted_state
+                    }],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("write history spliced from an older checkpoint must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("latest-checkpoint state-channel write"),
+            "error must identify missing latest-checkpoint write evidence: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then write evidence validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "spliced graph write evidence must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "spliced graph write evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_write_history_for_matching_thread() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.other-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": accepted_state
+                    }],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("write history from another thread must fail closed");
+
+        assert!(
+            err.to_string().contains("write history contains thread"),
+            "error must identify mismatched write thread: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then write thread validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "mismatched graph write thread must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "mismatched graph write thread must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_checkpoint_history_for_matching_thread() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.other-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": accepted_state
+                    }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("checkpoint history from another thread must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("checkpoint history contains thread"),
+            "error must identify mismatched checkpoint history thread: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then checkpoint thread validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "mismatched graph checkpoint thread must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "mismatched graph checkpoint thread must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_oldest_first_write_history() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 2,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 2,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [
+                        {
+                            "thread_id": "sentinel.phase.linear.phase-session",
+                            "checkpoint_id": "checkpoint-claim",
+                            "step_number": 2,
+                            "channel": "state",
+                            "value": accepted_state.clone()
+                        },
+                        {
+                            "thread_id": "sentinel.phase.linear.phase-session",
+                            "checkpoint_id": "previous-checkpoint-claim",
+                            "step_number": 1,
+                            "channel": "state",
+                            "value": accepted_state
+                        }
+                    ],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("out-of-order write history must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("write history is not oldest-first"),
+            "error must identify out-of-order write history: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then write order validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "out-of-order graph write history must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "out-of-order graph write history must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_requires_compiled_graph_topology() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": accepted_state
+                    }],
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("missing graph topology must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted compiled graph topology"),
+            "error must identify missing compiled graph topology: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then topology validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "missing topology evidence must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "missing topology evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_without_workflow_context_never_falls_back() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph::default());
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                None,
+                false,
+            )
+            .await
+            .expect_err("workflow context is required for graph authority");
+
+        assert!(
+            err.to_string().contains("workflow context"),
+            "error must identify missing graph workflow context: {err:#}"
+        );
+        assert!(
+            authority.calls.lock().unwrap().is_empty(),
+            "missing workflow context must not call graph authority with a guessed workflow"
+        );
+        let state = state.read().await;
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "missing workflow context must not use local failure counters"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "missing workflow context must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_graph_rejection_does_not_seal_proof() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph {
+            fail_with: Mutex::new(Some("graph rejected phase order".to_string())),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("graph rejection must fail submission");
+
+        assert!(
+            err.to_string().contains("graph rejected phase order"),
+            "graph authority error must surface: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_proof_chain("linear"),
+            "graph-rejected phase must not seal a success proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_malformed_graph_evidence_does_not_project_or_seal() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": {
+                        "skill": "linear",
+                        "session_id": "phase-session",
+                        "current_phase": 1,
+                        "completed_phases": ["claim"],
+                        "complete": true
+                    }
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority);
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("malformed graph evidence must fail closed");
+
+        assert!(
+            err.to_string().contains("omitted latest checkpoint"),
+            "error must identify malformed graph evidence: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_proof_chain("linear"),
+            "malformed graph evidence must not seal a phase proof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "malformed graph evidence must not project workflow state"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_without_graph_authority_fails_before_chain_mutation() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        );
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("missing graph authority must fail closed");
+
+        assert!(
+            err.to_string().contains("LangGraph phase authority"),
+            "error must name the missing authority: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_proof_chain("linear"),
+            "missing graph authority must not seal a phase proof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "missing graph authority must not mutate workflow progress"
+        );
     }
 }

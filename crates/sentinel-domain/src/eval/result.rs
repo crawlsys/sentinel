@@ -5,7 +5,7 @@
 //! [`EvalCaseResult`] per dispatched case (carrying the candidate
 //! output text, timing, and error context alongside the score), and
 //! one [`EvalRunResult`] aggregating every case in a benchmark run
-//! with summary statistics for dashboard rendering.
+//! with summary statistics for reporting.
 //!
 //! Pure domain — no ports, no IO. The benchmark runner
 //! (A12 Phase 3c) constructs these; the JSONL run store (Phase 3d)
@@ -15,7 +15,7 @@
 //! # R5 quarantine boundary
 //!
 //! Per `docs/policy-replay-mining-quarantine.md`: run results are
-//! dispatch input + dashboard signal, never training signal.
+//! dispatch input + operator signal, never training signal.
 //! `candidate_output` may contain redacted-source content per the
 //! case's [`super::RedactionLevel`]; downstream consumers must
 //! honor the case's [`super::CaseProvenance::is_private_test`] flag
@@ -152,7 +152,7 @@ impl EvalRunResult {
 
     /// Fraction of successful cases whose composite meets or exceeds
     /// `threshold`. Range `[0.0, 1.0]`. Returns `0.0` when there are
-    /// no successful cases (operator-facing dashboards prefer a
+    /// no successful cases (operator-facing views prefer a
     /// concrete pass-rate over `None` here — empty corpus → 0% pass).
     #[must_use]
     pub fn pass_rate(&self, threshold: f32) -> f32 {

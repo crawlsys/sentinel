@@ -2,7 +2,7 @@
 //!
 //! - `sentinel project init` (M9.1, #65): scaffold `.sentinel/` in a repo.
 //! - `sentinel project handover` (M9.3, #67): append a handover Markdown
-//!   stub to `.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
+//!   document to `.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
 //! - `sentinel project lesson` (M9.3, #67): append a lesson JSON file to
 //!   `.sentinel/lessons/L-NNN.json` with the next monotonic ID.
 //!
@@ -113,7 +113,8 @@ impl Report {
             for p in &self.created {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
+                    p.strip_prefix(root)
+                        .map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -123,7 +124,8 @@ impl Report {
             for p in &self.overwrote {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
+                    p.strip_prefix(root)
+                        .map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
@@ -133,11 +135,13 @@ impl Report {
             for p in &self.skipped_existing {
                 println!(
                     "    {}",
-                    p.strip_prefix(root).map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
+                    p.strip_prefix(root)
+                        .map_or_else(|_| p.display().to_string(), |s| s.display().to_string())
                 );
             }
         }
-        if self.created.is_empty() && self.overwrote.is_empty() && self.skipped_existing.is_empty() {
+        if self.created.is_empty() && self.overwrote.is_empty() && self.skipped_existing.is_empty()
+        {
             println!("  (nothing to do)");
         }
         if dry_run {
@@ -154,8 +158,7 @@ fn ensure_dir(path: &Path, dry_run: bool, report: &mut Report) -> Result<()> {
         report.created.push(path.to_path_buf());
         return Ok(());
     }
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("create_dir_all({})", path.display()))?;
+    std::fs::create_dir_all(path).with_context(|| format!("create_dir_all({})", path.display()))?;
     report.created.push(path.to_path_buf());
     Ok(())
 }
@@ -184,8 +187,7 @@ fn write_or_skip(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create_dir_all({})", parent.display()))?;
     }
-    std::fs::write(path, body)
-        .with_context(|| format!("write({})", path.display()))?;
+    std::fs::write(path, body).with_context(|| format!("write({})", path.display()))?;
     if exists {
         report.overwrote.push(path.to_path_buf());
     } else {
@@ -237,7 +239,7 @@ If you can answer "yes" to *"a new developer cloning fresh should see this"*, it
 
 ## `config.json`
 
-Per-repo sentinel config. Today it's a minimal stub:
+Per-repo sentinel config. Today it's a minimal starter template:
 
 ```json
 {
@@ -247,7 +249,7 @@ Per-repo sentinel config. Today it's a minimal stub:
 }
 ```
 
-`null` means "inherit from `~/.claude/sentinel/config/...`" or the project default. Fields are additive: omit any field to fall back to global default.
+`null` means "inherit from `~/.claude/sentinel/config/...`" or the project default. Fields are additive: omit any field to use the global default.
 
 ## Scaffolded by
 
@@ -334,7 +336,7 @@ When a plan crosses the threshold from "scratchpad" to "design doc," move it her
 | Pre-implementation design | Post-implementation summary |
 | "What we're going to build and why" | "What changed and how to test it" |
 | Edited only when design changes | Edited rarely after open |
-| Refers forward (TBD code paths) | Refers backward (commits, files) |
+| Refers forward (TBD code paths) | References commits and files |
 
 Plans answer "why," PRs answer "what." Both live in version control once the work matures.
 "#;
@@ -477,10 +479,10 @@ sentinel verify --session <session_id> --chain .sentinel/proof-chains/<filename>
 "#;
 
 // ============================================================================
-// `sentinel project handover` — write a Markdown handover stub (M9.3, #67)
+// `sentinel project handover` — write a Markdown handover document (M9.3, #67)
 // ============================================================================
 
-/// Write a handover stub to `<repo>/.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
+/// Write a handover document to `<repo>/.sentinel/handovers/YYYY-MM-DD-<slug>.md`.
 ///
 /// `title` is required — it becomes both the document's heading and the
 /// filename slug (lowercased, non-alnum replaced with `-`). `summary` is
@@ -492,11 +494,7 @@ sentinel verify --session <session_id> --chain .sentinel/proof-chains/<filename>
 /// Refuses to overwrite an existing file at the same path — appends a `-2`
 /// / `-3` / etc. suffix when collisions occur. This matters because two
 /// handovers in the same day with the same slug shouldn't silently merge.
-pub fn run_handover(
-    dir: Option<PathBuf>,
-    title: String,
-    summary: Option<String>,
-) -> Result<()> {
+pub fn run_handover(dir: Option<PathBuf>, title: String, summary: Option<String>) -> Result<()> {
     if title.trim().is_empty() {
         anyhow::bail!("--title is required and cannot be empty");
     }
@@ -504,8 +502,9 @@ pub fn run_handover(
         Some(d) => d,
         None => std::env::current_dir().context("could not resolve current directory")?,
     };
-    let repo_root = find_repo_root(&cwd)
-        .context("could not find a .git directory walking up from cwd — handovers require a git repo")?;
+    let repo_root = find_repo_root(&cwd).context(
+        "could not find a .git directory walking up from cwd — handovers require a git repo",
+    )?;
     let handovers_dir = repo_root.join(".sentinel").join("handovers");
     if !handovers_dir.is_dir() {
         anyhow::bail!(
@@ -518,7 +517,7 @@ pub fn run_handover(
     let slug = slugify(&title);
     let target = next_available_handover_path(&handovers_dir, &date, &slug);
 
-    let body = render_handover_stub(&title, summary.as_deref(), &date);
+    let body = render_handover_document(&title, summary.as_deref(), &date);
     std::fs::write(&target, body).with_context(|| format!("write {}", target.display()))?;
 
     println!("Created handover: {}", target.display());
@@ -565,8 +564,7 @@ fn slugify(s: &str) -> String {
         out.pop();
     }
     if out.is_empty() {
-        // All-non-alphanumeric title (emoji, punctuation) — fall back so
-        // we always produce a usable filename.
+        // All-non-alphanumeric title: use a stable filename segment.
         return "handover".to_string();
     }
     out
@@ -591,7 +589,7 @@ fn next_available_handover_path(handovers_dir: &Path, date: &str, slug: &str) ->
     handovers_dir.join(format!("{date}-{slug}-overflow.md"))
 }
 
-fn render_handover_stub(title: &str, summary: Option<&str>, date: &str) -> String {
+fn render_handover_document(title: &str, summary: Option<&str>, date: &str) -> String {
     let summary_block = match summary {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => "<what was the session trying to do — fill in>".to_string(),
@@ -646,8 +644,9 @@ pub fn run_lesson(
         Some(d) => d,
         None => std::env::current_dir().context("could not resolve current directory")?,
     };
-    let repo_root = find_repo_root(&cwd)
-        .context("could not find a .git directory walking up from cwd — lessons require a git repo")?;
+    let repo_root = find_repo_root(&cwd).context(
+        "could not find a .git directory walking up from cwd — lessons require a git repo",
+    )?;
     let lessons_dir = repo_root.join(".sentinel").join("lessons");
     if !lessons_dir.is_dir() {
         anyhow::bail!(
@@ -694,12 +693,7 @@ fn next_lesson_id(lessons_dir: &Path) -> Result<u32> {
     Ok(max_seen + 1)
 }
 
-fn render_lesson_json(
-    id: &str,
-    title: &str,
-    summary: Option<&str>,
-    tags: &[String],
-) -> String {
+fn render_lesson_json(id: &str, title: &str, summary: Option<&str>, tags: &[String]) -> String {
     let date = current_date_string();
     let summary_str = summary.unwrap_or("").trim();
     let tags_arr = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
@@ -709,18 +703,23 @@ fn render_lesson_json(
     let mut map = serde_json::Map::new();
     map.insert("id".into(), serde_json::Value::String(id.to_string()));
     map.insert("title".into(), serde_json::Value::String(title.to_string()));
-    map.insert("summary".into(), serde_json::Value::String(summary_str.to_string()));
+    map.insert(
+        "summary".into(),
+        serde_json::Value::String(summary_str.to_string()),
+    );
     map.insert("details".into(), serde_json::Value::String(String::new()));
     map.insert(
         "tags".into(),
         serde_json::from_str(&tags_arr).unwrap_or(serde_json::Value::Array(vec![])),
     );
-    map.insert("first_observed".into(), serde_json::Value::String(date.clone()));
+    map.insert(
+        "first_observed".into(),
+        serde_json::Value::String(date.clone()),
+    );
     map.insert("still_valid_as_of".into(), serde_json::Value::String(date));
     map.insert("related_commits".into(), serde_json::Value::Array(vec![]));
     map.insert("related_files".into(), serde_json::Value::Array(vec![]));
-    let mut out = serde_json::to_string_pretty(&serde_json::Value::Object(map))
-        .unwrap_or_default();
+    let mut out = serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default();
     out.push('\n');
     out
 }
@@ -738,7 +737,10 @@ mod tests {
         assert!(sd.join("config.json").is_file());
         for (sub, _) in SUBDIRS {
             assert!(sd.join(sub).is_dir(), "missing dir: {sub}");
-            assert!(sd.join(sub).join("README.md").is_file(), "missing README: {sub}");
+            assert!(
+                sd.join(sub).join("README.md").is_file(),
+                "missing README: {sub}"
+            );
         }
     }
 
@@ -752,7 +754,10 @@ mod tests {
         // Re-run without force — file should be preserved.
         run(Some(tmp.path().to_path_buf()), false, false).unwrap();
         let after = std::fs::read_to_string(&readme).unwrap();
-        assert_eq!(after, "MODIFIED", "non-force should NOT overwrite existing files");
+        assert_eq!(
+            after, "MODIFIED",
+            "non-force should NOT overwrite existing files"
+        );
     }
 
     #[test]
@@ -763,14 +768,20 @@ mod tests {
         std::fs::write(&readme, "MODIFIED").unwrap();
         run(Some(tmp.path().to_path_buf()), true, false).unwrap();
         let after = std::fs::read_to_string(&readme).unwrap();
-        assert!(after.contains("Repo-local sentinel state"), "force should overwrite");
+        assert!(
+            after.contains("Repo-local sentinel state"),
+            "force should overwrite"
+        );
     }
 
     #[test]
     fn dry_run_does_not_create_anything() {
         let tmp = tempfile::tempdir().unwrap();
         run(Some(tmp.path().to_path_buf()), false, true).unwrap();
-        assert!(!tmp.path().join(".sentinel").exists(), "dry-run must not create .sentinel/");
+        assert!(
+            !tmp.path().join(".sentinel").exists(),
+            "dry-run must not create .sentinel/"
+        );
     }
 
     #[test]
@@ -778,7 +789,10 @@ mod tests {
         // The default config string must parse — catches typos at compile-bake time.
         let v: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON).expect("valid JSON");
         assert!(v.is_object());
-        assert_eq!(v.get("version").and_then(serde_json::Value::as_i64), Some(1));
+        assert_eq!(
+            v.get("version").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
     }
 
     #[test]
@@ -786,7 +800,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         run(Some(tmp.path().to_path_buf()), false, false).unwrap();
         // Delete one subdir's README — simulates partial state.
-        let lost = tmp.path().join(".sentinel").join("lessons").join("README.md");
+        let lost = tmp
+            .path()
+            .join(".sentinel")
+            .join("lessons")
+            .join("README.md");
         std::fs::remove_file(&lost).unwrap();
         // Re-run; the missing README should be re-created, others left alone.
         let readme = tmp.path().join(".sentinel").join("README.md");
@@ -801,7 +819,10 @@ mod tests {
 
     #[test]
     fn slugify_basic() {
-        assert_eq!(slugify("Doppler personal branch"), "doppler-personal-branch");
+        assert_eq!(
+            slugify("Doppler personal branch"),
+            "doppler-personal-branch"
+        );
         assert_eq!(slugify("FPCRM-123: fix login"), "fpcrm-123-fix-login");
         assert_eq!(slugify("trailing spaces   "), "trailing-spaces");
         assert_eq!(slugify("  leading"), "leading");
@@ -834,8 +855,15 @@ mod tests {
 
         run_handover(Some(repo.clone()), "Test handover".to_string(), None).unwrap();
         let date = current_date_string();
-        let expected = repo.join(".sentinel").join("handovers").join(format!("{date}-test-handover.md"));
-        assert!(expected.is_file(), "expected {} to exist", expected.display());
+        let expected = repo
+            .join(".sentinel")
+            .join("handovers")
+            .join(format!("{date}-test-handover.md"));
+        assert!(
+            expected.is_file(),
+            "expected {} to exist",
+            expected.display()
+        );
         let body = std::fs::read_to_string(&expected).unwrap();
         assert!(body.starts_with("# Test handover"));
         assert!(body.contains(&format!("**Date:** {date}")));
@@ -856,7 +884,10 @@ mod tests {
         )
         .unwrap();
         let date = current_date_string();
-        let path = repo.join(".sentinel").join("handovers").join(format!("{date}-t.md"));
+        let path = repo
+            .join(".sentinel")
+            .join("handovers")
+            .join(format!("{date}-t.md"));
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("summary text here"));
         assert!(!body.contains("<what was the session trying to do"));
@@ -894,7 +925,8 @@ mod tests {
     #[test]
     fn run_handover_errors_on_empty_title() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = run_handover(Some(tmp.path().to_path_buf()), "   ".to_string(), None).unwrap_err();
+        let err =
+            run_handover(Some(tmp.path().to_path_buf()), "   ".to_string(), None).unwrap_err();
         assert!(err.to_string().contains("title"));
     }
 
@@ -973,7 +1005,8 @@ mod tests {
     #[test]
     fn run_lesson_errors_on_empty_title() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = run_lesson(Some(tmp.path().to_path_buf()), String::new(), None, vec![]).unwrap_err();
+        let err =
+            run_lesson(Some(tmp.path().to_path_buf()), String::new(), None, vec![]).unwrap_err();
         assert!(err.to_string().contains("title"));
     }
 }

@@ -44,7 +44,7 @@
 //! (summary) and `…-pm-audit.jsonl` (one row per flagged issue), idempotently.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -95,7 +95,7 @@ impl Issue {
 }
 
 /// One flagged issue, written as a JSONL row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmFlag {
     pub identifier: String,
     pub title: String,
@@ -168,6 +168,14 @@ pub struct PmAuditSummary {
     pub hard_violations: bool,
 }
 
+/// Scanner output used by graph-backed callers that need both the board-level
+/// summary and the exact per-ticket PM discipline flags from the same pass.
+#[derive(Debug, Clone, Serialize)]
+pub struct PmAuditReport {
+    pub summary: PmAuditSummary,
+    pub flags: Vec<PmFlag>,
+}
+
 /// Optional burndown inputs. When `velocity_pts_per_week` and
 /// `weeks_available` are both `Some`, check 4 runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -183,6 +191,15 @@ pub fn scan_pm_audit(
     output_summary: &Path,
     burndown: BurndownInputs,
 ) -> Result<PmAuditSummary> {
+    Ok(scan_pm_audit_report(linear_cache, output_summary, burndown)?.summary)
+}
+
+/// Run the full PM audit and return the exact flag rows alongside the summary.
+pub fn scan_pm_audit_report(
+    linear_cache: &Path,
+    output_summary: &Path,
+    burndown: BurndownInputs,
+) -> Result<PmAuditReport> {
     let issues = load_issues(linear_cache)
         .with_context(|| format!("load linear cache {}", linear_cache.display()))?;
 
@@ -243,9 +260,7 @@ pub fn scan_pm_audit(
                 category: "oversized".into(),
                 estimate: Some(pts),
                 state: iss.state_name.clone(),
-                detail: format!(
-                    "{pts}-pt ticket still open — decompose into sub-issues"
-                ),
+                detail: format!("{pts}-pt ticket still open — decompose into sub-issues"),
             });
         }
 
@@ -295,8 +310,7 @@ pub fn scan_pm_audit(
 
         // Check 5: calibration sample (completed with both timestamps).
         if iss.is_done() {
-            if let (Some(s), Some(c), Some(e)) =
-                (&iss.started_at, &iss.completed_at, iss.estimate)
+            if let (Some(s), Some(c), Some(e)) = (&iss.started_at, &iss.completed_at, iss.estimate)
             {
                 if let Some(days) = days_between(s, c) {
                     if days >= 0.0 {
@@ -346,12 +360,10 @@ pub fn scan_pm_audit(
     summary.hard_violations = summary.oversized_open > 0
         || summary.blocked_open > 0
         || summary.no_milestone_open > 0
-        || flags
-            .iter()
-            .any(|f| f.category == "missing-estimate");
+        || flags.iter().any(|f| f.category == "missing-estimate");
 
     write_outputs(&flags, &summary, output_summary)?;
-    Ok(summary)
+    Ok(PmAuditReport { summary, flags })
 }
 
 /// Parse the permissive cache into normalized issues.
@@ -566,7 +578,6 @@ fn median(sorted: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn cache(json: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();

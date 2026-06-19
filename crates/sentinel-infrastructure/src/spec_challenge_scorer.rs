@@ -5,18 +5,15 @@
 //! that asks the model to rate the 5 categories on `[0.0, 1.0]`,
 //! parses the JSON response into a [`SpecChallengeScore`].
 //!
-//! ## Providers
+//! ## Direct Env Provider
 //!
-//! Selected by `SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER` (default
-//! `openrouter`). Env namespace is distinct from A3 / A12 so
+//! `from_env()` is OpenRouter-only. Env namespace is distinct from A3 / A12 so
 //! operators can run separate models for dry-run auditing,
 //! eval scoring, and spec-challenge scoring in the same session:
 //!
-//! - `openrouter` — `OPENROUTER_API_KEY` required;
-//!   `SENTINEL_SPEC_CHALLENGE_SCORER_MODEL` (default
-//!   `anthropic/claude-opus-4.7`).
-//! - `ollama` — auto-detects local vs cloud by `OLLAMA_API_KEY`
-//!   presence; `SENTINEL_SPEC_CHALLENGE_SCORER_MODEL` required.
+//! - `OPENROUTER_API_KEY` required.
+//! - `SENTINEL_SPEC_CHALLENGE_SCORER_MODEL` defaults to
+//!   `anthropic/claude-opus-4.7`.
 //!
 //! ## What the judge scores
 //!
@@ -42,9 +39,11 @@ use sentinel_domain::ports::{
 };
 use sentinel_domain::spec_challenge::SpecChallenge;
 
+#[cfg(test)]
+use crate::llm_scorer_runtime::build_ollama_prompt_fn;
 use crate::llm_scorer_runtime::{
-    self, build_ollama_prompt_fn, build_openrouter_prompt_fn, preview, read_timeout, real_env,
-    sidecar, strip_code_fence, PromptFn,
+    self, build_openrouter_prompt_fn, preview, read_timeout, real_env, sidecar, strip_code_fence,
+    PromptFn,
 };
 
 pub const DEFAULT_SCORER_PROVIDER: &str = "openrouter";
@@ -102,6 +101,7 @@ impl LlmSpecChallengeScorer {
         Self::openrouter_from_env_with(real_env)
     }
 
+    #[cfg(test)]
     pub fn ollama_from_env() -> Result<Self> {
         Self::ollama_from_env_with(real_env)
     }
@@ -115,10 +115,13 @@ impl LlmSpecChallengeScorer {
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
-            "ollama" => Self::ollama_from_env_with(env),
+            "ollama" => Err(anyhow::anyhow!(
+                "SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER=ollama is not a direct env provider; \
+                 spec-challenge scoring must use the OpenRouter scorer path"
+            )),
             other => Err(anyhow::anyhow!(
                 "unknown SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER={other:?}; \
-                 expected one of: openrouter, ollama"
+                 expected: openrouter"
             )),
         }
     }
@@ -136,7 +139,7 @@ impl LlmSpecChallengeScorer {
             &env,
             "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
             DEFAULT_SCORER_TIMEOUT,
-        );
+        )?;
         let (prompt_fn, provider_prefix) =
             build_openrouter_prompt_fn(&key, "spec-challenge scorer")?;
         Ok(Self {
@@ -147,6 +150,7 @@ impl LlmSpecChallengeScorer {
         })
     }
 
+    #[cfg(test)]
     fn ollama_from_env_with<F>(env: F) -> Result<Self>
     where
         F: Fn(&str) -> Option<String>,
@@ -159,9 +163,8 @@ impl LlmSpecChallengeScorer {
             &env,
             "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
             DEFAULT_SCORER_TIMEOUT,
-        );
-        let (prompt_fn, provider_prefix) =
-            build_ollama_prompt_fn(&env, "spec-challenge scorer")?;
+        )?;
+        let (prompt_fn, provider_prefix) = build_ollama_prompt_fn(&env, "spec-challenge scorer")?;
         Ok(Self {
             prompt_fn,
             model_id,
@@ -331,8 +334,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use sentinel_domain::reversibility::ReversibilityClass;
     use sentinel_domain::spec_challenge::{
-        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory,
-        GapResolution, SpecChallenge, SpecGap, SpecReference, WorkId,
+        Alternative, Ambiguity, Assumption, AssumptionConfidence, ChallengeCategory, GapResolution,
+        SpecChallenge, SpecGap, SpecReference, WorkId,
     };
 
     fn make_challenge() -> SpecChallenge {
@@ -396,8 +399,7 @@ mod tests {
             "reasoning": "solid analysis"
         }"#
         .to_string();
-        let scorer =
-            LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
+        let scorer = LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
         let challenge = make_challenge();
         let score = scorer.score(&challenge).expect("should score");
         assert!((score.assumptions - 0.8).abs() < 1e-3);
@@ -452,8 +454,7 @@ mod tests {
             "reasoning": "missing axes"
         }"#
         .to_string();
-        let scorer =
-            LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
+        let scorer = LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
         let challenge = make_challenge();
         let err = scorer.score(&challenge).unwrap_err();
         assert!(matches!(err, SpecChallengeScorerError::Malformed(_)));
@@ -472,8 +473,7 @@ mod tests {
             "reasoning": "out of range; clamped"
         }"#
         .to_string();
-        let scorer =
-            LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
+        let scorer = LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
         let challenge = make_challenge();
         let score = scorer.score(&challenge).unwrap();
         assert!((score.assumptions - 1.0).abs() < 1e-3);
@@ -493,8 +493,7 @@ mod tests {
             "reasoning": "uniformly good"
         }"#
         .to_string();
-        let scorer =
-            LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
+        let scorer = LlmSpecChallengeScorer::with_prompt_fn(stub_returning(response), "test-model");
         let challenge = make_challenge();
         let score = scorer.score(&challenge).unwrap();
         assert!(score.all_axes_above(0.7));
@@ -508,7 +507,22 @@ mod tests {
             _ => None,
         });
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("unknown SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER"));
+        assert!(err
+            .to_string()
+            .contains("unknown SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER"));
+    }
+
+    #[test]
+    fn from_env_rejects_direct_ollama_provider() {
+        let result = LlmSpecChallengeScorer::from_env_with(|key| match key {
+            "SENTINEL_SPEC_CHALLENGE_SCORER_PROVIDER" => Some("ollama".to_string()),
+            "SENTINEL_SPEC_CHALLENGE_SCORER_MODEL" => Some("qwen3:8b".to_string()),
+            _ => None,
+        });
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("spec-challenge scoring must use the OpenRouter scorer path"));
     }
 
     #[test]
@@ -522,7 +536,9 @@ mod tests {
     fn ollama_from_env_requires_scorer_model() {
         let result = LlmSpecChallengeScorer::ollama_from_env_with(|_| None);
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("SENTINEL_SPEC_CHALLENGE_SCORER_MODEL"));
+        assert!(err
+            .to_string()
+            .contains("SENTINEL_SPEC_CHALLENGE_SCORER_MODEL"));
     }
 
     #[test]
@@ -532,7 +548,8 @@ mod tests {
             &env,
             "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
             DEFAULT_SCORER_TIMEOUT,
-        );
+        )
+        .unwrap();
         assert_eq!(t, DEFAULT_SCORER_TIMEOUT);
     }
 
@@ -549,7 +566,8 @@ mod tests {
             &env,
             "SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS",
             DEFAULT_SCORER_TIMEOUT,
-        );
+        )
+        .unwrap();
         assert_eq!(t, Duration::from_secs(10));
     }
 

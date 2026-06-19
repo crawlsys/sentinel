@@ -74,9 +74,8 @@ fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<Pat
 
 /// Does the dir contain at least one non-dotfile `.json` task file?
 fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
-    fs.read_dir(dir).is_ok_and(|entries| {
-        entries.iter().any(|p| is_task_json(p))
-    })
+    fs.read_dir(dir)
+        .is_ok_and(|entries| entries.iter().any(|p| is_task_json(p)))
 }
 
 /// Is this path a non-dotfile `.json` file?
@@ -189,9 +188,7 @@ fn format_warning(task: &Task, hard: &[String]) -> String {
         .map(|w| format!("  - {w}"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
-        "⚠️ Reality-check: task {label} is marked ✅ but its claim doesn't hold:\n{details}"
-    )
+    format!("⚠️ Reality-check: task {label} is marked ✅ but its claim doesn't hold:\n{details}")
 }
 
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
@@ -295,19 +292,35 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(par)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             std::fs::read_dir(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -318,10 +331,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -334,17 +354,38 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, _: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn read_to_string(
+            &self,
+            _: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
-        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn write(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn create_dir_all(
+            &self,
+            _: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
         fn exists(&self, _: &Path) -> bool {
             false
@@ -352,11 +393,22 @@ mod tests {
         fn is_dir(&self, _: &Path) -> bool {
             true // claim the tasks dir exists so read_dir gets exercised + fails
         }
-        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn metadata(
+            &self,
+            _: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("boom".into()))
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "boom".into(),
+            ))
         }
     }
 
@@ -374,19 +426,31 @@ mod tests {
         }
     }
     impl GitStatusPort for FakeGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.dirty)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -399,6 +463,9 @@ mod tests {
             None
         }
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
@@ -433,7 +500,12 @@ mod tests {
         }
     }
     impl ProcessPort for FakeProcess {
-        fn run(&self, command: &str, args: &[&str], _cwd: Option<&str>) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
+        fn run(
+            &self,
+            command: &str,
+            args: &[&str],
+            _cwd: Option<&str>,
+        ) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
             match command {
                 "git" if args.first() == Some(&"merge-base") => match self.merge_base_ancestor {
                     Some(true) => Ok(ProcessOutput {
@@ -464,7 +536,11 @@ mod tests {
                 }),
             }
         }
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), sentinel_domain::port_errors::ProcessError> {
+        fn spawn_detached(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> Result<(), sentinel_domain::port_errors::ProcessError> {
             Ok(())
         }
     }
@@ -724,14 +800,20 @@ mod tests {
 
     #[test]
     fn is_hard_mismatch_discriminates() {
-        assert!(is_hard_mismatch("claimed commit deadbe1f is NOT on HEAD's history"));
-        assert!(is_hard_mismatch("PR #42 is claimed MERGED but gh shows OPEN"));
+        assert!(is_hard_mismatch(
+            "claimed commit deadbe1f is NOT on HEAD's history"
+        ));
+        assert!(is_hard_mismatch(
+            "PR #42 is claimed MERGED but gh shows OPEN"
+        ));
         assert!(is_hard_mismatch("still has UNCOMMITTED changes"));
         assert!(is_hard_mismatch(
             "emitted completion promise `ALL_TESTS_PASSING` but NO corroborating ground truth"
         ));
         // Soft notes must NOT count as hard mismatches.
         assert!(!is_hard_mismatch("could not verify PR #42 (gh: not found)"));
-        assert!(!is_hard_mismatch("claims a passing build/test — sentinel can't re-run it"));
+        assert!(!is_hard_mismatch(
+            "claims a passing build/test — sentinel can't re-run it"
+        ));
     }
 }

@@ -7,14 +7,11 @@
 //! [`EvalScore`](sentinel_domain::eval::EvalScore) honoring the
 //! case's per-case [`ScoringRubric`](sentinel_domain::eval::ScoringRubric).
 //!
-//! ## Providers
+//! ## Direct Env Provider
 //!
-//! Selected by `SENTINEL_EVAL_SCORER_PROVIDER` (default `openrouter`):
-//! - `openrouter` — `OPENROUTER_API_KEY` required; default model
-//!   `anthropic/claude-opus-4.8` (override via
-//!   `SENTINEL_EVAL_SCORER_MODEL`).
-//! - `ollama` — auto-detects local vs cloud by `OLLAMA_API_KEY`
-//!   presence; `SENTINEL_EVAL_SCORER_MODEL` required.
+//! `from_env()` is OpenRouter-only: `OPENROUTER_API_KEY` required; default
+//! model `anthropic/claude-opus-4.8` (override via
+//! `SENTINEL_EVAL_SCORER_MODEL`).
 //!
 //! The judge prompt is v1; operators iterate by changing the prompt
 //! source (recompile) without touching the runner or use-case code.
@@ -33,9 +30,11 @@ use sentinel_domain::eval::{
 };
 use sentinel_domain::ports::{EvalScorerError, EvalScorerPort};
 
+#[cfg(test)]
+use crate::llm_scorer_runtime::build_ollama_prompt_fn;
 use crate::llm_scorer_runtime::{
-    self, build_ollama_prompt_fn, build_openrouter_prompt_fn, preview, read_timeout, real_env,
-    sidecar, strip_code_fence, PromptFn,
+    self, build_openrouter_prompt_fn, preview, read_timeout, real_env, sidecar, strip_code_fence,
+    PromptFn,
 };
 
 pub const DEFAULT_SCORER_PROVIDER: &str = "openrouter";
@@ -97,6 +96,7 @@ impl LlmEvalScorer {
         Self::openrouter_from_env_with(real_env)
     }
 
+    #[cfg(test)]
     pub fn ollama_from_env() -> Result<Self> {
         Self::ollama_from_env_with(real_env)
     }
@@ -110,9 +110,12 @@ impl LlmEvalScorer {
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
-            "ollama" => Self::ollama_from_env_with(env),
+            "ollama" => Err(anyhow::anyhow!(
+                "SENTINEL_EVAL_SCORER_PROVIDER=ollama is not a direct env provider; \
+                 eval scoring must use the OpenRouter scorer path"
+            )),
             other => Err(anyhow::anyhow!(
-                "unknown SENTINEL_EVAL_SCORER_PROVIDER={other:?}; expected one of: openrouter, ollama"
+                "unknown SENTINEL_EVAL_SCORER_PROVIDER={other:?}; expected: openrouter"
             )),
         }
     }
@@ -125,8 +128,11 @@ impl LlmEvalScorer {
             .context("OPENROUTER_API_KEY not set (required for openrouter scorer)")?;
         let model_id = env("SENTINEL_EVAL_SCORER_MODEL")
             .unwrap_or_else(|| DEFAULT_SCORER_OPENROUTER_MODEL.to_string());
-        let timeout =
-            read_timeout(&env, "SENTINEL_EVAL_SCORER_TIMEOUT_SECS", DEFAULT_SCORER_TIMEOUT);
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_EVAL_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        )?;
         let (prompt_fn, provider_prefix) = build_openrouter_prompt_fn(&key, "scorer")?;
         Ok(Self {
             prompt_fn,
@@ -136,6 +142,7 @@ impl LlmEvalScorer {
         })
     }
 
+    #[cfg(test)]
     fn ollama_from_env_with<F>(env: F) -> Result<Self>
     where
         F: Fn(&str) -> Option<String>,
@@ -144,8 +151,11 @@ impl LlmEvalScorer {
             "SENTINEL_EVAL_SCORER_MODEL not set (required for ollama scorer; no sensible \
              default — pick what you've pulled, e.g. moonshotai/kimi-k2)",
         )?;
-        let timeout =
-            read_timeout(&env, "SENTINEL_EVAL_SCORER_TIMEOUT_SECS", DEFAULT_SCORER_TIMEOUT);
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_EVAL_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        )?;
         let (prompt_fn, provider_prefix) = build_ollama_prompt_fn(&env, "scorer")?;
         Ok(Self {
             prompt_fn,
@@ -196,10 +206,7 @@ impl EvalScorerPort for LlmEvalScorer {
             || EvalScorerError::Backend("eval scorer worker thread panicked".to_string()),
         )?;
 
-        debug!(
-            response_len = response_text.len(),
-            "eval scorer returned"
-        );
+        debug!(response_len = response_text.len(), "eval scorer returned");
         parse_score(&response_text, case, run_id)
     }
 }
@@ -277,10 +284,26 @@ fn parse_score(
     })?;
     let rubric = &case.scoring_rubric;
     let axis_scores = vec![
-        axis_score(EvalAxis::CitationDensityAccuracy, raw.axes.citation_density_accuracy, rubric),
-        axis_score(EvalAxis::RequirementsCoverage, raw.axes.requirements_coverage, rubric),
-        axis_score(EvalAxis::AlternativesSeriousness, raw.axes.alternatives_seriousness, rubric),
-        axis_score(EvalAxis::TonalCalibration, raw.axes.tonal_calibration, rubric),
+        axis_score(
+            EvalAxis::CitationDensityAccuracy,
+            raw.axes.citation_density_accuracy,
+            rubric,
+        ),
+        axis_score(
+            EvalAxis::RequirementsCoverage,
+            raw.axes.requirements_coverage,
+            rubric,
+        ),
+        axis_score(
+            EvalAxis::AlternativesSeriousness,
+            raw.axes.alternatives_seriousness,
+            rubric,
+        ),
+        axis_score(
+            EvalAxis::TonalCalibration,
+            raw.axes.tonal_calibration,
+            rubric,
+        ),
         axis_score(EvalAxis::OutcomeRealism, raw.axes.outcome_realism, rubric),
         axis_score(EvalAxis::StakeholderFit, raw.axes.stakeholder_fit, rubric),
     ];
@@ -381,13 +404,18 @@ mod tests {
         let scorer = LlmEvalScorer::with_prompt_fn(stub_returning(response), "test-model");
         let case = make_case("c1");
         let run_id = EvalRunId::new("r1").unwrap();
-        let score = scorer.score(&case, "candidate", &run_id).expect("should score");
+        let score = scorer
+            .score(&case, "candidate", &run_id)
+            .expect("should score");
         assert_eq!(score.axis_scores.len(), 6);
         let cit = score.for_axis(EvalAxis::CitationDensityAccuracy).unwrap();
         assert!((cit.raw - 0.8).abs() < 1e-3);
         assert!((cit.weight - 1.0).abs() < 1e-3);
         let outcome = score.for_axis(EvalAxis::OutcomeRealism).unwrap();
-        assert!((outcome.weight - 2.0).abs() < 1e-3, "should pick up BA-default 2.0 weight");
+        assert!(
+            (outcome.weight - 2.0).abs() < 1e-3,
+            "should pick up BA-default 2.0 weight"
+        );
     }
 
     #[test]
@@ -397,7 +425,9 @@ mod tests {
             LlmEvalScorer::with_prompt_fn(stub_returning(response.to_string()), "test-model");
         let case = make_case("c1");
         let run_id = EvalRunId::new("r1").unwrap();
-        let score = scorer.score(&case, "out", &run_id).expect("should parse fenced");
+        let score = scorer
+            .score(&case, "out", &run_id)
+            .expect("should parse fenced");
         assert_eq!(score.axis_scores.len(), 6);
     }
 
@@ -467,9 +497,17 @@ mod tests {
         let run_id = EvalRunId::new("r1").unwrap();
         let score = scorer.score(&case, "out", &run_id).unwrap();
         let cit = score.for_axis(EvalAxis::CitationDensityAccuracy).unwrap();
-        assert!((cit.raw - 1.0).abs() < 1e-3, "should clamp to 1.0; got {}", cit.raw);
+        assert!(
+            (cit.raw - 1.0).abs() < 1e-3,
+            "should clamp to 1.0; got {}",
+            cit.raw
+        );
         let req = score.for_axis(EvalAxis::RequirementsCoverage).unwrap();
-        assert!((req.raw - 0.0).abs() < 1e-3, "should clamp to 0.0; got {}", req.raw);
+        assert!(
+            (req.raw - 0.0).abs() < 1e-3,
+            "should clamp to 0.0; got {}",
+            req.raw
+        );
     }
 
     #[test]
@@ -492,7 +530,11 @@ mod tests {
         let case = make_case("c1");
         let run_id = EvalRunId::new("r1").unwrap();
         let score = scorer.score(&case, "out", &run_id).unwrap();
-        assert!((score.composite - 0.5).abs() < 1e-3, "got {}", score.composite);
+        assert!(
+            (score.composite - 0.5).abs() < 1e-3,
+            "got {}",
+            score.composite
+        );
     }
 
     #[test]
@@ -524,7 +566,22 @@ mod tests {
             _ => None,
         });
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("unknown SENTINEL_EVAL_SCORER_PROVIDER"));
+        assert!(err
+            .to_string()
+            .contains("unknown SENTINEL_EVAL_SCORER_PROVIDER"));
+    }
+
+    #[test]
+    fn from_env_rejects_direct_ollama_provider() {
+        let result = LlmEvalScorer::from_env_with(|key| match key {
+            "SENTINEL_EVAL_SCORER_PROVIDER" => Some("ollama".to_string()),
+            "SENTINEL_EVAL_SCORER_MODEL" => Some("qwen3:8b".to_string()),
+            _ => None,
+        });
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("eval scoring must use the OpenRouter scorer path"));
     }
 
     #[test]
@@ -544,7 +601,12 @@ mod tests {
     #[test]
     fn read_timeout_falls_back_to_default_on_missing() {
         let env = |_: &str| None;
-        let t = read_timeout(&env, "SENTINEL_EVAL_SCORER_TIMEOUT_SECS", DEFAULT_SCORER_TIMEOUT);
+        let t = read_timeout(
+            &env,
+            "SENTINEL_EVAL_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(t, DEFAULT_SCORER_TIMEOUT);
     }
 
@@ -557,7 +619,12 @@ mod tests {
                 None
             }
         };
-        let t = read_timeout(&env, "SENTINEL_EVAL_SCORER_TIMEOUT_SECS", DEFAULT_SCORER_TIMEOUT);
+        let t = read_timeout(
+            &env,
+            "SENTINEL_EVAL_SCORER_TIMEOUT_SECS",
+            DEFAULT_SCORER_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(t, Duration::from_secs(5));
     }
 

@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Telemetry Skill — Step Definitions
 # Metrics collection and analytics reporting
 #

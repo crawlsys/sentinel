@@ -4,7 +4,7 @@
 //! describe (a) **what work needs** (a [`CapabilityRequirement`]) and
 //! (b) **what an agent can satisfy** (an [`AgentCapabilityProfile`]).
 //! The substrate that consuming hooks (A3 auditor selection, BA5 critic
-//! selection, future budget-coder routing) consult to ask "which agent
+//! selection, future budget-coder routing) query to ask "which agent
 //! handles this?" without hardcoding vendor pairings.
 //!
 //! No IO, no business logic — that lives in the application/infra

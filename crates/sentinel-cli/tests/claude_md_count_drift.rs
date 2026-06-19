@@ -43,8 +43,7 @@ fn claimed_number(anchor_before: &str, anchor_after: &str) -> Option<u64> {
 fn claude_md_hook_count_matches_source() {
     // Truth: number of hook .rs files (excl. mod.rs) — the doc says
     // "N hook modules (one `.rs` file per hook...)".
-    let hooks_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sentinel-application/src/hooks");
+    let hooks_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sentinel-application/src/hooks");
     let actual = std::fs::read_dir(&hooks_dir)
         .expect("hooks dir readable")
         .filter_map(Result::ok)
@@ -55,11 +54,10 @@ fn claude_md_hook_count_matches_source() {
         })
         .count() as u64;
 
-    let claimed = claimed_number("Use cases: engine, classifier, gate, ", " hook modules")
-        .expect(
-            "CLAUDE.md must contain '...gate, <N> hook modules' (the architecture table). \
+    let claimed = claimed_number("Use cases: engine, classifier, gate, ", " hook modules").expect(
+        "CLAUDE.md must contain '...gate, <N> hook modules' (the architecture table). \
              If the wording changed, update this test AND keep the count honest.",
-        );
+    );
 
     assert_eq!(
         claimed, actual,
@@ -88,9 +86,7 @@ fn claude_md_subcommand_count_matches_source() {
         // attributes, blank lines, and nested-field lines which are indented
         // deeper than 4 spaces).
         let four_space = line.len() - t.len() == 4;
-        if four_space
-            && t.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        {
+        if four_space && t.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             actual += 1;
         }
     }
@@ -123,12 +119,15 @@ fn claude_md_mcp_tool_count_matches_source() {
     }
     let actual = tools.len() as u64;
 
-    let claimed = claimed_number("MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes ", " tools")
-        .or_else(|| claimed_number("exposes ", " tools"))
-        .expect(
-            "CLAUDE.md must contain 'exposes <N> tools'. If the wording changed, \
+    let claimed = claimed_number(
+        "MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes ",
+        " tools",
+    )
+    .or_else(|| claimed_number("exposes ", " tools"))
+    .expect(
+        "CLAUDE.md must contain 'exposes <N> tools'. If the wording changed, \
              update this test AND keep the count honest.",
-        );
+    );
 
     assert_eq!(
         claimed, actual,
@@ -183,8 +182,7 @@ fn claude_md_named_hooks_resolve_to_real_files() {
     // Every hook the doc names in the Hook System category table must map to a
     // real `<name>.rs` in the hooks dir. This is the guard that would have
     // caught `wrangler_guard` (named in the doc, no such module).
-    let hooks_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sentinel-application/src/hooks");
+    let hooks_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sentinel-application/src/hooks");
 
     // Scope to the category table only — that's where the doc lists hook module
     // names as data. Backticked tokens elsewhere (tool names, types, file names,

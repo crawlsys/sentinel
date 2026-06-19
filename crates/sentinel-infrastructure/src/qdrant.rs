@@ -29,7 +29,9 @@ fn default_model() -> String {
 impl QdrantConfig {
     /// Load from `~/.qdrant/config.json`.
     pub fn load() -> Option<Self> {
-        let path = dirs::home_dir()?.join(".qdrant").join("config.json");
+        let path = crate::paths::home_root()?
+            .join(".qdrant")
+            .join("config.json");
         let content = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     }
@@ -120,10 +122,7 @@ impl VectorStorePort for QdrantAdapter {
             .context("Qdrant scroll failed")
             .map_err(VectorStoreError::backend)?;
 
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(VectorStoreError::backend)?;
+        let json: serde_json::Value = resp.json().await.map_err(VectorStoreError::backend)?;
 
         let points = json
             .get("result")
@@ -136,7 +135,10 @@ impl VectorStorePort for QdrantAdapter {
             .iter()
             .filter_map(|p| {
                 let id = p.get("id")?.as_str()?.to_string();
-                let payload = p.get("payload").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let payload = p
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
                 Some(VectorScrollResult { id, payload })
             })
             .collect();

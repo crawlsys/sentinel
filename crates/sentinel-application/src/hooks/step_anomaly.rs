@@ -27,23 +27,22 @@
 //! 8. **Risk escalation** — step elevated trust tier mid-chain
 //! 9. **Session burst** — many steps fired in a short wall-clock window
 //!
-//! # M1.9 scope: framework + 3 detectors
+//! # M1.9 scope: complete detector set
 //!
 //! Today this module ships the [`AnomalyDetector`] trait, the
-//! [`StepAnomalyReport`] aggregator, and three concrete detectors:
-//! [`ArgumentShapeDriftDetector`], [`PayloadSizeDetector`],
-//! [`DurationOutlierDetector`]. The other six dimensions have
-//! placeholder structs with TODO bodies — extension points are
-//! defined so future work fills them in without re-architecting.
+//! [`StepAnomalyReport`] aggregator, concrete detectors for all nine
+//! AEGIS dimensions, and [`OutputSimilarityDetector`] as the stuck-loop
+//! extension.
 //!
 //! This is intentionally observation-only: the hook never returns
 //! `HookOutput::deny`. Anomalies attach to the [`StepJudgeOutcome`]
 //! flow as a side channel; downstream callers (M1.5
-//! `submit_step_evidence`, M6 dashboard) consume the report and
+//! `submit_step_evidence`, local clients) consume the report and
 //! decide what to do with it.
 
 use std::collections::BTreeMap;
 
+use chrono::{Duration, Utc};
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::proof::{ProofChain, ProofEntry};
 use sentinel_domain::step_proof::StepProof;
@@ -62,7 +61,7 @@ pub struct Anomaly {
     /// catastrophic deviation.
     pub severity: f64,
 
-    /// Human-readable explanation. Surfaced in dashboards and proof
+    /// Human-readable explanation. Surfaced in local clients and proof
     /// chain telemetry, NOT in judge prompts (judge sees the verdict,
     /// not the meta-observations).
     pub reasoning: String,
@@ -80,7 +79,7 @@ pub struct Anomaly {
 }
 
 /// The 9 AEGIS anomaly dimensions. Used in `Anomaly::dimension` for
-/// filtering and routing in dashboards.
+/// filtering and routing in local clients.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum AnomalyDimension {
@@ -159,7 +158,189 @@ pub trait AnomalyDetector: Send + Sync {
     ) -> Option<Anomaly>;
 }
 
-// ─── Detector 1: ArgumentShapeDriftDetector ────────────────────────────
+fn same_step<'a>(
+    history: &'a ProofChain,
+    skill: &str,
+    phase_id: &str,
+    step_id: &str,
+) -> Vec<&'a StepProof> {
+    history
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProofEntry::Step(step)
+                if step.skill == skill && step.phase_id == phase_id && step.step_id == step_id =>
+            {
+                Some(step)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn evidence_str<'a>(evidence: &'a Evidence, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| {
+            evidence
+                .custom
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn evidence_num(evidence: &Evidence, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        let value = evidence.custom.get(*key)?;
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    })
+}
+
+fn risk_rank(evidence: &Evidence) -> Option<i64> {
+    const KEYS: &[&str] = &[
+        "risk_tier",
+        "trust_tier",
+        "reversibility",
+        "reversibility_class",
+        "step_risk",
+    ];
+    KEYS.iter().find_map(|key| {
+        let value = evidence.custom.get(*key)?;
+        if let Some(n) = value.as_i64() {
+            return Some(n);
+        }
+        let text = value.as_str()?.trim().to_ascii_lowercase();
+        match text.as_str() {
+            "safe" | "readonly" | "read-only" | "reversible" | "low" => Some(0),
+            "standard" | "medium" | "moderate" => Some(1),
+            "high" | "production" | "prod" | "irreversible" => Some(2),
+            "critical" | "catastrophic" | "destructive" => Some(3),
+            _ => None,
+        }
+    })
+}
+
+fn previous_step_id(step_id: &str) -> Option<String> {
+    let mut parts: Vec<String> = step_id
+        .split('.')
+        .map(std::string::ToString::to_string)
+        .collect();
+    let last = parts.last_mut()?;
+    let number = last.parse::<u64>().ok()?;
+    if number <= 1 {
+        return None;
+    }
+    *last = (number - 1).to_string();
+    Some(parts.join("."))
+}
+
+// ─── Detector 1: ToolNoveltyDetector ──────────────────────────────────
+//
+// Flags when a previously-established step suddenly uses a different tool.
+// First runs stay quiet because there is no baseline.
+
+/// Detector for [`AnomalyDimension::ToolNovelty`].
+pub struct ToolNoveltyDetector;
+
+impl AnomalyDetector for ToolNoveltyDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::ToolNovelty
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let current_tool = evidence_str(current_evidence, &["step_tool_name", "tool_name"])?;
+        let prior = same_step(history, skill, phase_id, step_id);
+        if prior.is_empty() {
+            return None;
+        }
+
+        let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+        for step in prior {
+            if let Some(tool) = evidence_str(&step.evidence, &["step_tool_name", "tool_name"]) {
+                *seen.entry(tool.to_string()).or_insert(0) += 1;
+            }
+        }
+        if seen.is_empty() || seen.contains_key(current_tool) {
+            return None;
+        }
+
+        let known_tools = seen.keys().cloned().collect::<Vec<_>>();
+        Some(Anomaly {
+            dimension: AnomalyDimension::ToolNovelty,
+            severity: 2.5,
+            reasoning: format!(
+                "step used tool '{current_tool}', which has not appeared in prior runs \
+                 of this step (known tools: {})",
+                known_tools.join(", ")
+            ),
+            observed: serde_json::json!({"tool": current_tool}),
+            baseline: serde_json::json!({"known_tools": known_tools, "n_prior": seen.values().sum::<u64>()}),
+        })
+    }
+}
+
+// ─── Detector 2: FrequencySpikeDetector ───────────────────────────────
+
+const FREQUENCY_WINDOW_MINUTES: i64 = 15;
+const FREQUENCY_SPIKE_PRIOR_THRESHOLD: usize = 3;
+
+/// Detector for [`AnomalyDimension::FrequencySpike`].
+pub struct FrequencySpikeDetector;
+
+impl AnomalyDetector for FrequencySpikeDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::FrequencySpike
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        _current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let cutoff = Utc::now() - Duration::minutes(FREQUENCY_WINDOW_MINUTES);
+        let recent = same_step(history, skill, phase_id, step_id)
+            .into_iter()
+            .filter(|step| step.completed_at >= cutoff)
+            .count();
+        if recent < FREQUENCY_SPIKE_PRIOR_THRESHOLD {
+            return None;
+        }
+
+        let severity = ((recent + 1 - FREQUENCY_SPIKE_PRIOR_THRESHOLD) as f64).clamp(1.0, 5.0);
+        Some(Anomaly {
+            dimension: AnomalyDimension::FrequencySpike,
+            severity,
+            reasoning: format!(
+                "step ran {} time(s) in the last {FREQUENCY_WINDOW_MINUTES} minutes before \
+                 this invocation — frequency spike",
+                recent
+            ),
+            observed: serde_json::json!({"recent_prior_runs": recent + 1}),
+            baseline: serde_json::json!({
+                "prior_threshold": FREQUENCY_SPIKE_PRIOR_THRESHOLD,
+                "window_minutes": FREQUENCY_WINDOW_MINUTES
+            }),
+        })
+    }
+}
+
+// ─── Detector 3: ArgumentShapeDriftDetector ────────────────────────────
 //
 // Compares the JSON shape (key set + nesting structure) of the current
 // tool_input against the modal shape across prior runs of this step.
@@ -169,7 +350,7 @@ pub trait AnomalyDetector: Send + Sync {
 
 /// Compute a stable JSON-shape descriptor: sorted top-level keys joined
 /// with `:`, recursing one level into nested objects. Deliberately not
-/// a hash — humans can read shape descriptors in dashboards and spot
+/// a hash — humans can read shape descriptors in local clients and spot
 /// the difference between `{a,b,c}` and `{a,b,d}` without decoding.
 fn shape_descriptor(value: &serde_json::Value) -> String {
     match value {
@@ -310,8 +491,7 @@ impl AnomalyDetector for PayloadSizeDetector {
         _current_duration_ms: u64,
         history: &ProofChain,
     ) -> Option<Anomaly> {
-        let current_size = serde_json::to_string(&current_evidence.custom)
-            .map_or(0, |s| s.len());
+        let current_size = serde_json::to_string(&current_evidence.custom).map_or(0, |s| s.len());
         if current_size == 0 {
             return None;
         }
@@ -435,6 +615,210 @@ impl AnomalyDetector for DurationOutlierDetector {
     }
 }
 
+// ─── Detector 6: SequenceAnomalyDetector ───────────────────────────────
+
+/// Detector for [`AnomalyDimension::SequenceAnomaly`].
+pub struct SequenceAnomalyDetector;
+
+impl AnomalyDetector for SequenceAnomalyDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::SequenceAnomaly
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        _current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let previous = previous_step_id(step_id)?;
+        let previous_seen = history.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ProofEntry::Step(step)
+                    if step.skill == skill
+                        && step.phase_id == phase_id
+                        && step.step_id == previous
+            )
+        });
+        if previous_seen {
+            return None;
+        }
+
+        Some(Anomaly {
+            dimension: AnomalyDimension::SequenceAnomaly,
+            severity: 3.0,
+            reasoning: format!(
+                "step '{step_id}' ran before prerequisite-looking prior step '{previous}' \
+                 was present in the proof history"
+            ),
+            observed: serde_json::json!({"step_id": step_id}),
+            baseline: serde_json::json!({"expected_previous_step": previous}),
+        })
+    }
+}
+
+// ─── Detector 7: CostSpikeDetector ────────────────────────────────────
+
+const COST_KEYS: &[&str] = &[
+    "step_cost_usd",
+    "cost_usd",
+    "token_cost_usd",
+    "tokens",
+    "total_tokens",
+    "step_token_count",
+];
+
+/// Detector for [`AnomalyDimension::CostSpike`].
+pub struct CostSpikeDetector;
+
+impl AnomalyDetector for CostSpikeDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::CostSpike
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let current = evidence_num(current_evidence, COST_KEYS)?;
+        if current <= 0.0 {
+            return None;
+        }
+        let prior_costs: Vec<usize> = same_step(history, skill, phase_id, step_id)
+            .into_iter()
+            .filter_map(|step| evidence_num(&step.evidence, COST_KEYS))
+            .filter(|value| *value > 0.0)
+            .map(|value| value.round() as usize)
+            .collect();
+        let baseline = central_tendency(&prior_costs)?;
+        if baseline < 1.0 {
+            return None;
+        }
+        let ratio = current / baseline;
+        if ratio <= 3.0 {
+            return None;
+        }
+
+        let severity = ((ratio - 3.0) / 3.0 + 1.0).clamp(1.0, 5.0);
+        Some(Anomaly {
+            dimension: AnomalyDimension::CostSpike,
+            severity,
+            reasoning: format!(
+                "step cost/token signal {current:.2} vs baseline {baseline:.2} \
+                 (ratio {ratio:.2}x — above 3x threshold)"
+            ),
+            observed: serde_json::json!({"cost_signal": current}),
+            baseline: serde_json::json!({"cost_signal": baseline, "n_prior": prior_costs.len()}),
+        })
+    }
+}
+
+// ─── Detector 8: RiskEscalationDetector ───────────────────────────────
+
+/// Detector for [`AnomalyDimension::RiskEscalation`].
+pub struct RiskEscalationDetector;
+
+impl AnomalyDetector for RiskEscalationDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::RiskEscalation
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let current = risk_rank(current_evidence)?;
+        let prior_ranks: Vec<i64> = same_step(history, skill, phase_id, step_id)
+            .into_iter()
+            .filter_map(|step| risk_rank(&step.evidence))
+            .collect();
+        let prior_max = prior_ranks.iter().copied().max()?;
+        if current <= prior_max {
+            return None;
+        }
+
+        let delta = current - prior_max;
+        Some(Anomaly {
+            dimension: AnomalyDimension::RiskEscalation,
+            severity: (delta as f64 + 2.0).clamp(2.0, 5.0),
+            reasoning: format!(
+                "step risk rank escalated from historical max {prior_max} to {current}"
+            ),
+            observed: serde_json::json!({"risk_rank": current}),
+            baseline: serde_json::json!({"max_prior_risk_rank": prior_max, "n_prior": prior_ranks.len()}),
+        })
+    }
+}
+
+// ─── Detector 9: SessionBurstDetector ─────────────────────────────────
+
+const SESSION_BURST_WINDOW_MINUTES: i64 = 5;
+const SESSION_BURST_PRIOR_THRESHOLD: usize = 10;
+
+/// Detector for [`AnomalyDimension::SessionBurst`].
+pub struct SessionBurstDetector;
+
+impl AnomalyDetector for SessionBurstDetector {
+    fn dimension(&self) -> AnomalyDimension {
+        AnomalyDimension::SessionBurst
+    }
+
+    fn detect(
+        &self,
+        skill: &str,
+        _phase_id: &str,
+        _step_id: &str,
+        _current_evidence: &Evidence,
+        _current_duration_ms: u64,
+        history: &ProofChain,
+    ) -> Option<Anomaly> {
+        let cutoff = Utc::now() - Duration::minutes(SESSION_BURST_WINDOW_MINUTES);
+        let recent = history
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    ProofEntry::Step(step) if step.skill == skill && step.completed_at >= cutoff
+                )
+            })
+            .count();
+        if recent < SESSION_BURST_PRIOR_THRESHOLD {
+            return None;
+        }
+
+        let severity = ((recent + 1 - SESSION_BURST_PRIOR_THRESHOLD) as f64).clamp(1.0, 5.0);
+        Some(Anomaly {
+            dimension: AnomalyDimension::SessionBurst,
+            severity,
+            reasoning: format!(
+                "skill '{skill}' produced {} step proof(s) in the last \
+                 {SESSION_BURST_WINDOW_MINUTES} minutes before this invocation — session burst",
+                recent
+            ),
+            observed: serde_json::json!({"recent_skill_steps": recent + 1}),
+            baseline: serde_json::json!({
+                "prior_threshold": SESSION_BURST_PRIOR_THRESHOLD,
+                "window_minutes": SESSION_BURST_WINDOW_MINUTES
+            }),
+        })
+    }
+}
+
 /// Detector for [`AnomalyDimension::OutputSimilarity`] — the stuck-loop
 /// catcher. Compares the current step's output against recent prior runs
 /// of the same `(skill, phase_id, step_id)`; if the output is ≥90%
@@ -444,7 +828,7 @@ impl AnomalyDetector for DurationOutlierDetector {
 pub struct OutputSimilarityDetector;
 
 /// Read a step's output payload from `evidence.custom`. Outputs are stored
-/// under `step_tool_result` (the seal-time convention); fall back to
+/// under `step_tool_result` (the seal-time convention); also accepts
 /// `step_tool_output` for forward-compat. Returns the serialized JSON
 /// string so the comparison is over a stable textual form.
 fn step_output_text(evidence: &Evidence) -> Option<String> {
@@ -554,16 +938,20 @@ impl AnomalyDetector for OutputSimilarityDetector {
 
 /// Return the default set of detectors the hook ships with.
 ///
-/// The other 6 dimensions are intentionally absent here — they're
-/// filed as M1.9-followup deliverables. New detectors register by
-/// implementing [`AnomalyDetector`] and being added to this list (or
-/// passed in via a custom slice when callers want a different set).
+/// Covers all nine AEGIS dimensions plus the stuck-loop output-similarity
+/// extension.
 #[must_use]
 pub fn default_detectors() -> Vec<Box<dyn AnomalyDetector>> {
     vec![
+        Box::new(ToolNoveltyDetector),
+        Box::new(FrequencySpikeDetector),
         Box::new(ArgumentShapeDriftDetector),
         Box::new(PayloadSizeDetector),
         Box::new(DurationOutlierDetector),
+        Box::new(SequenceAnomalyDetector),
+        Box::new(CostSpikeDetector),
+        Box::new(RiskEscalationDetector),
+        Box::new(SessionBurstDetector),
         Box::new(OutputSimilarityDetector),
     ]
 }
@@ -573,7 +961,7 @@ pub fn default_detectors() -> Vec<Box<dyn AnomalyDetector>> {
 ///
 /// Observation-only — never blocks. Caller (typically M1.5's
 /// `submit_step_evidence`) decides what to do with the report:
-/// attach to the `StepProof`'s `evidence.custom`, surface in dashboard
+/// attach to the `StepProof`'s `evidence.custom`, surface in local clients
 /// telemetry, or refuse to seal when severity exceeds a threshold.
 #[must_use]
 pub fn run_detectors(
@@ -601,13 +989,9 @@ pub fn run_detectors(
     report
 }
 
-#[allow(unused_imports)]
-const fn _stub_unused_step_proof(_p: &StepProof) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use sentinel_domain::judge::JudgeVerdict;
     use sentinel_domain::proof::GENESIS_HASH;
 
@@ -788,6 +1172,132 @@ mod tests {
     }
 
     #[test]
+    fn tool_novelty_fires_on_new_tool_after_baseline() {
+        let chain = seeded_chain_uniform_shape("linear", "claim", "1", 3);
+        let mut evidence = Evidence::default();
+        evidence.custom = serde_json::json!({
+            "step_tool_name": "Bash",
+            "step_tool_input": {"command": "make test"}
+        });
+
+        let anomaly = ToolNoveltyDetector
+            .detect("linear", "claim", "1", &evidence, 100, &chain)
+            .expect("new tool must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::ToolNovelty);
+        assert!(anomaly.reasoning.contains("known tools"));
+    }
+
+    #[test]
+    fn frequency_spike_fires_on_repeated_recent_step_runs() {
+        let chain = seeded_chain_uniform_shape("linear", "claim", "1", 3);
+        let evidence = Evidence::default();
+        let anomaly = FrequencySpikeDetector
+            .detect("linear", "claim", "1", &evidence, 100, &chain)
+            .expect("recent repeated runs must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::FrequencySpike);
+        assert!(anomaly.reasoning.contains("frequency spike"));
+    }
+
+    #[test]
+    fn sequence_anomaly_fires_when_previous_step_missing() {
+        let chain = ProofChain::new("linear", "test");
+        let evidence = Evidence::default();
+        let anomaly = SequenceAnomalyDetector
+            .detect("linear", "claim", "0.2", &evidence, 100, &chain)
+            .expect("missing previous step must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::SequenceAnomaly);
+        assert!(anomaly.reasoning.contains("0.1"));
+    }
+
+    #[test]
+    fn sequence_anomaly_silent_when_previous_step_seen() {
+        let mut chain = ProofChain::new("linear", "test");
+        let proof = historical_step(
+            "linear",
+            "claim",
+            "0.1",
+            GENESIS_HASH,
+            serde_json::json!({}),
+            100,
+        );
+        chain.entries.push(ProofEntry::Step(proof));
+        let evidence = Evidence::default();
+        assert!(SequenceAnomalyDetector
+            .detect("linear", "claim", "0.2", &evidence, 100, &chain)
+            .is_none());
+    }
+
+    #[test]
+    fn cost_spike_fires_on_token_or_cost_jump() {
+        let mut chain = ProofChain::new("linear", "test");
+        let mut prev = GENESIS_HASH.to_string();
+        for _ in 0..5 {
+            let proof = historical_step(
+                "linear",
+                "claim",
+                "1",
+                &prev,
+                serde_json::json!({"tokens": 100}),
+                100,
+            );
+            prev = proof.combined_hash.clone();
+            chain.entries.push(ProofEntry::Step(proof));
+        }
+        let mut evidence = Evidence::default();
+        evidence.custom = serde_json::json!({"tokens": 1000});
+        let anomaly = CostSpikeDetector
+            .detect("linear", "claim", "1", &evidence, 100, &chain)
+            .expect("cost spike must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::CostSpike);
+        assert!(anomaly.reasoning.contains("above 3x"));
+    }
+
+    #[test]
+    fn risk_escalation_fires_when_current_run_is_higher_risk() {
+        let mut chain = ProofChain::new("linear", "test");
+        let proof = historical_step(
+            "linear",
+            "claim",
+            "1",
+            GENESIS_HASH,
+            serde_json::json!({"risk_tier": "low"}),
+            100,
+        );
+        chain.entries.push(ProofEntry::Step(proof));
+        let mut evidence = Evidence::default();
+        evidence.custom = serde_json::json!({"risk_tier": "catastrophic"});
+        let anomaly = RiskEscalationDetector
+            .detect("linear", "claim", "1", &evidence, 100, &chain)
+            .expect("risk escalation must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::RiskEscalation);
+        assert!(anomaly.reasoning.contains("escalated"));
+    }
+
+    #[test]
+    fn session_burst_fires_on_many_recent_skill_steps() {
+        let mut chain = ProofChain::new("linear", "test");
+        let mut prev = GENESIS_HASH.to_string();
+        for i in 0..10 {
+            let proof = historical_step(
+                "linear",
+                "claim",
+                &format!("step-{i}"),
+                &prev,
+                serde_json::json!({}),
+                100,
+            );
+            prev = proof.combined_hash.clone();
+            chain.entries.push(ProofEntry::Step(proof));
+        }
+        let evidence = Evidence::default();
+        let anomaly = SessionBurstDetector
+            .detect("linear", "claim", "1", &evidence, 100, &chain)
+            .expect("session burst must fire");
+        assert_eq!(anomaly.dimension, AnomalyDimension::SessionBurst);
+        assert!(anomaly.reasoning.contains("session burst"));
+    }
+
+    #[test]
     fn run_detectors_returns_clean_report_when_all_silent() {
         let chain = ProofChain::new("linear", "test");
         let evidence = Evidence::default();
@@ -826,7 +1336,7 @@ mod tests {
 
     #[test]
     fn anomaly_serializes_with_kebab_case_dimension() {
-        // Dimension serialization is part of the dashboard contract —
+        // Dimension serialization is part of the local client contract —
         // keep it stable across schema changes.
         let anomaly = Anomaly {
             dimension: AnomalyDimension::ArgumentShapeDrift,
@@ -897,8 +1407,15 @@ mod tests {
         let res = OutputSimilarityDetector.detect("linear", "p", "1", &ev, 100, &chain);
         let anomaly = res.expect("identical repeated output must fire");
         assert_eq!(anomaly.dimension, AnomalyDimension::OutputSimilarity);
-        assert!(anomaly.severity >= 5.0, "whole window colliding → max severity");
-        assert!(anomaly.reasoning.contains("stuck loop"), "{}", anomaly.reasoning);
+        assert!(
+            anomaly.severity >= 5.0,
+            "whole window colliding → max severity"
+        );
+        assert!(
+            anomaly.reasoning.contains("stuck loop"),
+            "{}",
+            anomaly.reasoning
+        );
     }
 
     #[test]
@@ -914,14 +1431,35 @@ mod tests {
             prev = proof.combined_hash.clone();
             chain.entries.push(ProofEntry::Step(proof));
         }
-        let ev = evidence_with_output(serde_json::json!({"log": "brand new distinct output\nfresh-a\nfresh-b"}));
+        let ev = evidence_with_output(
+            serde_json::json!({"log": "brand new distinct output\nfresh-a\nfresh-b"}),
+        );
         let res = OutputSimilarityDetector.detect("linear", "p", "1", &ev, 100, &chain);
         assert!(res.is_none(), "varied outputs must not flag a loop");
     }
 
     #[test]
-    fn output_similarity_registered_in_defaults() {
-        let dims: Vec<AnomalyDimension> = default_detectors().iter().map(|d| d.dimension()).collect();
+    fn default_detectors_cover_all_dimensions() {
+        let dims: Vec<AnomalyDimension> =
+            default_detectors().iter().map(|d| d.dimension()).collect();
+        assert_eq!(dims.len(), 10);
+        for expected in [
+            AnomalyDimension::ToolNovelty,
+            AnomalyDimension::FrequencySpike,
+            AnomalyDimension::ArgumentShapeDrift,
+            AnomalyDimension::PayloadSize,
+            AnomalyDimension::Duration,
+            AnomalyDimension::SequenceAnomaly,
+            AnomalyDimension::CostSpike,
+            AnomalyDimension::RiskEscalation,
+            AnomalyDimension::SessionBurst,
+            AnomalyDimension::OutputSimilarity,
+        ] {
+            assert!(
+                dims.contains(&expected),
+                "default detectors missing {expected:?}"
+            );
+        }
         assert!(dims.contains(&AnomalyDimension::OutputSimilarity));
     }
 }

@@ -1,33 +1,72 @@
 //! Phase Validator Hook
 //!
 //! Runs on `UserPromptSubmit` and injects phase progress into the context.
-//! Mirrors the Node.js phase-validator.js hook behavior:
-//! - Shows current phase progress (e.g., "3/7 phases loaded")
-//! - Shows step-level progress when step configs are available
-//! - Warns when phases are being skipped
-//! - Tells Claude which phase file to `Read()` next
+//! The validator follows Sentinel's LangGraph projection: if an active graph
+//! workflow exists, it remains visible even when the transient `active_skill`
+//! marker was cleared or switched. Marker-only configured workflows are
+//! context-only and must not surface workflow authority.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::{SkillSteps, SkillWorkflow, StepStatus};
+use sentinel_domain::workflow::{SkillSteps, SkillWorkflow, StepStatus, WorkflowState};
 use std::collections::HashMap;
 
-/// Check whether a skill's `phases/` directory exists on disk under
-/// `~/.claude/skills/{skill}/phases/`. When a workflow is registered but
-/// the skill uses an alternate structure (e.g. `orchestration/`,
-/// `protocols/`) the validator would otherwise emit a "Phase Execution
-/// Required" warning referencing a nonexistent file.
-fn skill_has_phases_dir(fs: &dyn super::FileSystemPort, skill: &str) -> bool {
-    let Some(home) = fs.home_dir() else {
-        return true; // Fail open — don't silently suppress warnings if we can't check.
-    };
-    fs.is_dir(
-        &home
-            .join(".claude")
-            .join("skills")
-            .join(skill)
-            .join("phases"),
+struct ResolvedWorkflow<'a> {
+    skill_name: String,
+    workflow: &'a SkillWorkflow,
+    workflow_state: Option<&'a WorkflowState>,
+}
+
+fn resolve_effective_workflow<'a>(
+    state: &'a SessionState,
+    workflows: &'a HashMap<String, SkillWorkflow>,
+) -> Option<ResolvedWorkflow<'a>> {
+    if let Some(skill_name) = state.active_skill.as_deref() {
+        if let (Some(workflow), Some(workflow_state)) =
+            (workflows.get(skill_name), state.graph_workflow(skill_name))
+        {
+            return Some(ResolvedWorkflow {
+                skill_name: skill_name.to_string(),
+                workflow,
+                workflow_state: Some(workflow_state),
+            });
+        }
+    }
+
+    crate::gate::find_incomplete_workflow_pub(state, workflows, None).map(
+        |(workflow, workflow_state, skill_name)| ResolvedWorkflow {
+            skill_name,
+            workflow,
+            workflow_state: Some(workflow_state),
+        },
     )
+}
+
+fn phase_dir_authority_context(fs: &dyn super::FileSystemPort, skill: &str) -> Option<String> {
+    let Some(home) = fs.home_dir() else {
+        return Some(format!(
+            "{}[Phase Validator] Cannot determine the home directory for skill '{skill}'. \
+             LangGraph phase authority cannot prove the phase-file root; fix filesystem \
+             configuration before treating this workflow as executable.",
+            HookOutput::SENTINEL_AUTHORITY_PREFIX
+        ));
+    };
+
+    let phases_dir = home
+        .join(".claude")
+        .join("skills")
+        .join(skill)
+        .join("phases");
+    if fs.is_dir(&phases_dir) {
+        return None;
+    }
+
+    Some(format!(
+        "{}[Phase Validator] Configured workflow '{skill}' points to a missing phase directory: {}. \
+         This is stale or broken workflow configuration; do not suppress phase enforcement.",
+        HookOutput::SENTINEL_AUTHORITY_PREFIX,
+        phases_dir.display()
+    ))
 }
 
 /// Process a phase-validator hook event (`UserPromptSubmit`)
@@ -39,21 +78,19 @@ pub fn process(
     step_configs: &HashMap<String, SkillSteps>,
     fs: &dyn super::FileSystemPort,
 ) -> HookOutput {
-    // Only act when there's an active skill with a workflow
-    let Some(skill_name) = &state.active_skill else {
+    let Some(resolved) = resolve_effective_workflow(state, workflows) else {
         return HookOutput::allow();
     };
+    let skill_name = resolved.skill_name.as_str();
+    let workflow = resolved.workflow;
 
-    let Some(workflow) = workflows.get(skill_name) else {
-        return HookOutput::allow();
-    };
-
-    // If the skill has no phases/ directory on disk, it uses an alternate
-    // structure and the workflow config is stale. Don't emit warnings
-    // pointing at files that don't exist.
-    if !skill_has_phases_dir(fs, skill_name) {
-        return HookOutput::allow();
+    if let Some(context) = phase_dir_authority_context(fs, skill_name) {
+        return HookOutput::inject_context(HookEvent::UserPromptSubmit, context);
     }
+
+    let Some(wf_state) = resolved.workflow_state else {
+        return HookOutput::allow();
+    };
 
     let total_required = workflow.phases.iter().filter(|p| p.required).count();
     let total = workflow.phases.len();
@@ -63,13 +100,14 @@ pub fn process(
         .phases_read
         .get(skill_name)
         .map_or(0, std::vec::Vec::len);
+    let graph_completed = wf_state.completed_phases.len();
 
     // Find next required phase file
     let next_file = state.next_required_phase_file(workflow);
+    let graph_next = wf_state.next_required_phase(workflow);
 
     // First required phase file, used by the warning box when phases
-    // aren't being loaded at all. Falls back to `claim.md` only if the
-    // workflow has no phases configured (shouldn't happen in practice).
+    // aren't being loaded at all.
     let first_phase_file = workflow
         .phases
         .iter()
@@ -78,27 +116,40 @@ pub fn process(
         .map_or("claim.md", |p| p.file.as_str());
 
     // Build progress context
-    let mut context = if state.tool_calls > 0 && loaded == 0 {
+    let mut context = if state.tool_calls > 0 && loaded == 0 && graph_completed == 0 {
         // Tool calls happening but no phases loaded — strong warning
         format_warning_box(skill_name, total_required, total, first_phase_file)
     } else if let Some(ref next) = next_file {
         // Normal progress — show status and next step
-        format_progress_box(skill_name, loaded, total_required, total, next)
-    } else {
-        // All required phases loaded
+        format_progress_box(
+            skill_name,
+            loaded,
+            total_required,
+            total,
+            graph_completed,
+            next,
+        )
+    } else if let Some(next) = graph_next {
         format!(
-            "[Phase Progress] Skill: {skill_name} | All {total_required}/{total} required phases loaded. Proceed with execution."
+            "[Phase Progress] Skill: {skill_name} | All {total_required}/{total} required phase \
+             files loaded. LangGraph sealed: {graph_completed}/{total_required}. Next graph \
+             phase awaiting proof: {}.",
+            next.id
+        )
+    } else {
+        // All required phases loaded and sealed by graph authority.
+        format!(
+            "[Phase Progress] Skill: {skill_name} | All {total_required}/{total} required phase \
+             files loaded. LangGraph sealed: {graph_completed}/{total_required}. Proceed with execution."
         )
     };
 
     // Append step-level progress if step configs exist
     if let Some(steps_config) = step_configs.get(skill_name) {
-        if let Some(wf_state) = state.workflows.get(skill_name) {
-            let step_context = format_step_progress(wf_state, steps_config, workflow);
-            if !step_context.is_empty() {
-                context.push('\n');
-                context.push_str(&step_context);
-            }
+        let step_context = format_step_progress(wf_state, steps_config, workflow);
+        if !step_context.is_empty() {
+            context.push('\n');
+            context.push_str(&step_context);
         }
     }
 
@@ -130,12 +181,13 @@ fn format_progress_box(
     loaded: usize,
     required: usize,
     total: usize,
+    graph_completed: usize,
     next_file: &str,
 ) -> String {
     // Build phase checklist
     format!(
         "[Phase Progress] Skill: {skill} | Phases loaded: {loaded}/{total} (required: {required}) | \
-         Next: Read(\"~/.claude/skills/{skill}/phases/{next_file}\")"
+         LangGraph sealed: {graph_completed}/{required} | Next: Read(\"~/.claude/skills/{skill}/phases/{next_file}\")"
     )
 }
 
@@ -164,11 +216,15 @@ fn format_step_progress(
                 .map(|s| s.phase_id.clone())
         })
         .or_else(|| {
-            // Fall back to the next incomplete required phase
+            // Use the next incomplete required phase from graph state.
             wf_state.next_required_phase(workflow).map(|p| p.id.clone())
         });
 
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     // Percentages from usize→f64→u32: precision loss negligible for display; value is always 0..=100
     let pct = if total_steps > 0 {
         (completed as f64 / total_steps as f64 * 100.0) as u32
@@ -386,26 +442,40 @@ mod tests {
         }
     }
 
-    /// Stub `FileSystemPort` whose `is_dir` always returns `true` so the
-    /// `skill_has_phases_dir` check passes and the validator gets to emit
-    /// progress / warning context. Real-disk structure isn't available
-    /// during unit tests; production code already validates the path under
-    /// `~/.claude/skills/{skill}/phases/`.
+    /// Stub `FileSystemPort` whose `is_dir` always returns `true` so validator
+    /// tests can focus on graph/progress behavior without relying on real disk
+    /// skill fixtures.
     struct PhasesExistFs;
     impl crate::hooks::FileSystemPort for PhasesExistFs {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             Some(std::path::PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("no".into()))
+        fn read_to_string(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "no".into(),
+            ))
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
             Ok(vec![])
         }
         fn exists(&self, _: &std::path::Path) -> bool {
@@ -414,12 +484,28 @@ mod tests {
         fn is_dir(&self, _: &std::path::Path) -> bool {
             true
         }
-        fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("no".into()))
+        fn metadata(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "no".into(),
+            ))
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
+    }
+
+    fn project_linear_graph(state: &mut SessionState) {
+        state.set_graph_projected_workflow(
+            "linear",
+            sentinel_domain::workflow::WorkflowState::new("linear", state.session_id.clone()),
+        );
     }
 
     #[test]
@@ -437,6 +523,7 @@ mod tests {
     fn test_progress_injection_with_no_phases_read() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        project_linear_graph(&mut state);
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
         let step_configs = HashMap::new();
@@ -453,6 +540,7 @@ mod tests {
     fn test_progress_injection_with_some_phases_read() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        project_linear_graph(&mut state);
         state.record_phase_read("linear", "claim.md");
         state.record_phase_read("linear", "fetch.md");
 
@@ -472,6 +560,7 @@ mod tests {
     fn test_warning_when_tool_calls_but_no_phases() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        project_linear_graph(&mut state);
         state.record_tool_call();
         state.record_tool_call();
 
@@ -488,17 +577,58 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_without_phases_dir_suppresses_warning() {
-        // A skill whose on-disk layout has no `phases/` directory should
-        // NOT trigger the "Phase Execution Required" warning — the
-        // workflow config is stale. Use a skill name guaranteed not to
-        // exist on disk.
+    fn marker_only_configured_workflow_is_context_only() {
+        let mut state = SessionState::new("sess-marker-only");
+        state.set_active_skill("linear");
+
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
+        let input = HookInput::default();
+
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
+        assert!(output.hook_specific_output.is_none());
+        assert!(
+            !state.has_any_graph_workflow(),
+            "phase validator must not synthesize LangGraph workflow authority"
+        );
+    }
+
+    #[test]
+    fn graph_workflow_is_reported_when_active_skill_is_cleared() {
+        let mut state = SessionState::new("sess-graph-only");
+        project_linear_graph(&mut state);
+        state.record_phase_read("linear", "claim.md");
+
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+        let step_configs = HashMap::new();
+        let input = HookInput::default();
+
+        let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
+        assert!(ctx.contains("Skill: linear"));
+        assert!(ctx.contains("Phases loaded: 1/4"));
+    }
+
+    #[test]
+    fn test_skill_without_phases_dir_injects_authority_warning() {
         let mut state = SessionState::new("sess-nope");
         state.set_active_skill("nonexistent-phantom-skill-xyz");
+        state.set_graph_projected_workflow(
+            "nonexistent-phantom-skill-xyz",
+            sentinel_domain::workflow::WorkflowState::new(
+                "nonexistent-phantom-skill-xyz",
+                "sess-nope",
+            ),
+        );
         state.record_tool_call();
 
         let mut workflows = HashMap::new();
-        workflows.insert("nonexistent-phantom-skill-xyz".to_string(), test_workflow());
+        let mut workflow = test_workflow();
+        workflow.skill = "nonexistent-phantom-skill-xyz".to_string();
+        workflows.insert("nonexistent-phantom-skill-xyz".to_string(), workflow);
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
@@ -510,8 +640,11 @@ mod tests {
             &step_configs,
             &crate::hooks::test_support::StubFs,
         );
-        // allow() means no context injection
-        assert!(output.hook_specific_output.is_none());
+        let ctx = output.hook_specific_output.unwrap().additional_context;
+        let ctx = ctx.as_deref().unwrap();
+        assert!(ctx.contains(HookOutput::SENTINEL_AUTHORITY_PREFIX));
+        assert!(ctx.contains("missing phase directory"));
+        assert!(ctx.contains("do not suppress phase enforcement"));
     }
 
     #[test]
@@ -522,15 +655,27 @@ mod tests {
         state.record_phase_read("linear", "fetch.md");
         state.record_phase_read("linear", "intelligence.md");
 
+        let workflow = test_workflow();
+        let mut workflow_state =
+            sentinel_domain::workflow::WorkflowState::new("linear", state.session_id.clone());
+        workflow_state.completed_phases = vec![
+            "claim".to_string(),
+            "fetch".to_string(),
+            "intelligence".to_string(),
+        ];
+        workflow_state.complete = true;
+        state.set_graph_projected_workflow("linear", workflow_state);
+
         let mut workflows = HashMap::new();
-        workflows.insert("linear".to_string(), test_workflow());
+        workflows.insert("linear".to_string(), workflow);
         let step_configs = HashMap::new();
         let input = HookInput::default();
 
         let output = process(&input, &state, &workflows, &step_configs, &PhasesExistFs);
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
-        assert!(ctx.contains("All 3/4 required phases loaded"));
+        assert!(ctx.contains("All 3/4 required phase"));
+        assert!(ctx.contains("LangGraph sealed: 3/3"));
     }
 
     #[test]
@@ -539,16 +684,15 @@ mod tests {
         state.set_active_skill("linear");
         state.record_phase_read("linear", "claim.md");
 
-        // Update some steps in the workflow state
-        if let Some(wf) = state.active_workflow_mut() {
-            wf.update_step(
-                "claim",
-                "0.1",
-                StepStatus::Completed,
-                Some("Found state ID".to_string()),
-            );
-            wf.update_step("claim", "0.2", StepStatus::InProgress, None);
-        }
+        let mut workflow_state = sentinel_domain::workflow::WorkflowState::new("linear", "sess-1");
+        workflow_state.update_step(
+            "claim",
+            "0.1",
+            StepStatus::Completed,
+            Some("Found state ID".to_string()),
+        );
+        workflow_state.update_step("claim", "0.2", StepStatus::InProgress, None);
+        state.set_graph_projected_workflow("linear", workflow_state);
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
@@ -575,6 +719,7 @@ mod tests {
     fn test_step_progress_without_config() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        project_linear_graph(&mut state);
         state.record_phase_read("linear", "claim.md");
 
         let mut workflows = HashMap::new();

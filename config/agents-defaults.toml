@@ -7,7 +7,7 @@
 #
 # Per the A2 design (`docs/a2-capability-aware-routing.md`), every
 # "which agent for this work?" decision in sentinel — A3's auditor
-# selection, BA5's critic selection, budget-coder routing — consults
+# selection, BA5's critic selection, budget-coder routing — queries
 # the router built from this table. Operator overrides are the
 # customization seam; this file is the working baseline.
 #

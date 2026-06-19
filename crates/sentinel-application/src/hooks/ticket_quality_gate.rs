@@ -38,19 +38,51 @@
 //! `get_issue`, `list_labels`, `add_issue_label`, `create_comment`, …) — passes
 //! through untouched. If you are not writing a Linear ticket, this gate does not exist.
 //!
-//! ## Fail-open
-//! No tool name, unparseable input, missing session — always
-//! [`HookOutput::allow`]. The gate must never block on its own malfunction.
+//! ## Fail-visible
+//! Non-ticket tools still pass through untouched. A ticket write with absent or
+//! malformed input is blocked because Sentinel cannot prove the write satisfies
+//! the Definition of Ready.
 
 use sentinel_domain::events::{HookInput, HookOutput};
+use sha2::{Digest as _, Sha256};
 
 /// The Linear MCP tools that create or mutate a ticket's fields. Only these are
 /// gated — keeping the hook tightly scoped so it can never gate discovery/read
 /// tools or non-Linear work.
-const TICKET_WRITE_TOOLS: &[&str] = &[
-    "mcp__linear__create_issue",
-    "mcp__linear__update_issue",
-];
+const TICKET_WRITE_TOOLS: &[&str] = &["mcp__linear__create_issue", "mcp__linear__update_issue"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TicketQualityDecision {
+    Allow,
+    DenyMalformedInput,
+    DenyMissingFields,
+}
+
+#[derive(Debug, Clone)]
+pub struct TicketQualityEvaluation {
+    pub tool: Option<String>,
+    pub ticket_write_tool: bool,
+    pub create_issue: bool,
+    pub update_issue: bool,
+    pub tool_input_present: bool,
+    pub tool_input_object: bool,
+    pub tool_input_sha256: Option<String>,
+    pub missing: Vec<Missing>,
+    pub malformed_reason: Option<&'static str>,
+    pub missing_estimate: bool,
+    pub missing_priority: bool,
+    pub missing_label_ids: bool,
+    pub missing_description: bool,
+    pub should_deny: bool,
+    pub decision: TicketQualityDecision,
+}
+
+impl TicketQualityEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.ticket_write_tool
+    }
+}
 
 /// Is this tool a Linear ticket create/update call?
 fn is_ticket_write_tool(tool_name: &str) -> bool {
@@ -58,10 +90,10 @@ fn is_ticket_write_tool(tool_name: &str) -> bool {
 }
 
 /// A single readiness dimension the tool input failed.
-#[derive(Debug, PartialEq, Eq)]
-struct Missing {
-    field: &'static str,
-    why: &'static str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missing {
+    pub field: &'static str,
+    pub why: &'static str,
 }
 
 /// Inspect the `tool_input` JSON for a create/update call and return every
@@ -75,25 +107,47 @@ fn missing_fields(input: &serde_json::Value, is_create: bool) -> Vec<Missing> {
 
     // estimate: number > 0
     match input.get("estimate") {
-        Some(v) if v.is_null() => out.push(Missing { field: "estimate", why: "estimate is null" }),
+        Some(v) if v.is_null() => out.push(Missing {
+            field: "estimate",
+            why: "estimate is null",
+        }),
         Some(v) if v.as_f64().is_some_and(|n| n <= 0.0) => {
-            out.push(Missing { field: "estimate", why: "estimate must be > 0" });
+            out.push(Missing {
+                field: "estimate",
+                why: "estimate must be > 0",
+            });
         }
         Some(_) => {}
-        None if is_create => out.push(Missing { field: "estimate", why: "no estimate set" }),
+        None if is_create => out.push(Missing {
+            field: "estimate",
+            why: "no estimate set",
+        }),
         None => {}
     }
 
     // priority: integer 1..=4 (Linear: 0 = No priority, which we forbid)
     match input.get("priority") {
-        Some(v) if v.is_null() => out.push(Missing { field: "priority", why: "priority is null" }),
-        Some(v) => {
-            let p = v.as_i64().unwrap_or(0);
-            if !(1..=4).contains(&p) {
-                out.push(Missing { field: "priority", why: "priority must be 1-4 (not 0/No-priority)" });
+        Some(v) if v.is_null() => out.push(Missing {
+            field: "priority",
+            why: "priority is null",
+        }),
+        Some(v) => match v.as_i64() {
+            Some(p) if !(1..=4).contains(&p) => {
+                out.push(Missing {
+                    field: "priority",
+                    why: "priority must be 1-4 (not 0/No-priority)",
+                });
             }
-        }
-        None if is_create => out.push(Missing { field: "priority", why: "no priority set" }),
+            Some(_) => {}
+            None => out.push(Missing {
+                field: "priority",
+                why: "priority must be an integer 1-4",
+            }),
+        },
+        None if is_create => out.push(Missing {
+            field: "priority",
+            why: "no priority set",
+        }),
         None => {}
     }
 
@@ -102,11 +156,20 @@ fn missing_fields(input: &serde_json::Value, is_create: bool) -> Vec<Missing> {
     // only flag an explicitly-emptied labelIds array.
     match input.get("labelIds") {
         Some(v) if v.as_array().is_some_and(std::vec::Vec::is_empty) => {
-            out.push(Missing { field: "labelIds", why: "labelIds is empty - need Type + Area" });
+            out.push(Missing {
+                field: "labelIds",
+                why: "labelIds is empty - need Type + Area",
+            });
         }
-        Some(v) if v.is_null() => out.push(Missing { field: "labelIds", why: "labelIds is null" }),
+        Some(v) if v.is_null() => out.push(Missing {
+            field: "labelIds",
+            why: "labelIds is null",
+        }),
         Some(_) => {}
-        None if is_create => out.push(Missing { field: "labelIds", why: "no labels - need Type + Area" }),
+        None if is_create => out.push(Missing {
+            field: "labelIds",
+            why: "no labels - need Type + Area",
+        }),
         None => {}
     }
 
@@ -114,10 +177,16 @@ fn missing_fields(input: &serde_json::Value, is_create: bool) -> Vec<Missing> {
     // ready ticket's description is non-trivial. We require >= 80 chars on create.
     match input.get("description").and_then(serde_json::Value::as_str) {
         Some(d) if d.trim().chars().count() < 80 => {
-            out.push(Missing { field: "description", why: "description too thin - need Context + >=3 acceptance criteria" });
+            out.push(Missing {
+                field: "description",
+                why: "description too thin - need Context + >=3 acceptance criteria",
+            });
         }
         Some(_) => {}
-        None if is_create => out.push(Missing { field: "description", why: "no description - need Context + >=3 acceptance criteria" }),
+        None if is_create => out.push(Missing {
+            field: "description",
+            why: "no description - need Context + >=3 acceptance criteria",
+        }),
         None => {}
     }
 
@@ -150,34 +219,149 @@ fn deny_reason(action: &str, missing: &[Missing]) -> String {
     s
 }
 
+fn malformed_input_reason(action: &str, why: &str) -> String {
+    format!(
+        "Ticket Quality Gate - this Linear ticket write cannot be proven dev-ready, so {action} \
+         is blocked. Reason: {why}.\n\n\
+         FIX-PATH: re-issue the Linear ticket write with a JSON object carrying the readiness \
+         fields Sentinel can inspect: estimate (>0), priority 1-4, labelIds (Type + Area), \
+         and a description containing Context + >=3 testable acceptance-criteria checkboxes."
+    )
+}
+
 /// Process a `PreToolUse` event. ENFORCING for Linear ticket create/update:
 /// denies (with the Q&A fix-path) when the readiness bar is unmet; allows
 /// everything else.
 #[must_use]
 pub fn process(input: &HookInput) -> HookOutput {
-    let tool_name = match input.tool_name.as_deref() {
-        Some(name) => name,
-        None => return HookOutput::allow(),
+    let evaluation = evaluate(input);
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(input: &HookInput) -> TicketQualityEvaluation {
+    let tool = input.tool_name.clone();
+    let Some(tool_name) = input.tool_name.as_deref() else {
+        return base_evaluation(tool);
     };
 
     if !is_ticket_write_tool(tool_name) {
-        return HookOutput::allow();
+        return base_evaluation(tool);
     }
 
+    let create_issue = tool_name.ends_with("create_issue");
+    let update_issue = tool_name.ends_with("update_issue");
     let Some(tool_input) = input.tool_input.as_ref() else {
-        // No input to inspect - fail open.
-        return HookOutput::allow();
+        return TicketQualityEvaluation {
+            tool,
+            ticket_write_tool: true,
+            create_issue,
+            update_issue,
+            tool_input_present: false,
+            tool_input_object: false,
+            tool_input_sha256: None,
+            missing: Vec::new(),
+            malformed_reason: Some("missing tool_input"),
+            missing_estimate: false,
+            missing_priority: false,
+            missing_label_ids: false,
+            missing_description: false,
+            should_deny: true,
+            decision: TicketQualityDecision::DenyMalformedInput,
+        };
     };
-
-    let is_create = tool_name.ends_with("create_issue");
-    let missing = missing_fields(tool_input, is_create);
-
-    if missing.is_empty() {
-        return HookOutput::allow();
+    if !tool_input.is_object() {
+        return TicketQualityEvaluation {
+            tool,
+            ticket_write_tool: true,
+            create_issue,
+            update_issue,
+            tool_input_present: true,
+            tool_input_object: false,
+            tool_input_sha256: Some(json_sha256(tool_input)),
+            missing: Vec::new(),
+            malformed_reason: Some("tool_input must be a JSON object"),
+            missing_estimate: false,
+            missing_priority: false,
+            missing_label_ids: false,
+            missing_description: false,
+            should_deny: true,
+            decision: TicketQualityDecision::DenyMalformedInput,
+        };
     }
 
-    let action = if is_create { "creating it" } else { "this update" };
-    HookOutput::deny(deny_reason(action, &missing))
+    let missing = missing_fields(tool_input, create_issue);
+    let missing_estimate = missing.iter().any(|m| m.field == "estimate");
+    let missing_priority = missing.iter().any(|m| m.field == "priority");
+    let missing_label_ids = missing.iter().any(|m| m.field == "labelIds");
+    let missing_description = missing.iter().any(|m| m.field == "description");
+    let should_deny = !missing.is_empty();
+    TicketQualityEvaluation {
+        tool,
+        ticket_write_tool: true,
+        create_issue,
+        update_issue,
+        tool_input_present: true,
+        tool_input_object: true,
+        tool_input_sha256: Some(json_sha256(tool_input)),
+        missing,
+        malformed_reason: None,
+        missing_estimate,
+        missing_priority,
+        missing_label_ids,
+        missing_description,
+        should_deny,
+        decision: if should_deny {
+            TicketQualityDecision::DenyMissingFields
+        } else {
+            TicketQualityDecision::Allow
+        },
+    }
+}
+
+fn base_evaluation(tool: Option<String>) -> TicketQualityEvaluation {
+    TicketQualityEvaluation {
+        tool,
+        ticket_write_tool: false,
+        create_issue: false,
+        update_issue: false,
+        tool_input_present: false,
+        tool_input_object: false,
+        tool_input_sha256: None,
+        missing: Vec::new(),
+        malformed_reason: None,
+        missing_estimate: false,
+        missing_priority: false,
+        missing_label_ids: false,
+        missing_description: false,
+        should_deny: false,
+        decision: TicketQualityDecision::Allow,
+    }
+}
+
+fn json_sha256(value: &serde_json::Value) -> String {
+    hex::encode(Sha256::digest(value.to_string().as_bytes()))
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &TicketQualityEvaluation) -> HookOutput {
+    let action = if evaluation.create_issue {
+        "creating it"
+    } else {
+        "this update"
+    };
+    match evaluation.decision {
+        TicketQualityDecision::Allow => HookOutput::allow(),
+        TicketQualityDecision::DenyMalformedInput => HookOutput::deny(malformed_input_reason(
+            action,
+            evaluation
+                .malformed_reason
+                .unwrap_or("tool_input cannot be inspected"),
+        )),
+        TicketQualityDecision::DenyMissingFields => {
+            HookOutput::deny(deny_reason(action, &evaluation.missing))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -219,7 +403,10 @@ mod tests {
 
     #[test]
     fn ready_create_passes() {
-        let out = process(&input_for(Some("mcp__linear__create_issue"), Some(ready_create())));
+        let out = process(&input_for(
+            Some("mcp__linear__create_issue"),
+            Some(ready_create()),
+        ));
         assert!(!is_denied(&out), "a fully dev-ready create must pass");
     }
 
@@ -231,8 +418,14 @@ mod tests {
         assert!(is_denied(&out), "create without estimate must be denied");
         let r = deny_text(&out).unwrap();
         assert!(r.contains("estimate"), "{r}");
-        assert!(r.contains("AskUserQuestion"), "deny must name the Q&A fix-path: {r}");
-        assert!(r.starts_with("[Sentinel-Authority]"), "must carry authority prefix: {r}");
+        assert!(
+            r.contains("AskUserQuestion"),
+            "deny must name the Q&A fix-path: {r}"
+        );
+        assert!(
+            r.starts_with("[Sentinel-Authority]"),
+            "must carry authority prefix: {r}"
+        );
     }
 
     #[test]
@@ -269,7 +462,10 @@ mod tests {
             Some("mcp__linear__update_issue"),
             Some(json!({ "id": "FPCRM-1", "title": "Better title" })),
         ));
-        assert!(!is_denied(&out), "a partial update that doesn't clear fields must pass");
+        assert!(
+            !is_denied(&out),
+            "a partial update that doesn't clear fields must pass"
+        );
     }
 
     #[test]
@@ -288,7 +484,10 @@ mod tests {
             Some("mcp__linear__update_issue"),
             Some(json!({ "id": "FPCRM-1", "priority": 0 })),
         ));
-        assert!(is_denied(&out), "setting priority to 0 on update must be denied");
+        assert!(
+            is_denied(&out),
+            "setting priority to 0 on update must be denied"
+        );
     }
 
     #[test]
@@ -302,7 +501,10 @@ mod tests {
             "mcp__linear__add_issue_label",
         ] {
             let out = process(&input_for(Some(tool), Some(json!({}))));
-            assert!(!is_denied(&out), "{tool} must pass through (read/discovery, not a ticket write)");
+            assert!(
+                !is_denied(&out),
+                "{tool} must pass through (read/discovery, not a ticket write)"
+            );
         }
     }
 
@@ -311,7 +513,10 @@ mod tests {
         // The humane invariant: non-Linear work is never touched.
         for tool in ["Bash", "Write", "Edit", "mcp__github__create_issue", "Read"] {
             let out = process(&input_for(Some(tool), Some(json!({ "estimate": null }))));
-            assert!(!is_denied(&out), "{tool} must pass through (not a Linear ticket write)");
+            assert!(
+                !is_denied(&out),
+                "{tool} must pass through (not a Linear ticket write)"
+            );
         }
     }
 
@@ -322,9 +527,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_tool_input_fails_open() {
-        // A ticket-write tool with no inspectable input must fail OPEN, not block.
+    fn missing_tool_input_denies_ticket_write() {
         let out = process(&input_for(Some("mcp__linear__create_issue"), None));
-        assert!(!is_denied(&out), "no tool_input -> fail open, never block on malfunction");
+        assert!(is_denied(&out), "no tool_input must not authorize a write");
+        let r = deny_text(&out).unwrap();
+        assert!(r.contains("cannot be proven dev-ready"), "{r}");
+        assert!(r.contains("missing tool_input"), "{r}");
+        assert!(r.starts_with("[Sentinel-Authority]"), "{r}");
+    }
+
+    #[test]
+    fn non_object_tool_input_denies_ticket_write() {
+        let out = process(&input_for(
+            Some("mcp__linear__update_issue"),
+            Some(json!("not an object")),
+        ));
+        assert!(
+            is_denied(&out),
+            "non-object input must not authorize a write"
+        );
+        let r = deny_text(&out).unwrap();
+        assert!(r.contains("tool_input must be a JSON object"), "{r}");
+    }
+
+    #[test]
+    fn invalid_priority_type_denied_explicitly() {
+        let mut p = ready_create();
+        p["priority"] = json!("urgent");
+        let out = process(&input_for(Some("mcp__linear__create_issue"), Some(p)));
+        assert!(is_denied(&out));
+        assert!(deny_text(&out)
+            .unwrap()
+            .contains("priority must be an integer"));
     }
 }

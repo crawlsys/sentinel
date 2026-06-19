@@ -52,13 +52,7 @@ impl FilesystemEvalCorpus {
     /// Construct with the default path
     /// (`~/.claude/sentinel/eval/ba-corpus/`).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let base_dir = home
-            .join(".claude")
-            .join("sentinel")
-            .join("eval")
-            .join("ba-corpus");
+        let base_dir = crate::paths::sentinel_root().join("eval").join("ba-corpus");
         Ok(Self::at_dir(base_dir))
     }
 
@@ -112,15 +106,13 @@ impl FilesystemEvalCorpus {
                 Ok(it) => it,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!("failed to read corpus dir {}", dir.display())
-                    });
+                    return Err(err)
+                        .with_context(|| format!("failed to read corpus dir {}", dir.display()));
                 }
             };
             for entry in entries {
-                let entry = entry.with_context(|| {
-                    format!("failed to iterate corpus dir {}", dir.display())
-                })?;
+                let entry = entry
+                    .with_context(|| format!("failed to iterate corpus dir {}", dir.display()))?;
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
@@ -201,9 +193,7 @@ pub struct CorpusEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sentinel_domain::eval::{
-        CaseProvenance, GoldArtifact, ScoringRubric, SourceCorpus,
-    };
+    use sentinel_domain::eval::{CaseProvenance, GoldArtifact, ScoringRubric, SourceCorpus};
     use std::fs;
     use tempfile::TempDir;
 
@@ -376,9 +366,7 @@ mod tests {
         let c = corpus(&dir);
         fs::create_dir_all(c.public_cases_dir()).unwrap();
         fs::write(c.case_path(&EvalCaseId::new("bad").unwrap()), "not json").unwrap();
-        let err = c
-            .load_case(&EvalCaseId::new("bad").unwrap())
-            .unwrap_err();
+        let err = c.load_case(&EvalCaseId::new("bad").unwrap()).unwrap_err();
         assert!(format!("{err:#}").contains("parse"));
     }
 
@@ -386,9 +374,7 @@ mod tests {
     fn load_case_missing_errors_with_id() {
         let dir = TempDir::new().unwrap();
         let c = corpus(&dir);
-        let err = c
-            .load_case(&EvalCaseId::new("ghost").unwrap())
-            .unwrap_err();
+        let err = c.load_case(&EvalCaseId::new("ghost").unwrap()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("ghost"));
     }

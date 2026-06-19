@@ -102,9 +102,15 @@ mod tests {
 
     #[test]
     fn display_includes_variant_and_message() {
-        assert_eq!(FileSystemError::NotFound("x".into()).to_string(), "NotFound: x");
+        assert_eq!(
+            FileSystemError::NotFound("x".into()).to_string(),
+            "NotFound: x"
+        );
         assert_eq!(LlmError::Timeout("5s".into()).to_string(), "Timeout: 5s");
-        assert_eq!(GitError::Backend("boom".into()).to_string(), "Backend: boom");
+        assert_eq!(
+            GitError::Backend("boom".into()).to_string(),
+            "Backend: boom"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use sentinel_domain::ba::RetrievalRecord;
 use sentinel_domain::ports::{ProvenanceError, ProvenancePort, ProvenanceWritePort};
@@ -64,15 +64,9 @@ impl JsonlProvenanceStore {
     }
 
     /// Construct with the default path
-    /// (`~/.claude/sentinel/state/provenance/records.jsonl`). Errors
-    /// when `dirs::home_dir()` fails.
+    /// (`~/.claude/sentinel/state/provenance/records.jsonl`).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let path = home
-            .join(".claude")
-            .join("sentinel")
-            .join("state")
+        let path = crate::state_store::state_dir()
             .join("provenance")
             .join("records.jsonl");
         Ok(Self::at_path(path))
@@ -376,11 +370,11 @@ mod tests {
         let s = JsonlProvenanceStore::at_path(path.clone());
         // Write some valid records first.
         for i in 0..100 {
-            s.record(record("FIR-1", &format!("hash-{i}"), "s1")).unwrap();
+            s.record(record("FIR-1", &format!("hash-{i}"), "s1"))
+                .unwrap();
         }
         // Force the file past MAX_LOG_SIZE by padding it.
-        let padding =
-            "x".repeat(usize::try_from(MAX_LOG_SIZE).unwrap_or(usize::MAX) + 1024);
+        let padding = "x".repeat(usize::try_from(MAX_LOG_SIZE).unwrap_or(usize::MAX) + 1024);
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -397,7 +391,10 @@ mod tests {
         );
         // Should still have some records readable.
         let history = s.query_artifact_history("FIR-1").unwrap();
-        assert!(!history.is_empty(), "post-truncate read should still have records");
+        assert!(
+            !history.is_empty(),
+            "post-truncate read should still have records"
+        );
     }
 
     // ---- Path semantics ----

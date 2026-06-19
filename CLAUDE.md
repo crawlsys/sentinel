@@ -18,7 +18,7 @@ Release profile: LTO, single codegen unit, binary stripping, panic=abort.
 
 ```
 sentinel hook --event <Event>          Process a hook event
-sentinel daemon --port 3001            Start daemon with dashboard API
+sentinel daemon --port 3001            Start daemon with local API
 sentinel verify --session <id>         Verify proof chain
 sentinel scan --counts-only            Marketplace component counts
 sentinel scan --sync-counts            Sync counts across marketplace files
@@ -35,10 +35,10 @@ sentinel mcp                           Start MCP server over stdio
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
-| `sentinel-application` | — | Use cases: engine, classifier, gate, 86 hook modules |
+| `sentinel-application` | — | Use cases: engine, classifier, gate, 85 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
 | `sentinel-graph` | — | Phase-progression engine: compiles `workflows.toml` into a durable, checkpointed langgraph StateGraph with judge-verdict interrupts and Pass/Fail routing |
-| `sentinel-cli` | `sentinel` | CLI (37 top-level subcommands) + dashboard REST API (axum) + in-repo MCP host (stdio) |
+| `sentinel-cli` | `sentinel` | CLI (36 top-level subcommands) + local REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-git-interceptor` | `sentinel-git-interceptor` | Git shim that routes commits through sentinel gates |
 | `sentinel-npx-interceptor` | `sentinel-npx-interceptor` | npx shim that routes installs through sentinel gates |
 
@@ -46,7 +46,7 @@ sentinel mcp                           Start MCP server over stdio
 
 ## MCP Server Tools
 
-The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 22 tools via Claude Code (`mcp__sentinel__<tool>`):
+The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cmd.rs`) exposes 33 tools via Claude Code (`mcp__sentinel__<tool>`):
 
 | Tool | Description |
 |------|-------------|
@@ -54,24 +54,35 @@ The in-repo MCP host (`sentinel mcp`, defined in `crates/sentinel-cli/src/mcp_cm
 | `get_workflow_status` | Current workflow state (completed/current/next phases) |
 | `verify_chain` | Re-verify proof chain integrity (hash consistency) |
 | `submit_phase_complete` | Submit phase completion for AI judge evaluation |
+| `record_dyad_verdict` | Record implementer/reviewer/tester dyad authorization through LangGraph checkpoints |
 | `get_session_stats` | Hook invocations, blocked calls, per-hook timing |
 | `update_step` | Update step status within a skill phase |
+| `submit_step_complete` | Seal a StepProof and durable LangGraph checkpoint together |
 | `get_phase_steps` | All steps and status for a specific phase |
 | `get_workflow_progress` | Full hierarchical progress (phase + step level) |
 | `regenerate_claude_md` | Regenerate `~/.claude/CLAUDE.md` from template with fresh counts |
 | `edit_claude_md_template` | Find-and-replace on generator template source, then auto-regenerate |
 | `restart_all_mcps` | Touch all mcp-router watched binaries to trigger mass restart |
 | `get_wip_snapshot` | Current WIP-by-stage snapshot (in-flight tickets per team/state + bottleneck flags) |
-| `route_capability` | Consult the A2 capability router to pick the best-fit agent for a unit of work |
+| `route_capability` | Query the A2 capability router to pick the best-fit agent for a unit of work |
 | `delegate_codex` | Delegate an adversarial/code-reasoning task to the Codex worker model (via OpenRouter) |
 | `delegate_kimi_context_scan` | Delegate a cheap large-context scan to the Kimi worker model (via OpenRouter) |
+| `ba_draft` | Draft a BA recommendation and authorize its BA1/BA3/A13 structure through durable BA draft LangGraph checkpoints |
 | `replay_phase` | Time-travel replay of a skill phase by forking from the checkpoint before it (first-class QA-failed re-attempt) |
 | `dev_scorecard` | Per-developer scorecards (throughput, first-pass QA, consistency) from git + Linear, with attribution-divergence flagging |
 | `linear_code_audit` | Flag Completed tickets with zero code evidence (commits/files) — potential false-done |
 | `linear_health` | Composite 0-100 Linear health score (hygiene, structure, data quality, flow) |
 | `linear_pm_audit` | PM-enforcement audit: estimate hygiene, oversized tickets, QA-failed risk, burndown, cycle-time calibration |
-| `severity_scan` | Dual-LLM severity/priority judging per ticket (shadow-only; never mutates Linear) |
+| `severity_scan` | Dual-LLM severity/priority judging per ticket (report-only in MCP; CLI --apply uses LangGraph checkpoint authorization for gap-fills) |
+| `tokens_scan` | Token usage by Linear ticket, classified through durable token-usage LangGraph checkpoints |
+| `cache_efficiency` | Prompt-cache hit-rate scan, classified through durable cache-efficiency LangGraph checkpoints |
+| `cost_per_point` | Tokens and dollars per story point, classified through durable cost-per-point LangGraph checkpoints |
+| `deploy_frequency` | DORA deploy cadence aggregate, classified through durable deploy-frequency LangGraph checkpoints |
+| `pr_review` | PR review health and human-review coverage, classified through durable PR-review LangGraph checkpoints |
+| `roi` | Claude-vs-human-team ROI, classified through durable ROI LangGraph checkpoints |
+| `sla` | SLA breach aggregate, classified through durable SLA LangGraph checkpoints |
 | `token_cost` | Price the SEN-7 token aggregate at API rates; cached-vs-uncached cost split |
+| `eval_run` | Run BA-Eval candidate artifacts, persist EvalRunResult, and authorize the aggregate verdict through durable eval LangGraph checkpoints |
 
 ### CLAUDE.md Self-Maintenance
 
@@ -89,12 +100,12 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 - `Stop` — when Claude finishes responding
 - `SessionStart` / `PreCompact` — session lifecycle
 
-86 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 86:
+85 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 85:
 
 | Category | Hooks (representative) |
 |----------|-------|
 | **Blocking** | `phase_gate`, `pre_push_browser_test`, `commit_message_validator`, `git_hygiene`, `pre_commit_verification`, `spec_challenge_gate`, `db_ops_gate`, `pr_merge_gate` |
-| **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `evidence_collector`, `context_monitor` |
+| **Observational** | `commit_hygiene`, `mcp_health`, `error_reporter`, `verification_gate`, `context_monitor`, `good_citizen_observer` |
 | **Routing** | `skill_router`, `skill_telemetry` |
 | **Session** | `session_init`, `pre_compact`, `activity_tracker`, `execution_log` |
 | **Workflow** | `phase_validator`, `plan_organizer`, `hygiene_override`, `task_completed`, `teammate_idle` |
@@ -102,12 +113,12 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 
 ## Key Paths
 
-- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 86 modules)
+- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 85 modules)
 - `crates/sentinel-application/src/hooks/mod.rs` — `HOOK_NAMES` const, `GitStatusPort` trait
 - `crates/sentinel-domain/src/workflow.rs` — `SkillWorkflow`, `WorkflowPhase` definitions
 - `crates/sentinel-domain/src/proof.rs` — `ProofChain`, `PhaseProof`
 - `crates/sentinel-cli/src/hook_cmd.rs` — hook event dispatcher
-- `crates/sentinel-cli/src/api/` — dashboard REST API (hooks, proofs, workflows, scan, store, logs, sessions)
+- `crates/sentinel-cli/src/api/` — local REST API (hooks, proofs, workflows, scan, store, logs, sessions)
 - `crates/sentinel-cli/src/mcp_cmd.rs` — in-repo MCP host entry point (`sentinel mcp`, stdio transport, tool definitions)
 - `crates/sentinel-application/src/mcp_handler.rs` — MCP tool handlers (proof/workflow/step logic behind the tools)
 - `config/hooks.toml` — hook event-to-handler mapping

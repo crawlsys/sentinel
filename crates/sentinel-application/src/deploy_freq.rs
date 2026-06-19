@@ -100,7 +100,7 @@ impl DoraTier {
 
     /// Classify lead time for changes (DORA #1, SEN-10). Boundaries follow
     /// the Accelerate / DORA State of DevOps report and **must** match the
-    /// dashboard's `apps/dashboard/src/domain/dora.ts::tierFor("lead_time")`
+    /// local DORA client classifier for lead time.
     /// so the Rust collectors and the TS UI agree on tier labels.
     ///
     /// Boundaries (hours):
@@ -129,7 +129,7 @@ impl DoraTier {
     }
 
     /// Classify change failure rate (DORA #3, SEN-11). Input is a ratio in
-    /// `[0, 1]`; mirrors `tierFor("change_failure_rate")` in the dashboard.
+    /// `[0, 1]`; mirrors the local DORA client classifier for change failure rate.
     ///
     /// Boundaries (ratio):
     ///   * `<= 0.15` → Elite
@@ -142,7 +142,11 @@ impl DoraTier {
     /// rather classify than refuse to report.
     #[must_use]
     pub fn from_change_failure_rate(rate: f64) -> Self {
-        let r = if rate.is_finite() { rate.clamp(0.0, 1.0) } else { 0.0 };
+        let r = if rate.is_finite() {
+            rate.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if r <= 0.15 {
             Self::Elite
         } else if r <= 0.30 {
@@ -155,7 +159,7 @@ impl DoraTier {
     }
 
     /// Classify Mean Time To Recover (DORA #4, SEN-11). Mirrors
-    /// `tierFor("mttr")` in the dashboard.
+    /// local DORA client classifier for MTTR.
     ///
     /// Boundaries (hours):
     ///   * `< 1`    → Elite (less than an hour)

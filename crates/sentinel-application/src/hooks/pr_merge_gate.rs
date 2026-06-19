@@ -8,7 +8,7 @@
 //! but does NOT hard-block the command — the user's approval in the
 //! conversation is sufficient (CLAUDE.md enforces the actual rule).
 //!
-//! Autopilot bypass: if `SENTINEL_AUTOPILOT=1` is set, the ask prompt is
+//! Autopilot authorization: if `SENTINEL_AUTOPILOT=1` is set, the ask prompt is
 //! downgraded to an `allow` with a context-only reminder, so `gh pr merge`
 //! doesn't interrupt the loop with a Yes/No dialog. Gary's CLAUDE.md still
 //! requires in-conversation confirmation before hitting merge — this just
@@ -24,29 +24,113 @@ fn is_autopilot(env: &dyn EnvPort) -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeOperation {
+    None,
+    Merge,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeDecision {
+    Allow,
+    Ask,
+    AllowAutopilotReminder,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrMergeEvaluation {
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub bash_tool: bool,
+    pub command_present: bool,
+    pub operation: PrMergeOperation,
+    pub autopilot: bool,
+    pub permission_prompt_required: bool,
+    pub context_reminder_required: bool,
+    pub decision: PrMergeDecision,
+}
+
+impl PrMergeEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.bash_tool && !matches!(self.operation, PrMergeOperation::None)
+    }
+}
+
 /// Process a `PreToolUse` Bash event. Warns on `gh pr merge` but allows it.
 pub fn process(input: &HookInput, env: &dyn EnvPort) -> HookOutput {
-    let cmd = match extract_bash_command(input) {
-        Some(c) => c,
-        None => return HookOutput::allow(),
+    let evaluation = evaluate(input, env);
+    output_from_evaluation(&evaluation)
+}
+
+pub fn evaluate(input: &HookInput, env: &dyn EnvPort) -> PrMergeEvaluation {
+    let tool = input.tool_name.clone();
+    let bash_tool = tool.as_deref().map_or(true, |tool| tool == "Bash");
+    let command = extract_bash_command(input).map(str::to_string);
+    let autopilot = is_autopilot(env);
+    let Some(cmd) = command.as_deref() else {
+        return PrMergeEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present: false,
+            operation: PrMergeOperation::None,
+            autopilot,
+            permission_prompt_required: false,
+            context_reminder_required: false,
+            decision: PrMergeDecision::Allow,
+        };
     };
 
-    if cmd.contains("gh pr merge") || cmd.contains("gh pr close") {
-        if is_autopilot(env) {
-            // Autopilot: inject a reminder via context, do not open the Yes/No dialog.
-            return HookOutput::inject_context(
-                HookEvent::PreToolUse,
-                "[PR Merge Gate] AUTOPILOT: allowing `gh pr merge/close` without a \
-                 Yes/No dialog. Verify the in-conversation confirmation was given before \
-                 proceeding.",
-            );
-        }
-        return HookOutput::ask(
-            "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed.",
-        );
-    }
+    let operation = operation_for_command(cmd);
+    let pr_merge_or_close = !matches!(operation, PrMergeOperation::None);
+    let permission_prompt_required = bash_tool && pr_merge_or_close && !autopilot;
+    let context_reminder_required = bash_tool && pr_merge_or_close && autopilot;
+    let decision = if permission_prompt_required {
+        PrMergeDecision::Ask
+    } else if context_reminder_required {
+        PrMergeDecision::AllowAutopilotReminder
+    } else {
+        PrMergeDecision::Allow
+    };
 
-    HookOutput::allow()
+    PrMergeEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present: true,
+        operation,
+        autopilot,
+        permission_prompt_required,
+        context_reminder_required,
+        decision,
+    }
+}
+
+fn operation_for_command(cmd: &str) -> PrMergeOperation {
+    if cmd.contains("gh pr merge") {
+        PrMergeOperation::Merge
+    } else if cmd.contains("gh pr close") {
+        PrMergeOperation::Close
+    } else {
+        PrMergeOperation::None
+    }
+}
+
+pub fn output_from_evaluation(evaluation: &PrMergeEvaluation) -> HookOutput {
+    match evaluation.decision {
+        PrMergeDecision::Allow => HookOutput::allow(),
+        PrMergeDecision::Ask => HookOutput::ask(
+            "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed.",
+        ),
+        PrMergeDecision::AllowAutopilotReminder => HookOutput::inject_context(
+            HookEvent::PreToolUse,
+            "[PR Merge Gate] AUTOPILOT: allowing `gh pr merge/close` without a \
+             Yes/No dialog. Verify the in-conversation confirmation was given before \
+             proceeding.",
+        ),
+    }
 }
 
 fn extract_bash_command(input: &HookInput) -> Option<&str> {

@@ -201,7 +201,7 @@ has_api_call = false
 id = "step-judge"
 event = "PostToolUse"
 matcher = "mcp__skills__"
-description = "Run the adversarial AI judge on a completed step tool's evidence and produce a verdict. Staged via SENTINEL_JUDGE_ENFORCEMENT (shadow|warn|enforce, default shadow)."
+description = "Run the adversarial AI judge on completed step-tool evidence and persist the verdict consumed by submit_step_complete. Enforcement is structural: insufficient verdicts cannot seal StepProof."
 depends_on = ["evidence-collector"]
 has_api_call = true
 
@@ -352,7 +352,7 @@ id = "memory-verify"
 event = "PreCompact"
 description = "Re-check stored memories against ground truth (Qdrant scroll + claim verification, 24h cooldown, 3s wall-clock timeout)"
 depends_on = ["pre-compact"]
-has_api_call = true  # Qdrant scroll + Cerebras claim extraction
+has_api_call = true  # Qdrant scroll + OpenRouter claim extraction
 
 # === CwdChanged ===
 

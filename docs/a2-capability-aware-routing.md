@@ -8,7 +8,7 @@
 - `docs/policy-no-role-persona-pipelines.md` (R1) — A2 is the named replacement; R1 retired the alternative; this doc specifies what we use instead
 - `docs/a3-dry-run-then-commit.md` (A3) — A3's auditor seat selection is a *vendor-class* routing decision (different-vendor-from-acting); A2 generalizes that pattern
 - `docs/ba5-adversarial-deck-critique.md` (BA5) — BA5's critic seat is another routing decision; same A2 substrate
-- `docs/a6-reversibility-graded-tripwires.md` (A6) — routing decisions consult reversibility class (catastrophic actions route to the strongest available model regardless of cost)
+- `docs/a6-reversibility-graded-tripwires.md` (A6) — routing decisions query reversibility class (catastrophic actions route to the strongest available model regardless of cost)
 - `docs/ba6-connector-layer-scoping.md` (BA6) — connector routing (which connector serves which artifact-type query) is a separate routing problem; A2's substrate generalizes but the specific connector-routing logic is BA6's
 - Memory: `architecture-hexagonal-ddd`
 - Memory: `model-routing-decisions` — OpenRouter / Ollama Cloud / Kimi K2.6 cost decision intersects A2 directly
@@ -61,7 +61,7 @@ A capability is a *property of work* expressed in machine-checkable form. Exampl
 - `Capability::StructuredOutput(schema: SchemaRef)` — must produce structured output matching a schema
 - `Capability::Vendor(vendor: VendorClass)` — must come from a specific vendor (Anthropic / OpenAI / Google / xAI / Ollama / OpenRouter / Other)
 - `Capability::DifferentVendorFrom(vendor: VendorClass)` — must NOT be from this vendor (A3 auditor pattern)
-- `Capability::OpenWeights` — must be open-weights / local-inference (for interpretability probes per A8, for the strict-privacy path per consul ADR-003)
+- `Capability::OpenWeights` — must be open-weights / local-inference (for interpretability probes per A8, for the strict-privacy path per Legatus AI ADR-003)
 - `Capability::LatencyBudget(ms: u32)` — must respond within budget
 - `Capability::CostBudget(usd_cents_per_call: f32)` — must cost no more than budget
 - `Capability::ReversibilityClass(min: ReversibilityClass)` — must be qualified to handle this class (e.g., Catastrophic-class work requires the strongest available reasoning)
@@ -311,9 +311,9 @@ let agent_id = router.route(&req)?;
 
 The cost dimension is *forbidden* for catastrophic. The strongest agent wins regardless of price.
 
-### 5.5 Consul peer integration
+### 5.5 Legatus AI peer integration
 
-A consul peer (per consul ADR-016) — whether human-voice or automated-orchestrator — needs to route its own internal work. The router lives sentinel-side; consul peers consult it via the existing `mcp__sentinel__route_capability` MCP tool (new — add to sentinel-mcp's 11 → 12 tools). This keeps the routing substrate single-source-of-truth even across the AI-factory's external orchestrators.
+A Legatus AI peer (per Legatus AI ADR-016) — whether human-voice or automated-orchestrator — needs to route its own internal work. The router lives sentinel-side; Legatus AI peers query it via the existing `mcp__sentinel__route_capability` MCP tool (new — add to sentinel-mcp's 11 → 12 tools). This keeps the routing substrate single-source-of-truth even across the AI-factory's external orchestrators.
 
 ---
 
@@ -327,7 +327,7 @@ A consul peer (per consul ADR-016) — whether human-voice or automated-orchestr
   - `router.rs` — implementation reading profiles + appraisals; deterministic tie-break.
   - `config.rs` — parses `config/agents.toml`, `config/routing-policy.toml`.
 - **`sentinel-infrastructure/src/appraisal/`** (new adapter dir): JSONL-backed appraisal store; aggregation queries.
-- **`sentinel-mcp` extension**: new tool `route_capability` exposing the router to consul peers.
+- **`sentinel-mcp` extension**: new tool `route_capability` exposing the router to Legatus AI peers.
 - **`config/agents.toml`** (new, operator-managed): agent profile registry.
 - **`config/routing-policy.toml`** (new, operator-managed): tie-breaker order overrides.
 
@@ -387,7 +387,7 @@ If A3's auditor needs its own dry-run-then-commit (which it might, for sufficien
 
 4. **Appraisal write amplification.** Every dispatch produces a record; high-volume sessions generate lots of writes. Mitigation: batched async write to the appraisal store; in-memory accumulation flushed periodically.
 
-5. **Cross-tenant routing.** When multiple AI-factory orchestrators share a sentinel instance, do they share the appraisal store? Recommend: per-tenant aggregation; tenant boundary inherits from the same capability-token machinery as BA6/BA5/A3 (consul ADR-018 territory).
+5. **Cross-tenant routing.** When multiple AI-factory orchestrators share a sentinel instance, do they share the appraisal store? Recommend: per-tenant aggregation; tenant boundary inherits from the same capability-token machinery as BA6/BA5/A3 (Legatus AI ADR-018 territory).
 
 ---
 

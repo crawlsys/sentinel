@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Ticket Builder Skill — Step Definitions
 #
 # Trackable steps for the Linear ticket-quality rubric + score gate

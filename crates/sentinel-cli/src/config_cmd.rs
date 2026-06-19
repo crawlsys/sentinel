@@ -7,11 +7,7 @@ use anyhow::Result;
 use toml::{Table, Value};
 
 fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".claude")
-        .join("sentinel")
-        .join("user.toml")
+    sentinel_infrastructure::paths::sentinel_root().join("user.toml")
 }
 
 pub fn set(key: &str, value: &str) -> Result<()> {

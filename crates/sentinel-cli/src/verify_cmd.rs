@@ -1,6 +1,6 @@
 //! `sentinel verify` — Verify a session's proof chain
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use colored::Colorize;
 
 pub fn run(session: &str) -> Result<()> {
@@ -13,6 +13,7 @@ pub fn run(session: &str) -> Result<()> {
     match chain {
         None => {
             println!("{}", "No proof chain found for this session.".yellow());
+            bail!("no proof chain found for session '{session}'");
         }
         Some(chain) => {
             let verification = chain.verify();
@@ -28,44 +29,31 @@ pub fn run(session: &str) -> Result<()> {
                 for error in &verification.errors {
                     println!("  {} {error}", "•".red());
                 }
+                bail!("proof chain verification failed for session '{session}'");
             }
 
-            // Ed25519 signature verification (fail closed) when a public key is
-            // configured. Hash verification above proves the chain is internally
-            // consistent; this proves the signed entries were actually signed by
-            // the holder of SENTINEL_VERIFY_KEY and not forged.
-            match crate::mcp_cmd::load_verify_key_from_env() {
-                Some(key) => {
-                    let signing_required = matches!(
-                        std::env::var("SENTINEL_SIGNING_REQUIRED").ok().as_deref(),
-                        Some("1" | "true" | "TRUE" | "yes")
-                    );
-                    let report = chain.verify_signatures(&key, signing_required);
-                    if report.is_ok() {
-                        println!(
-                            "{} Signatures verified: {} signed, {} unsigned.",
-                            "✓".green().bold(),
-                            report.verified,
-                            report.unsigned
-                        );
-                    } else {
-                        println!("{} Signature verification FAILED!", "✗".red().bold());
-                        for entry_id in &report.failures {
-                            println!("  {} bad/absent signature on entry {entry_id}", "•".red());
-                        }
-                    }
-                },
-                None => {
-                    println!(
-                        "{} Signatures NOT verified (set SENTINEL_VERIFY_KEY to the Ed25519 public key).",
-                        "⚠".yellow()
-                    );
-                },
+            // Ed25519 signature verification is mandatory. Hash verification
+            // above proves only internal consistency; signatures prove the
+            // chain entries came from the configured Sentinel authority.
+            let key = crate::mcp_cmd::load_verify_key_from_env()?;
+            let report = chain.verify_signatures(&key);
+            if report.is_ok() {
+                println!(
+                    "{} Signatures verified: {} signed entries.",
+                    "✓".green().bold(),
+                    report.verified
+                );
+            } else {
+                println!("{} Signature verification FAILED!", "✗".red().bold());
+                for entry_id in &report.failures {
+                    println!("  {} bad/absent signature on entry {entry_id}", "•".red());
+                }
+                bail!("proof chain signature verification failed for session '{session}'");
             }
 
             // Print chain summary
             println!("\n{}", "Proof Chain:".bold());
-            for (i, proof) in chain.proofs.iter().enumerate() {
+            for (i, proof) in chain.phase_entries().enumerate() {
                 let status = if proof.judge_verdict.sufficient {
                     "✓".green()
                 } else {

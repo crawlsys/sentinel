@@ -38,9 +38,7 @@ use serde::Deserialize;
 use sentinel_application::capability_router::pick;
 use sentinel_domain::agent_routing::{AppraisalWindow, RoutingExplanation};
 use sentinel_domain::capability::{AgentCapabilityProfile, AgentId, CapabilityRequirement};
-use sentinel_domain::ports::{
-    AppraisalStorePort, CapabilityRouterPort, RoutingError,
-};
+use sentinel_domain::ports::{AppraisalStorePort, CapabilityRouterPort, RoutingError};
 
 /// Shipped default profiles (Phase 3b baseline). Operators replace or
 /// extend in `~/.claude/sentinel/config/agents.toml`.
@@ -110,8 +108,7 @@ impl TomlCapabilityRouter {
     /// Load profiles from a TOML string. Validates schema + profile
     /// values; returns an error naming the bad profile on failure.
     pub fn from_toml_str(s: &str) -> Result<Self> {
-        let config: AgentsConfigToml =
-            toml::from_str(s).context("failed to parse agents TOML")?;
+        let config: AgentsConfigToml = toml::from_str(s).context("failed to parse agents TOML")?;
         validate_profiles(&config.agent)?;
         Ok(Self::from_profiles(config.agent))
     }
@@ -119,9 +116,8 @@ impl TomlCapabilityRouter {
     /// Load profiles from a TOML file at `path`. Convenience wrapper
     /// around [`Self::from_toml_str`] with `std::fs::read_to_string`.
     pub fn from_toml_path(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).with_context(|| {
-            format!("failed to read agents TOML from {}", path.display())
-        })?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read agents TOML from {}", path.display()))?;
         Self::from_toml_str(&content)
     }
 
@@ -141,11 +137,17 @@ impl TomlCapabilityRouter {
                 return Ok(Self::from_profiles(shipped));
             }
             let overrides_content = std::fs::read_to_string(path).with_context(|| {
-                format!("failed to read agents overrides TOML from {}", path.display())
+                format!(
+                    "failed to read agents overrides TOML from {}",
+                    path.display()
+                )
             })?;
-            let overrides: AgentsConfigToml = toml::from_str(&overrides_content)
-                .with_context(|| {
-                    format!("failed to parse operator overrides TOML at {}", path.display())
+            let overrides: AgentsConfigToml =
+                toml::from_str(&overrides_content).with_context(|| {
+                    format!(
+                        "failed to parse operator overrides TOML at {}",
+                        path.display()
+                    )
                 })?;
             validate_profiles(&overrides.agent)?;
             merge_overrides(&mut shipped, overrides.agent);
@@ -186,18 +188,10 @@ impl CapabilityRouterPort for TomlCapabilityRouter {
             self.appraisal_store.as_deref(),
             self.window,
         );
-        explanation.chosen.ok_or_else(|| {
-            let mut all_unsat = Vec::new();
-            for (_id, reason) in &explanation.eliminated {
-                if let sentinel_domain::agent_routing::EliminationReason::UnsatisfiedRequirement(
-                    items,
-                ) = reason
-                {
-                    all_unsat.extend_from_slice(items);
-                }
-            }
-            RoutingError::NoAgentSatisfies(all_unsat)
-        })
+        explanation
+            .chosen
+            .clone()
+            .ok_or_else(|| RoutingError::from_explanation(&explanation))
     }
 
     fn candidates(&self, requirement: &CapabilityRequirement) -> Vec<AgentId> {
@@ -273,10 +267,7 @@ fn merge_overrides(
     overrides: Vec<AgentCapabilityProfile>,
 ) {
     for ovr in overrides {
-        if let Some(pos) = shipped
-            .iter()
-            .position(|p| p.agent_id == ovr.agent_id)
-        {
+        if let Some(pos) = shipped.iter().position(|p| p.agent_id == ovr.agent_id) {
             shipped[pos] = ovr;
         } else {
             shipped.push(ovr);
@@ -516,12 +507,16 @@ data_zones = []
 
     #[test]
     fn merge_overrides_replaces_same_id() {
-        let mut shipped =
-            TomlCapabilityRouter::from_toml_str(TWO_AGENT_TOML).unwrap().profiles;
+        let mut shipped = TomlCapabilityRouter::from_toml_str(TWO_AGENT_TOML)
+            .unwrap()
+            .profiles;
         let mut override_profile = shipped[0].clone();
         override_profile.cost_per_input_token = 9999.0;
         merge_overrides(&mut shipped, vec![override_profile]);
-        let kimi = shipped.iter().find(|p| p.agent_id.as_str() == "kimi").unwrap();
+        let kimi = shipped
+            .iter()
+            .find(|p| p.agent_id.as_str() == "kimi")
+            .unwrap();
         assert!(
             (kimi.cost_per_input_token - 9999.0).abs() < 1e-3,
             "operator override should replace shipped cost"
@@ -530,8 +525,9 @@ data_zones = []
 
     #[test]
     fn merge_overrides_appends_new_id() {
-        let mut shipped =
-            TomlCapabilityRouter::from_toml_str(TWO_AGENT_TOML).unwrap().profiles;
+        let mut shipped = TomlCapabilityRouter::from_toml_str(TWO_AGENT_TOML)
+            .unwrap()
+            .profiles;
         let before = shipped.len();
         let new = TomlCapabilityRouter::from_toml_str(MINIMAL_PROFILE_TOML)
             .unwrap()
@@ -568,12 +564,54 @@ data_zones = []
         let err = router.route(&req).unwrap_err();
         match err {
             RoutingError::NoAgentSatisfies(unsat) => {
-                assert!(!unsat.is_empty(), "diagnostics should carry the nearest miss");
+                assert!(
+                    !unsat.is_empty(),
+                    "diagnostics should carry the nearest miss"
+                );
             }
-            other @ RoutingError::Configuration(_) => {
+            other => {
                 panic!("expected NoAgentSatisfies, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn ambiguous_route_is_not_resolved_by_agent_id_order() {
+        let router = TomlCapabilityRouter::from_toml_str(
+            r#"
+[[agent]]
+agent_id = "alpha"
+display_name = "Alpha"
+vendor = "Ollama"
+model_id = "alpha-model"
+declared = [
+    { Reasoning = "standard" },
+]
+cost_per_input_token = 0.0000010
+cost_per_output_token = 0.0000050
+typical_latency_ms = 8000
+max_context_tokens = 128000
+data_zones = []
+
+[[agent]]
+agent_id = "zeta"
+display_name = "Zeta"
+vendor = "Ollama"
+model_id = "zeta-model"
+declared = [
+    { Reasoning = "standard" },
+]
+cost_per_input_token = 0.0000010
+cost_per_output_token = 0.0000050
+typical_latency_ms = 8000
+max_context_tokens = 128000
+data_zones = []
+"#,
+        )
+        .unwrap();
+        let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)]);
+        let err = router.route(&req).unwrap_err();
+        assert!(matches!(err, RoutingError::AmbiguousRoute(candidates) if candidates.len() == 2));
     }
 
     #[test]

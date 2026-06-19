@@ -14,7 +14,7 @@ use sentinel_domain::state::SessionState;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, HookContext};
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown duration.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_VERIFY_MS;
@@ -32,7 +32,30 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id == "unknown"
+        || session_id == "default"
+        || session_id.len() > 128
+    {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(session_id)
+}
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
+}
+
 fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
     let home = fs.home_dir()?;
     let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
@@ -44,24 +67,24 @@ fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
 #[cfg(test)]
 static COOLDOWN_PATH_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
+fn cooldown_file(session_id: &str) -> Option<PathBuf> {
     #[cfg(test)]
     {
         if let Ok(guard) = COOLDOWN_PATH_OVERRIDE.lock() {
             if let Some(ref path) = *guard {
-                return path.clone();
+                return Some(path.clone());
             }
         }
     }
-    let session_id = env
-        .var("CLAUDE_SESSION_ID")
-        .or_else(|| env.var("SESSION_ID"))
-        .unwrap_or_else(|| "default".to_string());
-    std::env::temp_dir().join(format!("claude-verification-gate-{session_id}-last"))
+    let session_id = session_path_component(session_id)?;
+    Some(std::env::temp_dir().join(format!("claude-verification-gate-{session_id}-last")))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
+fn cooldown_expired(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let Some(path) = cooldown_file(session_id) else {
+        return true;
+    };
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -72,18 +95,25 @@ fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs_port: &dyn FileSystemPort, env: &dyn EnvPort) {
-    let _ = fs_port.write(&cooldown_file(env), now_ms().to_string().as_bytes());
+fn write_cooldown(fs_port: &dyn FileSystemPort, session_id: &str) {
+    let Some(path) = cooldown_file(session_id) else {
+        return;
+    };
+    let _ = fs_port.write(&path, now_ms().to_string().as_bytes());
 }
 
 /// Get the offset file path for a session.
-fn offset_path(session_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("claude-verification-offset-{session_id}"))
+fn offset_path(session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
+    Some(std::env::temp_dir().join(format!("claude-verification-offset-{session_id}")))
 }
 
 /// Read transcript offset for dedup.
 fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
-    fs.read_to_string(&offset_path(session_id))
+    let Some(path) = offset_path(session_id) else {
+        return 0;
+    };
+    fs.read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
@@ -91,7 +121,9 @@ fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
 
 /// Write transcript offset.
 fn write_offset(fs: &dyn FileSystemPort, session_id: &str, offset: usize) {
-    let _ = fs.write(&offset_path(session_id), offset.to_string().as_bytes());
+    if let Some(path) = offset_path(session_id) {
+        let _ = fs.write(&path, offset.to_string().as_bytes());
+    }
 }
 
 /// Completion claim patterns.
@@ -181,9 +213,10 @@ fn parse_transcript(
                             }
                         }
                         "tool_use"
-                            if block.get("name").and_then(|v| v.as_str()) == Some("Bash") => {
-                                data.has_bash_calls = true;
-                            }
+                            if block.get("name").and_then(|v| v.as_str()) == Some("Bash") =>
+                        {
+                            data.has_bash_calls = true;
+                        }
                         _ => {}
                     }
                 }
@@ -204,7 +237,9 @@ fn parse_transcript(
 // ---------------------------------------------------------------------------
 
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
 
     let transcript_path = match &input.transcript_path {
         Some(p) if !p.is_empty() => p.clone(),
@@ -287,8 +322,9 @@ pub fn process_prompt(
     ctx: &HookContext<'_>,
     _state: &SessionState,
 ) -> HookOutput {
-
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
     let path = match state_file(ctx.fs, session_id) {
         Some(p) => p,
         None => return HookOutput::allow(),
@@ -304,17 +340,16 @@ pub fn process_prompt(
         Err(_) => return HookOutput::allow(),
     };
 
-    // Only inject for the current session
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    // Only inject for the current concrete session.
     if state.session_id != session_id {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs, ctx.env) {
+    if !cooldown_expired(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs, ctx.env);
+    write_cooldown(ctx.fs, session_id);
 
     let claims_list: String = state
         .claims
@@ -358,6 +393,7 @@ pub fn process_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use serde_json::json;
     use std::io::Write as _;
     use std::sync::Mutex;
@@ -437,7 +473,9 @@ mod tests {
         let _lock = STATE_LOCK.lock().unwrap();
         let session_id = format!("test-vg-warn-{}", std::process::id());
 
-        let _ = std::fs::remove_file(offset_path(&session_id));
+        if let Some(path) = offset_path(&session_id) {
+            let _ = std::fs::remove_file(path);
+        }
 
         let transcript = make_transcript(&[json!({
             "type": "assistant",
@@ -461,6 +499,139 @@ mod tests {
     }
 
     #[test]
+    fn missing_session_does_not_write_unknown_state_or_offset() {
+        let _lock = STATE_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let unknown_state =
+            crate::hooks::metrics_dir(tmp.path()).join("unverified-claims-unknown.json");
+        let unknown_offset = std::env::temp_dir().join("claude-verification-offset-unknown");
+        let _ = std::fs::remove_file(&unknown_offset);
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "All tests pass and the implementation is complete."
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: None,
+            ..Default::default()
+        };
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!unknown_state.exists());
+        assert!(!unknown_offset.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_state_or_offset() {
+        let _lock = STATE_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let synthetic_state =
+            crate::hooks::metrics_dir(tmp.path()).join("unverified-claims- unknown .json");
+        let synthetic_offset = std::env::temp_dir().join("claude-verification-offset- unknown ");
+        let _ = std::fs::remove_file(&synthetic_offset);
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "All tests pass and the implementation is complete."
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!synthetic_state.exists());
+        assert!(!synthetic_offset.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_verification_state() {
+        let _lock = STATE_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let session_id = format!("vg-real-session-{}", std::process::id());
+        if let Some(path) = offset_path(&session_id) {
+            let _ = std::fs::remove_file(path);
+        }
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "All tests pass and the implementation is complete."
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        };
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let path = state_file(&fs, &session_id).expect("concrete state path");
+        let content = std::fs::read_to_string(path).expect("verification state");
+        let state: ClaimState = serde_json::from_str(&content).expect("claim state");
+        assert_eq!(state.session_id, session_id);
+        assert!(!state.claims.is_empty());
+    }
+
+    #[test]
+    fn prompt_without_concrete_session_ignores_existing_unknown_state() {
+        let _lock = STATE_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let metrics = crate::hooks::metrics_dir(tmp.path());
+        std::fs::create_dir_all(&metrics).unwrap();
+        let unknown_state = metrics.join("unverified-claims-unknown.json");
+        std::fs::write(
+            &unknown_state,
+            serde_json::to_string(&ClaimState {
+                claims: vec!["all tests pass".to_string()],
+                session_id: "unknown".to_string(),
+                ts: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let input = HookInput {
+            session_id: None,
+            ..Default::default()
+        };
+        let state = SessionState::new("prompt-without-session");
+        let output = process_prompt(&input, &ctx, &state);
+
+        assert!(output.hook_specific_output.is_none());
+        assert!(unknown_state.exists());
+    }
+
+    #[test]
     fn test_prompt_no_state_returns_allow() {
         // StubFs returns error on read → no state → allow
         let input = HookInput {
@@ -477,7 +648,7 @@ mod tests {
     fn test_cooldown_expired_with_stub() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs, ctx.env));
+        assert!(cooldown_expired(ctx.fs, "test-vg-cooldown"));
     }
 
     #[test]

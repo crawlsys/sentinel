@@ -73,7 +73,7 @@ pub fn run() -> Result<()> {
                 } else {
                     "INVALID".red()
                 };
-                println!("  {session_id}: {} phases, {status}", chain.proofs.len());
+                println!("  {session_id}: {} phases, {status}", chain.phase_count());
             }
         }
     }
@@ -82,15 +82,11 @@ pub fn run() -> Result<()> {
 }
 
 /// `sentinel stats hooks` — read the per-call telemetry JSONL and print a
-/// human summary scoped to the last N hours. The dashboard will eventually
-/// read the same file via the daemon API; this CLI exists so users can
+/// human summary scoped to the last N hours. Local API clients can read the
+/// same file; this CLI exists so users can
 /// sanity-check the data without spinning up the daemon.
 pub fn run_hooks(limit: usize, hours: u32) -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let path = home
-        .join(".claude")
-        .join("sentinel")
+    let path = sentinel_infrastructure::paths::sentinel_root()
         .join("metrics")
         .join("hook-invocations.jsonl");
     if !path.exists() {
@@ -133,7 +129,10 @@ pub fn run_hooks(limit: usize, hours: u32) -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_string();
-        let dur = row.get("duration_us").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let dur = row
+            .get("duration_us")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
 
         *by_hook_count.entry(hook.clone()).or_insert(0) += 1;
         *by_hook_duration.entry(hook.clone()).or_insert(0) += u128::from(dur);

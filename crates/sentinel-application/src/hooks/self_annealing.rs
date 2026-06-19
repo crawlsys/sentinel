@@ -134,7 +134,11 @@ fn candidates(state: &SessionState, threshold: u32) -> Vec<(String, u32)> {
 
 /// Stop-hook entry point.
 #[must_use]
-pub fn process(input: &HookInput, ctx: &super::HookContext<'_>, state: &SessionState) -> HookOutput {
+pub fn process(
+    input: &HookInput,
+    ctx: &super::HookContext<'_>,
+    state: &SessionState,
+) -> HookOutput {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(input, ctx, state)))
         .unwrap_or_else(|_| HookOutput::allow())
 }
@@ -227,7 +231,10 @@ fn try_auto_patch(
 
     // Append the conservative stanza to the skill file.
     let stanza = anti_pattern_stanza(phase_key, count);
-    let existing = ctx.fs.read_to_string(std::path::Path::new(&skill_path)).unwrap_or_default();
+    let existing = ctx
+        .fs
+        .read_to_string(std::path::Path::new(&skill_path))
+        .unwrap_or_default();
     if existing.contains("[Self-Annealing] auto-inserted") {
         // Already annealed for some phase — don't stack duplicates.
         return None;
@@ -250,7 +257,9 @@ fn try_auto_patch(
         Some(cwd),
     );
 
-    Some(format!("PR branch `{branch}` for `{phase_key}` ({count} failures)"))
+    Some(format!(
+        "PR branch `{branch}` for `{phase_key}` ({count} failures)"
+    ))
 }
 
 /// Best-effort location of a skill's SKILL.md. Checks the common marketplace
@@ -259,7 +268,11 @@ fn try_auto_patch(
 fn locate_skill_file(ctx: &super::HookContext<'_>, _cwd: &str, skill: &str) -> Option<String> {
     let home = ctx.env.var("HOME").or_else(|| ctx.env.var("USERPROFILE"))?;
     let candidate = format!("{home}/.claude/skills/{skill}/SKILL.md").replace('\\', "/");
-    if ctx.fs.read_to_string(std::path::Path::new(&candidate)).is_ok() {
+    if ctx
+        .fs
+        .read_to_string(std::path::Path::new(&candidate))
+        .is_ok()
+    {
         Some(candidate)
     } else {
         None
@@ -312,18 +325,30 @@ mod tests {
             true
         ));
         // settings.json.
-        assert!(!self_anneal_patch_allowed("/home/u/.claude/settings.json", true));
+        assert!(!self_anneal_patch_allowed(
+            "/home/u/.claude/settings.json",
+            true
+        ));
         // Sentinel source.
         assert!(!self_anneal_patch_allowed(
             "/repo/crates/sentinel-application/src/skills/x.md",
             true
         ));
         // Engine binary / cargo bin.
-        assert!(!self_anneal_patch_allowed("/home/u/.cargo/bin/sentinel-engine", true));
+        assert!(!self_anneal_patch_allowed(
+            "/home/u/.cargo/bin/sentinel-engine",
+            true
+        ));
         // Workflow / hook policy.
-        assert!(!self_anneal_patch_allowed("/repo/config/workflows.toml", true));
+        assert!(!self_anneal_patch_allowed(
+            "/repo/config/workflows.toml",
+            true
+        ));
         // Non-skill, non-md.
-        assert!(!self_anneal_patch_allowed("/home/u/.claude/skills/linear/notes.txt", true));
+        assert!(!self_anneal_patch_allowed(
+            "/home/u/.claude/skills/linear/notes.txt",
+            true
+        ));
     }
 
     #[test]
@@ -380,7 +405,13 @@ mod tests {
         assert!(injected.contains("Self-Annealing"), "{injected}");
         assert!(injected.contains("linear:review"), "{injected}");
         // Disarmed → it should advise arming / TaskCreate, not claim a PR.
-        assert!(injected.contains("TaskCreate") || injected.contains("arm"), "{injected}");
-        assert!(!injected.contains("PR branch"), "disarmed must not open a PR: {injected}");
+        assert!(
+            injected.contains("TaskCreate") || injected.contains("arm"),
+            "{injected}"
+        );
+        assert!(
+            !injected.contains("PR branch"),
+            "disarmed must not open a PR: {injected}"
+        );
     }
 }

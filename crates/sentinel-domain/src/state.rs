@@ -1,6 +1,6 @@
 //! Session State
 //!
-//! In-memory state shared across hook engine, MCP server, and dashboard API.
+//! In-memory state shared across hook engine, MCP server, and local API.
 //! This is the single source of truth for a running sentinel daemon.
 
 use std::collections::{HashMap, HashSet};
@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::EvidenceCollector;
-use crate::proof::ProofChain;
+use crate::proof::{PhaseProof, ProofChain, ProofChainError, GENESIS_HASH};
+use crate::step_proof::StepProof;
 use crate::workflow::{SkillWorkflow, WorkflowState};
 
 /// Full session state — shared across all sentinel modes
@@ -24,11 +25,21 @@ pub struct SessionState {
     /// Active skill (detected by router)
     pub active_skill: Option<String>,
 
-    /// Workflow states per skill
-    pub workflows: HashMap<String, WorkflowState>,
+    /// Workflow states projected from durable LangGraph checkpoints.
+    ///
+    /// This is intentionally in-memory only. Session JSON never stores workflow
+    /// progress; every runtime surface must re-project from the checkpoint
+    /// database or mutate through the graph authority.
+    #[serde(skip)]
+    langgraph_workflows: HashMap<String, WorkflowState>,
 
-    /// Proof chains per skill
-    pub proof_chains: HashMap<String, ProofChain>,
+    /// Proof chains per skill.
+    ///
+    /// Kept private so production callers cannot mutate proof-chain state
+    /// outside the graph-backed proof engine path. Use the read accessors for
+    /// API views, and the explicit append/restore methods for the
+    /// few trusted write paths.
+    proof_chains: HashMap<String, ProofChain>,
 
     /// Hook execution counts
     pub hook_stats: HookStats,
@@ -215,7 +226,7 @@ impl SessionState {
             session_id: session_id.into(),
             started_at: Utc::now(),
             active_skill: None,
-            workflows: HashMap::new(),
+            langgraph_workflows: HashMap::new(),
             proof_chains: HashMap::new(),
             hook_stats: HookStats::default(),
             active: true,
@@ -341,8 +352,8 @@ impl SessionState {
 
     /// Read the independent verdict for a step, if the `step_judge` hook
     /// recorded one. `None` means no independent judgement exists for this
-    /// step — the seal gate treats that as "no override available" and
-    /// falls back to the caller-supplied verdict.
+    /// step; production seal gates must reject that instead of falling back to
+    /// caller-supplied self-certification.
     #[must_use]
     pub fn independent_verdict(
         &self,
@@ -354,45 +365,90 @@ impl SessionState {
             .get(&Self::baseline_key(skill, phase_id, step_id))
     }
 
-    /// **Attack #169 fix**: Maximum distinct skills per session.
-    /// Prevents unbounded `HashMap` growth from skill router manipulation.
-    const MAX_SKILLS_PER_SESSION: usize = 100;
-
-    /// Set the active skill (from skill router)
+    /// Set the active skill marker (from skill router).
+    ///
+    /// This intentionally does not allocate [`WorkflowState`] or [`ProofChain`]
+    /// entries. Configured workflow state is owned by the durable LangGraph
+    /// authority and must be inserted only from a graph checkpoint projection.
     pub fn set_active_skill(&mut self, skill: impl Into<String>) {
-        let skill = skill.into();
-        // Initialize workflow state if not exists
-        if !self.workflows.contains_key(&skill) {
-            // **Attack #169 fix**: Reject new skills beyond the cap.
-            if self.workflows.len() >= Self::MAX_SKILLS_PER_SESSION {
-                eprintln!(
-                    "[sentinel] WARNING: Session '{}' hit max skill limit ({}). \
-                     Ignoring new skill '{}'. This may indicate skill router manipulation.",
-                    self.session_id,
-                    Self::MAX_SKILLS_PER_SESSION,
-                    skill,
-                );
-                // Still set active_skill so routing works, but don't allocate new state
-                self.active_skill = Some(skill);
-                return;
-            }
-            self.workflows
-                .insert(skill.clone(), WorkflowState::new(&skill, &self.session_id));
-        }
-        // Initialize proof chain if not exists
-        if !self.proof_chains.contains_key(&skill) {
-            self.proof_chains
-                .insert(skill.clone(), ProofChain::new(&skill, &self.session_id));
-        }
-        self.active_skill = Some(skill);
+        self.set_active_skill_marker(skill);
     }
 
-    /// Get the workflow state for the active skill
+    /// Set only the active skill marker without allocating workflow/proof state.
+    ///
+    /// Graph-owned callers use this when LangGraph is the workflow authority:
+    /// the projected workflow/proof entries are written only after the graph
+    /// accepts the transition.
+    pub fn set_active_skill_marker(&mut self, skill: impl Into<String>) {
+        self.active_skill = Some(skill.into());
+    }
+
+    /// Store a workflow state that came from the durable LangGraph authority.
+    pub fn set_graph_projected_workflow(
+        &mut self,
+        skill: impl Into<String>,
+        workflow_state: WorkflowState,
+    ) {
+        let skill = skill.into();
+        assert_eq!(
+            workflow_state.skill, skill,
+            "graph-projected workflow skill must match the session-state key"
+        );
+        self.langgraph_workflows.insert(skill, workflow_state);
+    }
+
+    /// Remove graph-authoritative workflow projection for a skill.
+    pub fn remove_graph_projected_workflow(&mut self, skill: &str) -> Option<WorkflowState> {
+        self.langgraph_workflows.remove(skill)
+    }
+
+    /// Remove graph workflow state that is no longer configured.
+    pub fn retain_configured_graph_workflows(&mut self, is_configured: impl Fn(&str) -> bool) {
+        self.langgraph_workflows
+            .retain(|skill, _| is_configured(skill));
+    }
+
+    /// Number of graph workflow entries.
+    #[must_use]
+    pub fn graph_workflow_count(&self) -> usize {
+        self.langgraph_workflows.len()
+    }
+
+    /// Get a workflow state projected from LangGraph.
+    #[must_use]
+    pub fn graph_workflow(&self, skill: &str) -> Option<&WorkflowState> {
+        self.langgraph_workflows.get(skill)
+    }
+
+    /// Get mutable workflow state projected from LangGraph.
+    #[cfg(test)]
+    pub fn graph_workflow_mut(&mut self, skill: &str) -> Option<&mut WorkflowState> {
+        self.langgraph_workflows.get_mut(skill)
+    }
+
+    /// Whether a skill has graph-authoritative workflow state.
+    #[must_use]
+    pub fn has_graph_workflow(&self, skill: &str) -> bool {
+        self.graph_workflow(skill).is_some()
+    }
+
+    /// Whether any workflow state in this session is graph-authoritative.
+    #[must_use]
+    pub fn has_any_graph_workflow(&self) -> bool {
+        self.graph_workflows().next().is_some()
+    }
+
+    /// Iterate only graph-authoritative workflow states.
+    pub fn graph_workflows(&self) -> impl Iterator<Item = (&String, &WorkflowState)> {
+        self.langgraph_workflows.iter()
+    }
+
+    /// Get the graph-authoritative workflow state for the active skill.
     #[must_use]
     pub fn active_workflow(&self) -> Option<&WorkflowState> {
         self.active_skill
-            .as_ref()
-            .and_then(|s| self.workflows.get(s))
+            .as_deref()
+            .and_then(|s| self.graph_workflow(s))
     }
 
     /// Get the proof chain for the active skill
@@ -403,14 +459,105 @@ impl SessionState {
             .and_then(|s| self.proof_chains.get(s))
     }
 
-    /// Get mutable workflow state for the active skill
+    /// Get a proof chain by skill.
+    #[must_use]
+    pub fn proof_chain(&self, skill: &str) -> Option<&ProofChain> {
+        self.proof_chains.get(skill)
+    }
+
+    /// Whether a proof chain exists for a skill.
+    #[must_use]
+    pub fn has_proof_chain(&self, skill: &str) -> bool {
+        self.proof_chains.contains_key(skill)
+    }
+
+    /// Whether there are no proof chains in this session.
+    #[must_use]
+    pub fn proof_chains_is_empty(&self) -> bool {
+        self.proof_chains.is_empty()
+    }
+
+    /// Number of proof chains in this session.
+    #[must_use]
+    pub fn proof_chain_count(&self) -> usize {
+        self.proof_chains.len()
+    }
+
+    /// Iterate proof-chain skills.
+    pub fn proof_chain_skills(&self) -> impl Iterator<Item = &String> {
+        self.proof_chains.keys()
+    }
+
+    /// Iterate proof chains.
+    pub fn proof_chains(&self) -> impl Iterator<Item = (&String, &ProofChain)> {
+        self.proof_chains.iter()
+    }
+
+    /// Return a skill's proof-chain head hash, or genesis for an empty chain.
+    #[must_use]
+    pub fn proof_chain_head_hash(&self, skill: &str) -> &str {
+        self.proof_chains
+            .get(skill)
+            .map_or(GENESIS_HASH, ProofChain::head_hash)
+    }
+
+    /// Append a phase proof through the trusted proof-engine path.
+    ///
+    /// This is intentionally narrower than exposing the underlying map or a
+    /// mutable chain reference: callers still get `ProofChain`'s link and
+    /// self-verification checks, but cannot arbitrarily rewrite the chain.
+    pub fn append_phase_proof(
+        &mut self,
+        skill: impl Into<String>,
+        proof: PhaseProof,
+    ) -> Result<(), ProofChainError> {
+        let skill = skill.into();
+        let session_id = self.session_id.clone();
+        let chain = self
+            .proof_chains
+            .entry(skill.clone())
+            .or_insert_with(|| ProofChain::new(skill, session_id));
+        chain.add_phase_entry(proof)
+    }
+
+    /// Append a step proof through the trusted proof-engine path.
+    pub fn append_step_proof(
+        &mut self,
+        skill: impl Into<String>,
+        proof: StepProof,
+    ) -> Result<(), ProofChainError> {
+        let skill = skill.into();
+        let session_id = self.session_id.clone();
+        let chain = self
+            .proof_chains
+            .entry(skill.clone())
+            .or_insert_with(|| ProofChain::new(skill, session_id));
+        chain.add_step_proof(proof)
+    }
+
+    /// Restore a complete proof chain from trusted persistence or test setup.
+    ///
+    /// Runtime sealing should use `append_phase_proof`/`append_step_proof`
+    /// instead so the chain link is validated at the mutation boundary.
+    pub fn restore_proof_chain(&mut self, skill: impl Into<String>, chain: ProofChain) {
+        let skill = skill.into();
+        assert_eq!(
+            chain.skill, skill,
+            "restored proof-chain skill must match the session-state key"
+        );
+        self.proof_chains.insert(skill, chain);
+    }
+
+    /// Get mutable graph-authoritative workflow state for the active skill.
+    #[cfg(test)]
     pub fn active_workflow_mut(&mut self) -> Option<&mut WorkflowState> {
         self.active_skill
             .clone()
-            .and_then(move |s| self.workflows.get_mut(&s))
+            .and_then(move |s| self.graph_workflow_mut(&s))
     }
 
-    /// Get mutable proof chain for the active skill
+    /// Get mutable proof chain for the active skill.
+    #[cfg(test)]
     pub fn active_proof_chain_mut(&mut self) -> Option<&mut ProofChain> {
         self.active_skill
             .clone()
@@ -611,7 +758,7 @@ mod tests {
         assert_eq!(state.session_id, "sess-1");
         assert!(state.active);
         assert!(state.active_skill.is_none());
-        assert!(state.workflows.is_empty());
+        assert_eq!(state.graph_workflow_count(), 0);
     }
 
     #[test]
@@ -620,8 +767,14 @@ mod tests {
         state.set_active_skill("linear");
 
         assert_eq!(state.active_skill.as_deref(), Some("linear"));
-        assert!(state.workflows.contains_key("linear"));
-        assert!(state.proof_chains.contains_key("linear"));
+        assert!(
+            !state.has_any_graph_workflow(),
+            "set_active_skill must not synthesize workflow state"
+        );
+        assert!(
+            state.proof_chains.is_empty(),
+            "set_active_skill must not synthesize proof chains"
+        );
     }
 
     #[test]
@@ -630,8 +783,77 @@ mod tests {
         assert!(state.active_workflow().is_none());
 
         state.set_active_skill("linear");
+        assert!(
+            state.active_workflow().is_none(),
+            "marker-only active skill must not create workflow state"
+        );
+
+        let mut value = serde_json::to_value(&state).expect("session state serializes");
+        value
+            .as_object_mut()
+            .expect("session state is an object")
+            .insert(
+                "workflows".to_string(),
+                serde_json::json!({
+                    "linear": WorkflowState::new("linear", "sess-1")
+                }),
+            );
+        state = serde_json::from_value(value).expect("session state deserializes");
+        state.set_active_skill("linear");
+        assert!(
+            state.active_workflow().is_none(),
+            "old workflows state is not LangGraph authority"
+        );
+        assert!(
+            state.graph_workflow("linear").is_none(),
+            "graph workflow accessor must ignore old workflows state"
+        );
+
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
         assert!(state.active_workflow().is_some());
         assert_eq!(state.active_workflow().unwrap().skill, "linear");
+    }
+
+    #[test]
+    fn mutable_workflow_accessor_requires_graph_projection() {
+        let mut state = SessionState::new("sess-1");
+
+        assert!(
+            state.graph_workflow_mut("linear").is_none(),
+            "missing graph workflow state must not be mutable through graph accessors"
+        );
+
+        state.remove_graph_projected_workflow("linear");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
+        state
+            .graph_workflow_mut("linear")
+            .expect("graph-projected workflow")
+            .current_phase = Some(0);
+
+        assert_eq!(
+            state.graph_workflow("linear").unwrap().current_phase,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn mutable_proof_chain_accessor_requires_existing_active_chain() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+
+        assert!(
+            state.active_proof_chain_mut().is_none(),
+            "active skill marker alone must not synthesize mutable proof-chain state"
+        );
+
+        state
+            .proof_chains
+            .insert("linear".to_string(), ProofChain::new("linear", "sess-1"));
+
+        assert!(
+            state.active_proof_chain_mut().is_some(),
+            "test-only mutable proof-chain accessor should expose existing active chain"
+        );
     }
 
     #[test]
@@ -652,6 +874,7 @@ mod tests {
     fn test_set_active_skill_idempotent() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
 
         // Advance workflow — need a workflow definition for advance_sequential
         let wf = crate::workflow::SkillWorkflow {
@@ -775,20 +998,16 @@ mod tests {
     }
 
     #[test]
-    fn test_max_skills_per_session() {
+    fn test_active_skill_markers_do_not_allocate_workflows() {
         let mut state = SessionState::new("sess-1");
-        // Fill to the cap
-        for i in 0..SessionState::MAX_SKILLS_PER_SESSION {
+        for i in 0..150 {
             state.set_active_skill(format!("skill_{i}"));
         }
-        assert_eq!(state.workflows.len(), SessionState::MAX_SKILLS_PER_SESSION);
-
-        // One more should NOT create a new workflow entry
-        state.set_active_skill("overflow_skill");
-        assert_eq!(state.workflows.len(), SessionState::MAX_SKILLS_PER_SESSION);
-        assert!(!state.workflows.contains_key("overflow_skill"));
-        // But active_skill is still set for routing
-        assert_eq!(state.active_skill.as_deref(), Some("overflow_skill"));
+        assert!(
+            !state.has_any_graph_workflow(),
+            "active skill markers must not allocate unbounded workflow state"
+        );
+        assert_eq!(state.active_skill.as_deref(), Some("skill_149"));
     }
 
     // ─── submission failure tracking ──────────────────────────────────────

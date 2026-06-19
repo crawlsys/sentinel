@@ -183,17 +183,15 @@ pub fn scan_dev_scorecard(
         // Sub-scores, each clamped to [0, 1].
         let tp = (cpd / THROUGHPUT_TARGET_CPD).clamp(0.0, 1.0);
         let cons = (d.active_days as f64 / CONSISTENCY_TARGET_DAYS).clamp(0.0, 1.0);
-        let weighted = W_CONSISTENCY.mul_add(
-            cons,
-            W_THROUGHPUT.mul_add(tp, W_FIRST_PASS * qa_rate),
-        );
+        let weighted =
+            W_CONSISTENCY.mul_add(cons, W_THROUGHPUT.mul_add(tp, W_FIRST_PASS * qa_rate));
         let score = 100.0 * weighted;
 
         // Attribution divergence: real git delivery but ~0 Linear-assignee
         // completions. Only fires when the optional count is supplied.
-        let divergence = d.linear_assignee_completed.is_some_and(|c| {
-            d.delivered_tickets.len() >= ATTRIBUTION_MIN_DELIVERED && c == 0
-        });
+        let divergence = d
+            .linear_assignee_completed
+            .is_some_and(|c| d.delivered_tickets.len() >= ATTRIBUTION_MIN_DELIVERED && c == 0);
         if divergence {
             summary.attribution_divergences += 1;
         }
@@ -215,9 +213,11 @@ pub fn scan_dev_scorecard(
     }
 
     // Rank score-descending; record the leader.
-    summary
-        .devs
-        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    summary.devs.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     if let Some(top) = summary.devs.first() {
         summary.top_score = top.score;
         summary.top_dev = top.name.clone();
@@ -265,7 +265,10 @@ fn load_git_stats(path: &Path) -> Result<Vec<DevGitStats>> {
             .unwrap_or_default();
         out.push(DevGitStats {
             name,
-            commits: v.get("commits").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            commits: v
+                .get("commits")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             active_days: v
                 .get("active_days")
                 .and_then(serde_json::Value::as_u64)
@@ -361,7 +364,6 @@ fn round2(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn tmp(json: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -383,8 +385,7 @@ mod tests {
             r#"{"devs":[{"name":"Rene","commits":102,"active_days":17,"merged_prs":44,
                 "delivered_tickets":["T-1","T-2","T-3","T-4","T-5","T-6","T-7","T-8"]}]}"#,
         );
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"T-1","state":{"name":"Completed","type":"completed"}},
                 {"identifier":"T-2","state":{"name":"Completed","type":"completed"}},
                 {"identifier":"T-3","state":{"name":"Completed","type":"completed"}},
@@ -393,8 +394,7 @@ mod tests {
                 {"identifier":"T-6","state":{"name":"Completed","type":"completed"}},
                 {"identifier":"T-7","state":{"name":"QA Testing","type":"started"}},
                 {"identifier":"T-8","state":{"name":"QA Failed","type":"started"}}
-            ]}"#,
-        );
+            ]}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_dev_scorecard(git.path(), cache.path(), out.path()).unwrap();
         assert_eq!(s.devs_total, 1);
@@ -441,14 +441,12 @@ mod tests {
 
     #[test]
     fn low_throughput_scores_below_high_throughput() {
-        let git = tmp(
-            r#"{"devs":[
+        let git = tmp(r#"{"devs":[
                 {"name":"Fast","commits":90,"active_days":15,"merged_prs":30,
                  "delivered_tickets":["T-1"]},
                 {"name":"Slow","commits":4,"active_days":2,"merged_prs":1,
                  "delivered_tickets":["T-1"]}
-            ]}"#,
-        );
+            ]}"#);
         let cache = tmp(
             r#"{"issues":[{"identifier":"T-1","state":{"name":"Completed","type":"completed"}}]}"#,
         );

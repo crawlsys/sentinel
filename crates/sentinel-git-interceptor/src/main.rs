@@ -1,6 +1,6 @@
 //! Git safety interceptor binary.
 //!
-//! Shadows the real `git` at `~/bin/git`. Evaluates every git command
+//! Intercepts the real `git` at `~/bin/git`. Evaluates every git command
 //! against sentinel's domain policy, blocks dangerous operations, and
 //! offers a `--bypass` escape hatch with native OS confirmation dialog.
 

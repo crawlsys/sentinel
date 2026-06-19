@@ -9,9 +9,8 @@
 //!   emit p50/p75/p90 of the elapsed hours into the next stage. The
 //!   stale-ticket hook reads these to replace its hardcoded thresholds.
 //! * [`compute_per_stage_breakdown`] — for each (team, stage) pair, emit
-//!   mean / p50 / p75 / `sample_count` over the 30-day window. The
-//!   dashboard's `CycleTimeBreakdown` organism + master enterprise
-//!   dashboard (SEN-19) read this.
+//!   mean / p50 / p75 / `sample_count` over the 30-day window.
+//!   Operational summary consumers read this.
 //!
 //! ## Schema (consumed)
 //!
@@ -19,10 +18,9 @@
 //! transition into `to_state`. We derive elapsed time per pair by sorting
 //! by `(issue_id, timestamp)` and diffing successive transitions of the
 //! same issue. The hours-into-stage attributed to `from_state` is exactly
-//! the same statistic the dashboard's `apps/dashboard/src/application/
-//! get-dora-tier.ts` computes inline — keeping it server-side here means
-//! the Rust collectors can emit percentile snapshots without re-running
-//! the same logic on every dashboard render.
+//! the same statistic local DORA clients need. Keeping it server-side
+//! here means the Rust collectors can emit percentile snapshots without
+//! re-running the same logic per render.
 //!
 //! ## Schema (emitted)
 //!
@@ -40,7 +38,7 @@ use std::path::Path;
 
 use crate::cycle_time::CycleTimeEvent;
 
-/// Default analysis window: 30 days. Matches the dashboard's DORA window
+/// Default analysis window: 30 days. Matches the DORA operator window
 /// so percentile bases stay aligned across the two surfaces.
 pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 
@@ -143,7 +141,9 @@ fn pair_transitions(events: &[CycleTimeEvent]) -> Vec<(Option<String>, String, f
         events_of_issue.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         let mut prev: Option<(&CycleTimeEvent, DateTime<Utc>)> = None;
         for ev in events_of_issue.iter() {
-            let ts = if let Ok(t) = DateTime::parse_from_rfc3339(&ev.timestamp) { t.with_timezone(&Utc) } else {
+            let ts = if let Ok(t) = DateTime::parse_from_rfc3339(&ev.timestamp) {
+                t.with_timezone(&Utc)
+            } else {
                 prev = None;
                 continue;
             };
@@ -245,7 +245,7 @@ pub fn compute_stage_thresholds(
 
 /// SEN-17: per-(team, stage) mean + p50 + p75 of dwell time. Same input
 /// pairing as [`compute_stage_thresholds_at`] but with different summary
-/// statistics tailored to the dashboard's breakdown view.
+/// statistics tailored to the cycle-time breakdown view.
 ///
 /// # Errors
 /// Returns the read or write error if the JSONL can't be loaded or the

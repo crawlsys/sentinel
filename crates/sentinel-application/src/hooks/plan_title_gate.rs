@@ -9,9 +9,8 @@
 //!
 //! Enforcement is deliberately narrow — the common case (a plan with a real
 //! `# Title` / `## Plan: …` heading, or even just a non-empty first line) sails
-//! through with zero friction. We block ONLY the genuinely title-less/empty
-//! plan, and we **fail open** if the plan content can't be read, so the gate
-//! can never wedge `ExitPlanMode` over an I/O hiccup.
+//! through with zero friction. We block genuinely title-less/empty plans and
+//! `ExitPlanMode` calls whose plan content is absent or not inspectable.
 //!
 //! The block message is `[Sentinel-Authority]`-prefixed (added at the output
 //! boundary) so the agent treats it as an authoritative directive to add a
@@ -20,6 +19,32 @@
 use sentinel_domain::events::{HookEnvelope, HookInput, HookOutput};
 
 use super::HookContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanTitleDecision {
+    Allow,
+    BlockMissingPlan,
+    BlockTitleless,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTitleEvaluation {
+    pub tool: Option<String>,
+    pub exit_plan_mode: bool,
+    pub plan_text: Option<String>,
+    pub plan_text_present: bool,
+    pub derivable_title: bool,
+    pub title_line_present: bool,
+    pub should_block: bool,
+    pub decision: PlanTitleDecision,
+}
+
+impl PlanTitleEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.exit_plan_mode
+    }
+}
 
 /// Extract the plan text the model is about to submit. `ExitPlanMode`'s
 /// `tool_input` carries the plan under `plan`; some shapes nest it under
@@ -107,24 +132,67 @@ filed under a descriptive name. Add a heading as the first line — \
 re-run ExitPlanMode. Sentinel auto-files plans by their title; a title-less \
 plan would land under a meaningless random slug.";
 
-/// `PreToolUse` handler. Blocks `ExitPlanMode` only when the plan is
-/// title-less; allows everything else (including non-ExitPlanMode tools).
-/// Fails open when the plan text is absent/unreadable.
+/// `PreToolUse` handler. Blocks `ExitPlanMode` when the plan is title-less or
+/// absent; allows everything else (including non-ExitPlanMode tools).
 pub fn process(input: &HookInput, _ctx: &HookContext<'_>) -> HookOutput {
-    if input.tool_name.as_deref() != Some("ExitPlanMode") {
-        return HookOutput::allow();
+    let evaluation = evaluate(input);
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(input: &HookInput) -> PlanTitleEvaluation {
+    let tool = input.tool_name.clone();
+    let exit_plan_mode = input.tool_name.as_deref() == Some("ExitPlanMode");
+    if !exit_plan_mode {
+        return PlanTitleEvaluation {
+            tool,
+            exit_plan_mode,
+            plan_text: None,
+            plan_text_present: false,
+            derivable_title: false,
+            title_line_present: false,
+            should_block: false,
+            decision: PlanTitleDecision::Allow,
+        };
     }
 
-    match plan_text(input) {
-        // No plan text to inspect → fail open (never wedge ExitPlanMode).
-        None => HookOutput::allow(),
-        Some(content) => {
-            if has_derivable_title(&content) {
-                HookOutput::allow()
-            } else {
-                let envelope = HookEnvelope::block("Plan Title Gate", TITLE_GUIDANCE);
-                HookOutput::block(envelope.render())
-            }
+    let plan_text = plan_text(input);
+    let plan_text_present = plan_text.is_some();
+    let title_line_present = plan_text.as_deref().and_then(title_line).is_some();
+    let derivable_title = title_line_present;
+    let decision = match (plan_text_present, derivable_title) {
+        (false, _) => PlanTitleDecision::BlockMissingPlan,
+        (true, false) => PlanTitleDecision::BlockTitleless,
+        (true, true) => PlanTitleDecision::Allow,
+    };
+    PlanTitleEvaluation {
+        tool,
+        exit_plan_mode,
+        plan_text,
+        plan_text_present,
+        derivable_title,
+        title_line_present,
+        should_block: !matches!(decision, PlanTitleDecision::Allow),
+        decision,
+    }
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &PlanTitleEvaluation) -> HookOutput {
+    match evaluation.decision {
+        PlanTitleDecision::Allow => HookOutput::allow(),
+        PlanTitleDecision::BlockMissingPlan => {
+            let envelope = HookEnvelope::block(
+                "Plan Title Gate",
+                "ExitPlanMode did not include inspectable plan text, so Sentinel cannot derive \
+                 a descriptive plan filename. Re-run ExitPlanMode with a plan body whose first \
+                 line is `# <Title>` or `## Plan: <Title>`.",
+            );
+            HookOutput::block(envelope.render())
+        }
+        PlanTitleDecision::BlockTitleless => {
+            let envelope = HookEnvelope::block("Plan Title Gate", TITLE_GUIDANCE);
+            HookOutput::block(envelope.render())
         }
     }
 }
@@ -210,14 +278,13 @@ mod tests {
     }
 
     #[test]
-    fn process_fails_open_without_plan_text() {
+    fn process_blocks_without_plan_text() {
         let ctx = crate::hooks::test_support::stub_ctx();
-        // ExitPlanMode but no `plan` field → can't inspect → allow.
         let out = process(&exit_plan_input(None), &ctx);
-        assert!(
-            out.blocked.is_none(),
-            "missing plan text must fail open, never wedge ExitPlanMode"
-        );
+        assert_eq!(out.blocked, Some(true), "missing plan text must block");
+        let reason = out.reason.expect("block reason");
+        assert!(reason.contains("inspectable plan text"));
+        assert!(reason.contains("ExitPlanMode"));
     }
 
     #[test]

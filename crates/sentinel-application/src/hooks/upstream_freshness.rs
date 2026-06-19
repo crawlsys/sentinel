@@ -131,19 +131,31 @@ mod tests {
         }
     }
     impl GitStatusPort for FreshGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.dirty)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok(self.branch.clone())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -176,6 +188,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             vec![]
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -318,7 +333,10 @@ mod tests {
             .extra
             .insert("new_cwd".to_string(), serde_json::json!("/repo/sub"));
         let out = process(&input, &ctx, HookEvent::CwdChanged);
-        assert!(out.hook_specific_output.is_some(), "should inject on cwd change");
+        assert!(
+            out.hook_specific_output.is_some(),
+            "should inject on cwd change"
+        );
     }
 
     #[test]

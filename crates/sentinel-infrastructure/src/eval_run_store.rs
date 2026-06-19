@@ -20,7 +20,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use sentinel_domain::eval::{EvalRunId, EvalRunResult};
 use sentinel_domain::ports::{EvalRunStoreError, EvalRunStorePort};
@@ -54,11 +54,7 @@ impl FilesystemEvalRunStore {
     /// Construct with the default path
     /// (`~/.claude/sentinel/eval/ba-corpus/runs/`).
     pub fn with_default_path() -> Result<Self> {
-        let home =
-            dirs::home_dir().context("home directory not resolvable from environment")?;
-        let base_dir = home
-            .join(".claude")
-            .join("sentinel")
+        let base_dir = crate::paths::sentinel_root()
             .join("eval")
             .join("ba-corpus")
             .join("runs");
@@ -94,10 +90,7 @@ impl EvalRunStorePort for FilesystemEvalRunStore {
         })?;
 
         fs::write(&tmp_path, json).map_err(|e| {
-            EvalRunStoreError::StoreUnavailable(format!(
-                "write {}: {e}",
-                tmp_path.display()
-            ))
+            EvalRunStoreError::StoreUnavailable(format!("write {}: {e}", tmp_path.display()))
         })?;
 
         fs::rename(&tmp_path, &final_path).map_err(|e| {
@@ -122,9 +115,8 @@ impl EvalRunStorePort for FilesystemEvalRunStore {
                 )));
             }
         };
-        let run: EvalRunResult = serde_json::from_slice(&bytes).map_err(|e| {
-            EvalRunStoreError::Malformed(format!("parse {}: {e}", path.display()))
-        })?;
+        let run: EvalRunResult = serde_json::from_slice(&bytes)
+            .map_err(|e| EvalRunStoreError::Malformed(format!("parse {}: {e}", path.display())))?;
         Ok(Some(run))
     }
 

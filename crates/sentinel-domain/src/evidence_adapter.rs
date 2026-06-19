@@ -103,9 +103,10 @@ impl EvidenceClaim {
 /// external source (the GitHub API returned the PR, Browserbase
 /// returned a recording, etc). `verified == false` means the adapter
 /// returned without a positive confirmation — usually the
-/// [`SelfAttestedAdapter`] fallback declaring "no third-party check
-/// available." Corpus queries filter on this bit to find unverified
-/// chains and prioritize them for adapter coverage.
+/// diagnostic [`SelfAttestedAdapter`] declaring "no third-party check
+/// available." Production proof sealing rejects these receipts; corpus
+/// queries filter on this bit to find unverified chains and prioritize
+/// them for adapter coverage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceReceipt {
     /// Adapter that produced the receipt (e.g. `"github_api"`,
@@ -437,7 +438,7 @@ mod tests {
 
     #[test]
     fn verified_false_still_gets_provenance_hash() {
-        // The self-attested fallback returns verified=false. It still
+        // The self-attested diagnostic adapter returns verified=false. It still
         // gets a provenance hash — the hash binds adapter+claim+payload
         // even when the adapter is admitting it didn't really verify.
         // This makes "we know we don't know" a first-class chain entry

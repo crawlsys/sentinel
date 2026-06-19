@@ -9,18 +9,14 @@
 //! Three modes:
 //!
 //! - `sentinel manifest write` — scan steps/, recompute hashes, write
-//!   `manifest.toml`. Unsigned by default. With `--key-env <VAR>` reads
-//!   a 32-byte hex Ed25519 seed from the named env var and signs each
-//!   entry. The public key (hex) is recorded in the manifest header so
-//!   downstream "verify" steps can self-check.
+//!   `manifest.toml`. Reads a 32-byte hex Ed25519 seed from `--key-env`
+//!   (default: `SENTINEL_SIGNING_KEY`) and signs every entry. The public
+//!   key (hex) is recorded in the manifest header so downstream "verify"
+//!   steps can self-check.
 //!
 //! - `sentinel manifest verify` — re-read steps/ + `manifest.toml`,
-//!   recompute hashes, and check each entry. With `--strict` (default
-//!   when the manifest carries any signed entry) requires a public key
-//!   to be supplied via `--pubkey <hex>` or the manifest's recorded
-//!   `public_key` header, and verifies signatures. Without `--strict`
-//!   runs in hash-only mode — bit-rot protection without authenticated
-//!   trust.
+//!   recompute hashes, require a public key via `--pubkey <hex>` or the
+//!   manifest's recorded `public_key` header, and verify every signature.
 //!
 //! - `sentinel manifest show` — pretty-print the manifest summary
 //!   (count of entries, signed-vs-unsigned, public key fingerprint).
@@ -33,14 +29,15 @@ use sentinel_domain::step_manifest::{ManifestCheck, ManifestError, StepConfigMan
 
 /// Default file name for the manifest written into a steps/ directory.
 pub const MANIFEST_FILENAME: &str = "manifest.toml";
+const DEFAULT_SIGNING_KEY_ENV: &str = "SENTINEL_SIGNING_KEY";
 
 /// What `sentinel manifest write` should do.
 #[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Path to `<config_dir>` (the parent of `steps/`).
     pub config_dir: PathBuf,
-    /// If `Some`, sign each entry with the Ed25519 key whose 32-byte
-    /// hex-encoded seed lives in this env var.
+    /// Sign each entry with the Ed25519 key whose 32-byte hex-encoded seed
+    /// lives in this env var. Defaults to `SENTINEL_SIGNING_KEY`.
     pub key_env: Option<String>,
     /// If true, print what would be written without touching the file.
     pub dry_run: bool,
@@ -51,14 +48,11 @@ pub struct WriteOptions {
 pub struct VerifyOptions {
     pub config_dir: PathBuf,
     /// Optional hex-encoded 32-byte public key to verify signatures
-    /// against. If omitted, falls back to the manifest's `public_key`
+    /// against. If omitted, uses the manifest's `public_key`
     /// header (still trusted only as far as the binary that read the
     /// manifest trusts that header — the verifying key is a *hint*
     /// unless pinned out-of-band).
     pub pubkey_hex: Option<String>,
-    /// True → strict mode: signed entries MUST verify. False → hash-only,
-    /// signatures ignored. Defaults to strict when any entry is signed.
-    pub strict: Option<bool>,
 }
 
 /// One entry's verification result. Distinct from `ManifestCheck` so we
@@ -75,8 +69,6 @@ pub struct VerifyReport {
     pub entries: Vec<EntryReport>,
     /// All entries that didn't return Ok.
     pub failures: Vec<String>,
-    /// Hash-only successes.
-    pub hash_only_ok: usize,
     /// Signed-and-verified successes.
     pub signed_ok: usize,
 }
@@ -90,16 +82,14 @@ impl VerifyReport {
 
 /// Build a manifest from the step-config TOMLs in `<config_dir>/steps/`.
 /// Doesn't touch disk; caller decides whether to write it.
-fn build_manifest(config_dir: &Path, signer: Option<&SigningKey>) -> Result<StepConfigManifest> {
+fn build_manifest(config_dir: &Path, signer: &SigningKey) -> Result<StepConfigManifest> {
     let steps_dir = config_dir.join("steps");
     if !steps_dir.is_dir() {
         bail!("steps directory not found: {}", steps_dir.display());
     }
 
     let mut manifest = StepConfigManifest::new();
-    if let Some(key) = signer {
-        manifest.public_key = Some(hex::encode(key.verifying_key().to_bytes()));
-    }
+    manifest.public_key = Some(hex::encode(signer.verifying_key().to_bytes()));
 
     // Stable iteration order so manifest diffs are reviewable.
     let mut sources: Vec<(String, String)> = Vec::new();
@@ -117,18 +107,14 @@ fn build_manifest(config_dir: &Path, signer: Option<&SigningKey>) -> Result<Step
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let body =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         sources.push((stem.to_string(), body));
     }
     sources.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (name, body) in sources {
-        if let Some(key) = signer {
-            manifest.upsert_signed(name, &body, key);
-        } else {
-            manifest.upsert_hash_only(name, &body);
-        }
+        manifest.upsert_signed(name, &body, signer);
     }
 
     Ok(manifest)
@@ -137,8 +123,8 @@ fn build_manifest(config_dir: &Path, signer: Option<&SigningKey>) -> Result<Step
 /// Load `manifest.toml` from `<config_dir>/steps/` if present.
 fn load_manifest(config_dir: &Path) -> Result<StepConfigManifest> {
     let path = config_dir.join("steps").join(MANIFEST_FILENAME);
-    let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     toml::from_str(&body).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -146,8 +132,8 @@ fn load_manifest(config_dir: &Path) -> Result<StepConfigManifest> {
 fn signing_key_from_env(env_var: &str) -> Result<SigningKey> {
     let raw = std::env::var(env_var)
         .with_context(|| format!("env var {env_var} not set — needed for signing"))?;
-    let bytes = hex::decode(raw.trim())
-        .with_context(|| format!("env var {env_var} is not valid hex"))?;
+    let bytes =
+        hex::decode(raw.trim()).with_context(|| format!("env var {env_var} is not valid hex"))?;
     if bytes.len() != 32 {
         bail!(
             "env var {env_var} must be 32-byte (64 hex char) Ed25519 seed; got {} bytes",
@@ -175,22 +161,24 @@ fn verifying_key_from_hex(hex_str: &str) -> Result<VerifyingKey> {
 /// `sentinel manifest write` — write `<config_dir>/steps/manifest.toml`.
 ///
 /// # Errors
-/// - signing requested but env var missing/invalid
+/// - signing env var missing/invalid
 /// - steps/ unreadable
 /// - manifest serialization fails (shouldn't happen with valid data)
 /// - disk write fails
 pub fn run_write(opts: WriteOptions) -> Result<()> {
-    let signer = match opts.key_env.as_deref() {
-        Some(env) => Some(signing_key_from_env(env)?),
-        None => None,
-    };
+    let key_env = opts.key_env.as_deref().unwrap_or(DEFAULT_SIGNING_KEY_ENV);
+    let signer = signing_key_from_env(key_env)?;
 
-    let manifest = build_manifest(&opts.config_dir, signer.as_ref())?;
+    let manifest = build_manifest(&opts.config_dir, &signer)?;
     let serialized = toml::to_string_pretty(&manifest).context("serialize manifest to TOML")?;
 
     let out_path = opts.config_dir.join("steps").join(MANIFEST_FILENAME);
     if opts.dry_run {
-        println!("# would write {} ({} entries):\n{serialized}", out_path.display(), manifest.entries.len());
+        println!(
+            "# would write {} ({} entries):\n{serialized}",
+            out_path.display(),
+            manifest.entries.len()
+        );
         return Ok(());
     }
     std::fs::write(&out_path, &serialized)
@@ -199,7 +187,7 @@ pub fn run_write(opts: WriteOptions) -> Result<()> {
         "wrote {} ({} entries, {})",
         out_path.display(),
         manifest.entries.len(),
-        if signer.is_some() { "signed" } else { "hash-only" }
+        "signed"
     );
     Ok(())
 }
@@ -209,11 +197,13 @@ pub fn run_write(opts: WriteOptions) -> Result<()> {
 /// # Errors
 /// - manifest file missing or unparseable
 /// - steps/ unreadable
-/// - public key resolution fails (when strict mode requires one)
+/// - public key resolution fails
 pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
     let manifest = load_manifest(&opts.config_dir)?;
 
     // Resolve the verifying key: explicit --pubkey wins, else manifest header.
+    // Enterprise verification is signature-only: without a public key, this
+    // command fails instead of downgrading to hash-only acceptance.
     let verifying = match opts.pubkey_hex.as_deref() {
         Some(hex_str) => Some(verifying_key_from_hex(hex_str)?),
         None => match manifest.public_key.as_deref() {
@@ -221,10 +211,11 @@ pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
             None => None,
         },
     };
-
-    // Default strict to true if any entry is signed AND we have a key.
-    let has_signed = manifest.entries.iter().any(|e| e.signature.is_some());
-    let strict = opts.strict.unwrap_or_else(|| has_signed && verifying.is_some());
+    let verifying = verifying.ok_or_else(|| {
+        anyhow!(
+            "manifest verification requires an Ed25519 public key via --pubkey or manifest public_key"
+        )
+    })?;
 
     let mut report = VerifyReport::default();
     let steps_dir = opts.config_dir.join("steps");
@@ -243,15 +234,14 @@ pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
             }
         };
 
-        let result = if strict {
-            manifest.verify_entry(&entry.name, &source, verifying.as_ref())
-        } else {
-            manifest.verify_entry_hash_only(&entry.name, &source)
-        };
+        let result = manifest.verify_entry(&entry.name, &source, Some(&verifying));
 
         match &result {
-            Ok(ManifestCheck::HashOnlyOk) => report.hash_only_ok += 1,
             Ok(ManifestCheck::SignedOk) => report.signed_ok += 1,
+            Ok(ManifestCheck::HashOnlyOk) => report.failures.push(format!(
+                "{}: hash-only verification is not authoritative",
+                entry.name
+            )),
             Err(e) => report.failures.push(format!("{}: {e}", entry.name)),
         }
         report.entries.push(EntryReport {
@@ -268,11 +258,16 @@ pub fn run_verify(opts: VerifyOptions) -> Result<VerifyReport> {
 /// - manifest missing or unparseable
 pub fn run_show(config_dir: &Path) -> Result<()> {
     let manifest = load_manifest(config_dir)?;
-    let signed = manifest.entries.iter().filter(|e| e.signature.is_some()).count();
+    let signed = manifest
+        .entries
+        .iter()
+        .filter(|e| e.signature.is_some())
+        .count();
     let unsigned = manifest.entries.len() - signed;
-    let key_summary = manifest
-        .public_key
-        .as_deref().map_or_else(|| "public_key = (none)".to_string(), |k| format!("public_key = {}…{}", &k[..8], &k[k.len() - 8..]));
+    let key_summary = manifest.public_key.as_deref().map_or_else(
+        || "public_key = (none)".to_string(),
+        |k| format!("public_key = {}…{}", &k[..8], &k[k.len() - 8..]),
+    );
     println!(
         "manifest version {} | {} entries ({signed} signed, {unsigned} unsigned) | {key_summary}",
         manifest.version,
@@ -300,24 +295,37 @@ mod tests {
         dir
     }
 
+    fn test_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
     #[test]
-    fn build_manifest_hash_only_has_one_entry_per_step_config() {
+    fn build_manifest_signs_one_entry_per_step_config() {
         let dir = make_config_dir_with_steps();
-        let manifest = build_manifest(dir.path(), None).unwrap();
+        let key = test_key();
+        let manifest = build_manifest(dir.path(), &key).unwrap();
         assert_eq!(manifest.entries.len(), 2);
         let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
         // Sorted iteration order.
         assert_eq!(names, vec!["github", "linear"]);
-        assert!(manifest.entries.iter().all(|e| e.signature.is_none()));
-        assert!(manifest.public_key.is_none());
+        assert!(manifest.entries.iter().all(|e| e.signature.is_some()));
+        assert_eq!(
+            manifest.public_key.as_deref(),
+            Some(hex::encode(key.verifying_key().to_bytes()).as_str())
+        );
     }
 
     #[test]
     fn build_manifest_skips_existing_manifest_toml() {
         let dir = make_config_dir_with_steps();
         // Pre-existing manifest.toml in steps/ — must not be hashed as a step.
-        fs::write(dir.path().join("steps").join(MANIFEST_FILENAME), "# placeholder\n").unwrap();
-        let manifest = build_manifest(dir.path(), None).unwrap();
+        fs::write(
+            dir.path().join("steps").join(MANIFEST_FILENAME),
+            "# placeholder\n",
+        )
+        .unwrap();
+        let key = test_key();
+        let manifest = build_manifest(dir.path(), &key).unwrap();
         let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["github", "linear"]);
         assert!(
@@ -329,8 +337,8 @@ mod tests {
     #[test]
     fn build_manifest_signed_records_public_key_in_header() {
         let dir = make_config_dir_with_steps();
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let manifest = build_manifest(dir.path(), Some(&key)).unwrap();
+        let key = test_key();
+        let manifest = build_manifest(dir.path(), &key).unwrap();
         assert!(manifest.entries.iter().all(|e| e.signature.is_some()));
         assert_eq!(
             manifest.public_key.as_deref(),
@@ -339,32 +347,29 @@ mod tests {
     }
 
     #[test]
-    fn run_write_then_run_verify_hash_only_round_trip() {
+    fn run_write_missing_key_fails_closed() {
         let dir = make_config_dir_with_steps();
-        run_write(WriteOptions {
+        std::env::remove_var("TEST_MISSING_MANIFEST_SIGN_KEY");
+        let err = run_write(WriteOptions {
             config_dir: dir.path().to_path_buf(),
-            key_env: None,
+            key_env: Some("TEST_MISSING_MANIFEST_SIGN_KEY".to_string()),
             dry_run: false,
         })
-        .unwrap();
-
-        let report = run_verify(VerifyOptions {
-            config_dir: dir.path().to_path_buf(),
-            pubkey_hex: None,
-            strict: Some(false),
-        })
-        .unwrap();
-        assert!(report.ok());
-        assert_eq!(report.hash_only_ok, 2);
-        assert_eq!(report.signed_ok, 0);
+        .expect_err("manifest write without signing key must fail closed");
+        assert!(
+            err.to_string().contains("TEST_MISSING_MANIFEST_SIGN_KEY"),
+            "error must name missing signing env var: {err:#}"
+        );
     }
 
     #[test]
     fn run_verify_detects_drift_after_edit() {
         let dir = make_config_dir_with_steps();
+        let seed_hex = "0808080808080808080808080808080808080808080808080808080808080808";
+        std::env::set_var("TEST_SIGN_KEY_DRIFT", seed_hex);
         run_write(WriteOptions {
             config_dir: dir.path().to_path_buf(),
-            key_env: None,
+            key_env: Some("TEST_SIGN_KEY_DRIFT".to_string()),
             dry_run: false,
         })
         .unwrap();
@@ -379,9 +384,9 @@ mod tests {
         let report = run_verify(VerifyOptions {
             config_dir: dir.path().to_path_buf(),
             pubkey_hex: None,
-            strict: Some(false),
         })
         .unwrap();
+        std::env::remove_var("TEST_SIGN_KEY_DRIFT");
         assert!(!report.ok());
         assert_eq!(report.failures.len(), 1);
         assert!(
@@ -420,13 +425,40 @@ mod tests {
 
         let report = run_verify(VerifyOptions {
             config_dir: dir.path().to_path_buf(),
-            pubkey_hex: None, // fall back to manifest's public_key header
-            strict: Some(true),
+            pubkey_hex: None, // use manifest's public_key header
         })
         .unwrap();
-        assert!(report.ok(), "signed manifest must verify: {:?}", report.failures);
+        assert!(
+            report.ok(),
+            "signed manifest must verify: {:?}",
+            report.failures
+        );
         assert_eq!(report.signed_ok, 2);
 
         std::env::remove_var("TEST_SIGN_KEY");
+    }
+
+    #[test]
+    fn run_verify_rejects_unsigned_manifest_entry() {
+        let dir = make_config_dir_with_steps();
+        let steps_dir = dir.path().join("steps");
+        let mut manifest = StepConfigManifest::new();
+        manifest.public_key = Some(hex::encode(test_key().verifying_key().to_bytes()));
+        manifest.upsert_hash_only("linear", "name = \"linear\"\n");
+        let body = toml::to_string_pretty(&manifest).unwrap();
+        fs::write(steps_dir.join(MANIFEST_FILENAME), body).unwrap();
+
+        let report = run_verify(VerifyOptions {
+            config_dir: dir.path().to_path_buf(),
+            pubkey_hex: None,
+        })
+        .unwrap();
+        assert!(!report.ok(), "unsigned manifest entry must fail verify");
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0].contains("unsigned"),
+            "failure must name unsigned entry: {:?}",
+            report.failures
+        );
     }
 }

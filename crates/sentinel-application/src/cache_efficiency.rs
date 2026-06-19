@@ -91,7 +91,7 @@ pub struct CacheSummary {
 }
 
 /// Live report returned to the CLI for printing.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct CacheReport {
     pub sessions_scanned: u64,
     pub sessions_with_usage: u64,

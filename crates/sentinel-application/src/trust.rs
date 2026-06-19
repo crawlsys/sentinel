@@ -12,7 +12,7 @@
 //! - Pack contracts (#12 / orig M7.8): "auto-merge agents need
 //!   Trusted+ tier" type policies. The contract layer reads tier; this
 //!   module produces it.
-//! - Dashboard #71/#72 surface: per-skill / per-agent score over time.
+//! - Report #71/#72 surface: per-skill / per-agent score over time.
 //!
 //! # Why pure-application, not pure-domain
 //!
@@ -76,7 +76,7 @@ impl TrustTier {
 /// One trust-score result for a (skill | `session_id`) bucket.
 ///
 /// Carries the score + tier plus the inputs that produced it so the
-/// dashboard / MCP responses can show the work, not just the verdict.
+/// local API / MCP responses can show the work, not just the verdict.
 /// Fields are public for read-side consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustScore {

@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Doppler Skill — Step Definitions
 # ~30 individually trackable steps across 6 phases
 #

@@ -10,7 +10,7 @@ use chrono::Utc;
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, session_path_component, FileSystemPort, HookContext};
 
 /// Error patterns that indicate MCP server failure
 const ERROR_PATTERNS: &[&str] = &[
@@ -96,6 +96,11 @@ fn log_mcp_error(
     error_detail: &str,
     session_id: &str,
 ) {
+    let Some(session_id) = session_path_component(session_id) else {
+        tracing::warn!("MCP health logger received non-concrete session id; skipping error metric");
+        return;
+    };
+
     let errors_path = match errors_file_path(fs) {
         Some(p) => p,
         None => return,
@@ -143,11 +148,17 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     };
 
     let server_name = extract_server_name(tool_name);
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let session_id = concrete_input_session_id(input);
 
     // Check for errors in the tool result
     if let Some(error_detail) = detect_error(input) {
-        log_mcp_error(ctx.fs, tool_name, server_name, &error_detail, session_id);
+        if let Some(session_id) = session_id {
+            log_mcp_error(ctx.fs, tool_name, server_name, &error_detail, session_id);
+        } else {
+            tracing::warn!(
+                "MCP failure observed without concrete session id; skipping error metric"
+            );
+        }
 
         // Push failure event via channel for instant notification
         let severity = if error_detail.contains("refused") || error_detail.contains("spawn") {
@@ -184,6 +195,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
 
     #[test]
     fn test_allows_non_mcp_tool() {
@@ -256,22 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detects_timeout_error_legacy_steel() {
-        // Legacy Steel MCP — kept as forward-compat regression. The
-        // steel-mcp binary is no longer registered, but if a residual
-        // tool name ever surfaced, the error detector should still classify it.
-        let input = HookInput {
-            tool_name: Some("mcp__steel__navigate".to_string()),
-            tool_result: Some(serde_json::json!("Request timed out after 30000ms")),
-            session_id: Some("test-session".to_string()),
-            ..Default::default()
-        };
-        let error = detect_error(&input);
-        assert!(error.is_some());
-        assert_eq!(error.unwrap(), "timed out");
-    }
-
-    #[test]
     fn test_no_error_in_clean_result() {
         let input = HookInput {
             tool_name: Some("mcp__linear__list_issues".to_string()),
@@ -290,9 +286,6 @@ mod tests {
             "browserbase"
         );
         assert_eq!(extract_server_name("mcp__cdp__navigate"), "cdp");
-        // Legacy Steel — kept as regression coverage. The steel-mcp binary
-        // is no longer registered but the extractor should still work.
-        assert_eq!(extract_server_name("mcp__steel__navigate"), "steel");
         assert_eq!(extract_server_name("mcp__doppler__list_secrets"), "doppler");
         assert_eq!(extract_server_name("mcp__"), "");
         assert_eq!(extract_server_name("not_mcp"), "unknown");
@@ -323,6 +316,62 @@ mod tests {
         assert!(content.contains("linear"));
         assert!(content.contains("critical"));
         assert!(content.contains("err-test-12345"));
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_error_metric() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmpdir.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let errors_path = errors_file_path(&fs).expect("errors path");
+
+        let input = HookInput {
+            tool_name: Some("mcp__linear__get_issue".to_string()),
+            tool_result: Some(serde_json::json!("Connection refused")),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_error_metric() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmpdir.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let errors_path = errors_file_path(&fs).expect("errors path");
+
+        let input = HookInput {
+            tool_name: Some("mcp__linear__get_issue".to_string()),
+            tool_result: Some(serde_json::json!("Connection refused")),
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_error_metric() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmpdir.path());
+        let errors_path = errors_file_path(&fs).expect("errors path");
+
+        log_mcp_error(
+            &fs,
+            "mcp__linear__get_issue",
+            "linear",
+            "connection refused",
+            "mcp-health-session",
+        );
+
+        let content = std::fs::read_to_string(errors_path).unwrap();
+        assert!(content.contains("\"session_id\":\"mcp-health-session\""));
+        assert!(!content.contains("\"session_id\":\"unknown\""));
     }
 
     #[test]

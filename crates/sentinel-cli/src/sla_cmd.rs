@@ -22,9 +22,7 @@ use std::path::{Path, PathBuf};
 const TEMPLATE_TOML: &str = include_str!("../templates/slas.example.toml");
 
 fn metrics_dir() -> Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    Ok(home.join(".claude").join("sentinel").join("metrics"))
+    Ok(sentinel_infrastructure::paths::sentinel_root().join("metrics"))
 }
 
 /// Run `sentinel sla check`.
@@ -89,7 +87,11 @@ pub fn run_check(config_path: PathBuf, subjects_path: PathBuf, dry_run: bool) ->
         append_breach(&breaches_path, b).context("append breach")?;
     }
     println!();
-    println!("  Appended {} breach record(s) to {}", breaches.len(), breaches_path.display());
+    println!(
+        "  Appended {} breach record(s) to {}",
+        breaches.len(),
+        breaches_path.display()
+    );
     Ok(())
 }
 
@@ -98,19 +100,33 @@ pub fn run_check(config_path: PathBuf, subjects_path: PathBuf, dry_run: bool) ->
 ///
 /// # Errors
 /// Returns aggregation errors.
-pub fn run_aggregate() -> Result<()> {
+pub async fn run_aggregate() -> Result<()> {
     let dir = metrics_dir()?;
     let breaches = dir.join("sla-breaches.jsonl");
     let summary = dir.join("sla-breaches-summary.json");
+    let graph_runs = summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel SLA Aggregate".bold());
     println!("  Source:  {}", breaches.display());
     println!("  Summary: {}", summary.display());
+    println!("  Graph:   {}", graph_runs.display());
     println!();
 
     let s = aggregate(&breaches, &summary).context("aggregate sla breaches")?;
+    let graph_audit = crate::sla_graph::run_sla_graph_audit(&s, &graph_runs)
+        .await
+        .context("sla graph audit failed")?;
     println!("  Records scanned: {}", s.records_scanned);
     println!("  SLAs with breaches: {}", s.aggregates.len());
+    println!(
+        "  Graph decision: {} ({})",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("sla graph audit requires checkpoint")
+            .dimmed()
+    );
     println!();
 
     if s.aggregates.is_empty() {
@@ -121,10 +137,7 @@ pub fn run_aggregate() -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "  {:<40}  {:>6}  {:>6}  {:>6}",
-        "SLA", "24h", "7d", "30d"
-    );
+    println!("  {:<40}  {:>6}  {:>6}  {:>6}", "SLA", "24h", "7d", "30d");
     let mut sorted = s.aggregates;
     sorted.sort_by_key(|b| std::cmp::Reverse(b.breaches_30d));
     for a in &sorted {
@@ -147,8 +160,7 @@ pub fn run_template() {
 }
 
 fn read_subjects(path: &Path) -> Result<Vec<Subject>> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut out = Vec::new();
     for (n, line) in content.lines().enumerate() {
         if line.trim().is_empty() {

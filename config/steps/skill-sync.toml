@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Skill Sync — Step Definitions
 # Git-based skill synchronization with validation
 #

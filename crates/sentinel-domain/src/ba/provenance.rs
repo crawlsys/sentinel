@@ -8,7 +8,7 @@
 //!
 //! No business logic — that lives behind
 //! `crate::ports::ProvenancePort` (future phase) which the
-//! application-layer hook consults.
+//! application-layer hook queries.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,8 +30,8 @@ pub enum ProvenanceClass {
     /// statement). The strongest provenance — sentinel treats these
     /// as ground truth subject to freshness checks.
     SystemOfRecord,
-    /// Synthesized output from a domain expert (consultant memo,
-    /// internal analysis, expert-curated dashboard). Strong but not
+    /// Synthesized output from a domain expert (advisor memo,
+    /// internal analysis, expert-curated report). Strong but not
     /// authoritative — context for the synthesis matters.
     ExpertSynthesis,
     /// Model inference (LLM summary, classifier output, derived
@@ -171,6 +171,14 @@ pub enum ProvenanceFinding {
         cutoff: DateTime<Utc>,
         is_blocking: bool,
     },
+
+    /// Provenance store could not be read, so citation history cannot
+    /// be validated. **Block-class** in blocking modes.
+    StoreUnavailable { artifact_id: String, reason: String },
+
+    /// Provenance store returned malformed data, so citation history
+    /// cannot be validated. **Block-class** in blocking modes.
+    StoreMalformed { artifact_id: String, reason: String },
 }
 
 impl ProvenanceFinding {
@@ -179,7 +187,9 @@ impl ProvenanceFinding {
     #[must_use]
     pub const fn is_block(&self) -> bool {
         match self {
-            Self::Existence { .. } => true,
+            Self::Existence { .. }
+            | Self::StoreUnavailable { .. }
+            | Self::StoreMalformed { .. } => true,
             Self::Freshness { is_blocking, .. } | Self::WithinSession { is_blocking, .. } => {
                 *is_blocking
             }
@@ -227,6 +237,24 @@ mod tests {
     fn existence_finding_is_block() {
         let f = ProvenanceFinding::Existence {
             artifact_id: "FIR-123".into(),
+        };
+        assert!(f.is_block());
+    }
+
+    #[test]
+    fn store_unavailable_is_block() {
+        let f = ProvenanceFinding::StoreUnavailable {
+            artifact_id: "FIR-123".into(),
+            reason: "disk full".into(),
+        };
+        assert!(f.is_block());
+    }
+
+    #[test]
+    fn store_malformed_is_block() {
+        let f = ProvenanceFinding::StoreMalformed {
+            artifact_id: "FIR-123".into(),
+            reason: "bad json".into(),
         };
         assert!(f.is_block());
     }

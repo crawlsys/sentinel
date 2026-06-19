@@ -1,4 +1,4 @@
-//! `sentinel daemon` — Starts MCP server + hook listener + dashboard API
+//! `sentinel daemon` — Starts MCP server + hook listener + local API
 //!
 //! **Security layers:**
 //! - Binds to 127.0.0.1 only (no network exposure)
@@ -16,27 +16,17 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 /// Generate a random bearer token for this daemon instance.
-fn generate_bearer_token() -> String {
+fn generate_bearer_token() -> Result<String> {
     let mut bytes = [0u8; 32];
-    if getrandom::getrandom(&mut bytes).is_err() {
-        // Fallback — use PID + time (weak but better than nothing)
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(std::process::id().to_le_bytes());
-        hasher.update(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_le_bytes(),
-        );
-        bytes.copy_from_slice(&hasher.finalize());
-    }
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    getrandom::getrandom(&mut bytes)
+        .context("failed to read OS randomness for daemon bearer token")?;
+    Ok(bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        }))
 }
 
 /// Write the bearer token to a file so authorized clients can read it.
@@ -44,47 +34,75 @@ fn generate_bearer_token() -> String {
 /// **Attack #153 fix**: Write to a temp file with restricted permissions FIRST,
 /// then rename into place. This eliminates the TOCTOU window where the token
 /// file exists with default ACLs before icacls/chmod runs.
-fn write_token_file(token: &str, port: u16) -> std::path::PathBuf {
-    let dir = dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory")
-        .join(".claude")
-        .join("sentinel");
-    let _ = std::fs::create_dir_all(&dir);
+fn write_token_file(token: &str, port: u16) -> Result<std::path::PathBuf> {
+    let dir = sentinel_infrastructure::paths::sentinel_root();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create sentinel directory {}", dir.display()))?;
     let path = dir.join("daemon-token");
     let tmp_path = dir.join(".daemon-token.tmp");
     let content = format!("{port}:{token}");
 
     // Write to temp file first
-    let _ = std::fs::write(&tmp_path, &content);
+    std::fs::write(&tmp_path, &content).with_context(|| {
+        format!(
+            "failed to write temporary token file {}",
+            tmp_path.display()
+        )
+    })?;
 
     // Restrict permissions on the temp file BEFORE renaming
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "failed to restrict temporary token file permissions {}",
+                    tmp_path.display()
+                )
+            },
+        )?;
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         let tmp_str = tmp_path.to_string_lossy();
-        let username = std::env::var("USERNAME").unwrap_or_default();
-        if !username.is_empty() {
-            let _ = std::process::Command::new("icacls")
-                .args([tmp_str.as_ref(), "/inheritance:r"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            let _ = std::process::Command::new("icacls")
-                .args([tmp_str.as_ref(), "/grant:r", &format!("{username}:F")])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+        let username =
+            std::env::var("USERNAME").context("USERNAME is required to restrict token ACLs")?;
+        let inheritance = std::process::Command::new("icacls")
+            .args([tmp_str.as_ref(), "/inheritance:r"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .context("failed to run icacls /inheritance:r for daemon token")?;
+        if !inheritance.status.success() {
+            anyhow::bail!(
+                "failed to restrict daemon token inheritance: {}",
+                String::from_utf8_lossy(&inheritance.stderr)
+            );
+        }
+        let grant = std::process::Command::new("icacls")
+            .args([tmp_str.as_ref(), "/grant:r", &format!("{username}:F")])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .context("failed to run icacls /grant:r for daemon token")?;
+        if !grant.status.success() {
+            anyhow::bail!(
+                "failed to grant daemon token ACL to current user: {}",
+                String::from_utf8_lossy(&grant.stderr)
+            );
         }
     }
 
     // Atomic rename — file appears at final path already hardened
-    let _ = std::fs::rename(&tmp_path, &path);
+    std::fs::rename(&tmp_path, &path).with_context(|| {
+        format!(
+            "failed to atomically install daemon token file {}",
+            path.display()
+        )
+    })?;
 
-    path
+    Ok(path)
 }
 
 /// Axum middleware that validates the bearer token on every request.
@@ -136,8 +154,11 @@ fn print_daemon_banner(port: u16, token_path: &std::path::Path, token: &str) {
     eprintln!("============================================================");
     eprintln!("  Sentinel daemon ready");
     eprintln!("============================================================");
-    eprintln!("  Dashboard:     http://127.0.0.1:{port}");
-    eprintln!("  Token path:    {} (file format: {{port}}:{{token}})", token_path.display());
+    eprintln!("  API:           http://127.0.0.1:{port}");
+    eprintln!(
+        "  Token path:    {} (file format: {{port}}:{{token}})",
+        token_path.display()
+    );
     eprintln!("  Auth header:   Authorization: Bearer {token}");
     eprintln!("============================================================");
     eprintln!();
@@ -147,8 +168,8 @@ pub async fn run(port: u16) -> Result<()> {
     info!("Sentinel daemon starting on port {port}");
 
     // Generate per-instance bearer token for API auth
-    let token = generate_bearer_token();
-    let token_path = write_token_file(&token, port);
+    let token = generate_bearer_token()?;
+    let token_path = write_token_file(&token, port)?;
     info!("Bearer token written to {}", token_path.display());
 
     // PID file — written next to the token file so `sentinel stop`
@@ -168,28 +189,25 @@ pub async fn run(port: u16) -> Result<()> {
     let state = Arc::new(RwLock::new(SessionState::new("daemon")));
     let app_state = crate::api::AppState { session: state };
 
-    // Tier B Linear enforcement spine. When SENTINEL_LINEAR_TOKEN is set, hold a
-    // live `graphql-transport-ws` subscription to Linear and react to every issue
-    // state-change in real time. Defaults to Shadow mode (log-only, zero
-    // mutations) unless SENTINEL_LINEAR_ENFORCE=live. Fire-and-forget: a detached
-    // task that logs and exits on permanent PAT rejection without taking the
-    // daemon down.
+    // Tier B Linear enforcement spine. When explicitly armed with
+    // SENTINEL_LINEAR_ENFORCE=live and SENTINEL_LINEAR_TOKEN, hold a live
+    // `graphql-transport-ws` subscription to Linear and react to every issue
+    // state-change through LangGraph checkpoint-authorized enforcement.
+    // Fire-and-forget: a detached task that logs and exits on permanent PAT
+    // rejection without taking the daemon down.
     if let Some(enforcer_cfg) = sentinel_infrastructure::linear_enforcer::EnforcerConfig::from_env()
     {
-        info!(
-            mode = ?enforcer_cfg.mode,
-            "Linear enforcer enabled — starting real-time subscription"
-        );
+        info!("Linear enforcer enabled — starting graph-backed real-time subscription");
         tokio::spawn(async move {
             sentinel_infrastructure::linear_enforcer::run_enforcer(enforcer_cfg).await;
         });
     } else {
-        info!("Linear enforcer disabled (SENTINEL_LINEAR_TOKEN not set)");
+        info!("Linear enforcer disabled (requires SENTINEL_LINEAR_ENFORCE=live and SENTINEL_LINEAR_TOKEN)");
     }
 
     // **Attack #130 fix**: Restrict CORS to localhost origins only.
     // The previous `Any` CORS policy allowed JavaScript from any origin to access
-    // the dashboard API. Even though we bind to 127.0.0.1, a malicious website
+    // the local API. Even though we bind to 127.0.0.1, a malicious website
     // could make fetch() calls to localhost:{port} and read proof chains, workflow
     // state, and hook stats via the browser's CORS preflight.
     let cors = tower_http::cors::CorsLayer::new()
@@ -222,7 +240,7 @@ pub async fn run(port: u16) -> Result<()> {
     // CRITICAL: Always bind to localhost only. Never 0.0.0.0.
     let bind_addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    info!("Dashboard API listening on http://localhost:{port}");
+    info!("Local API listening on http://localhost:{port}");
     info!("Use 'Authorization: Bearer {token}' to authenticate API requests");
 
     axum::serve(listener, app).await?;
@@ -241,10 +259,7 @@ pub async fn run(port: u16) -> Result<()> {
 /// it on the same token file. When the PID file is stale (process
 /// gone), it's silently replaced.
 fn write_pid_file() -> Result<std::path::PathBuf> {
-    let dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(".claude")
-        .join("sentinel");
+    let dir = sentinel_infrastructure::paths::sentinel_root();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("daemon-pid");
 
@@ -301,11 +316,7 @@ const fn is_pid_alive(_pid: i32) -> bool {
 /// process doesn't exist, or when SIGTERM itself fails.
 #[cfg(unix)]
 pub fn run_stop(wait_secs: u64) -> Result<()> {
-    let path = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-        .join(".claude")
-        .join("sentinel")
-        .join("daemon-pid");
+    let path = sentinel_infrastructure::paths::sentinel_root().join("daemon-pid");
     let pid_str = std::fs::read_to_string(&path)
         .with_context(|| format!("reading PID file at {}", path.display()))?;
     let pid: i32 = pid_str
@@ -314,7 +325,10 @@ pub fn run_stop(wait_secs: u64) -> Result<()> {
         .with_context(|| format!("parsing PID from {}", path.display()))?;
 
     if !is_pid_alive(pid) {
-        eprintln!("PID {pid} from {} is not alive; cleaning up stale file", path.display());
+        eprintln!(
+            "PID {pid} from {} is not alive; cleaning up stale file",
+            path.display()
+        );
         let _ = std::fs::remove_file(&path);
         return Ok(());
     }
@@ -348,10 +362,7 @@ pub fn run_stop(wait_secs: u64) -> Result<()> {
             // `sentinel daemon` start isn't confused by stale
             // state.
             let _ = std::fs::remove_file(&path);
-            if let Some(token_path) = path
-                .parent()
-                .map(|p| p.join("daemon-token"))
-            {
+            if let Some(token_path) = path.parent().map(|p| p.join("daemon-token")) {
                 let _ = std::fs::remove_file(&token_path);
             }
             return Ok(());

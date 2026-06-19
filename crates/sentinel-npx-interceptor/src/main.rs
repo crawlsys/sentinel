@@ -1,6 +1,6 @@
 //! Npx interceptor binary.
 //!
-//! Shadows the real `npx` at `~/bin/npx`. Redirects known Node package
+//! Intercepts the real `npx` at `~/bin/npx`. Redirects known Node package
 //! commands to local Rust CLI equivalents for faster execution.
 //! Unknown packages pass through to the real npx.
 

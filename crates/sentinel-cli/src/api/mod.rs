@@ -1,12 +1,13 @@
-//! Dashboard API Router
+//! Local API Router
 //!
-//! Full REST API for the Sentinel dashboard.
+//! Full REST API for local Sentinel control surfaces.
 //! Provides endpoints for proof chains, workflows, and hook stats.
 
 pub mod hooks;
 pub mod logs;
 pub mod memories;
 pub mod memory;
+mod operational_read_audit;
 pub mod proofs;
 pub mod scan;
 pub mod sessions;
@@ -15,8 +16,9 @@ pub mod workflows;
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{http::StatusCode, Json, Router};
 use sentinel_domain::state::SessionState;
+use sentinel_infrastructure::operational_api_read_graph::OperationalApiReadSurface;
 use tokio::sync::RwLock;
 
 /// Application state shared across all API handlers
@@ -41,10 +43,23 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
+async fn health() -> Result<Json<serde_json::Value>, StatusCode> {
+    let response = serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "engine": "sentinel"
-    }))
+    });
+    operational_read_audit::attach_operational_api_read_graph_audit(
+        OperationalApiReadSurface::RootHealth,
+        response,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "root health API read graph audit failed; refusing unaudited response"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }

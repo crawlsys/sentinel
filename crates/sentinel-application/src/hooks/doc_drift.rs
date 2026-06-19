@@ -16,7 +16,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, HookContext};
+use super::{
+    concrete_input_session_id, session_path_component, EnvPort, FileSystemPort, HookContext,
+};
 
 /// Cooldown between drift reports.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_DOC_MS;
@@ -89,16 +91,24 @@ fn acquire_lock(jsonl_path: &Path) -> Option<std::fs::File> {
     Some(file)
 }
 
-fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
-    let session_id = env
-        .var("CLAUDE_SESSION_ID")
+fn env_session_id(env: &dyn EnvPort) -> Option<String> {
+    env.var("CLAUDE_SESSION_ID")
         .or_else(|| env.var("SESSION_ID"))
-        .unwrap_or_else(|| "default".to_string());
+        .and_then(|session_id| session_path_component(&session_id).map(str::to_string))
+}
+
+fn current_session_id(input: &HookInput, env: &dyn EnvPort) -> Option<String> {
+    concrete_input_session_id(input)
+        .map(str::to_string)
+        .or_else(|| env_session_id(env))
+}
+
+fn cooldown_file(session_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("claude-doc-drift-{session_id}-last"))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
+fn cooldown_expired(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let content = match fs.read_to_string(&cooldown_file(session_id)) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -109,8 +119,8 @@ fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
-    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, session_id: &str) {
+    let _ = fs.write(&cooldown_file(session_id), now_ms().to_string().as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -364,18 +374,19 @@ fn check_changelog_drift(
     let content = fs::read_to_string(path).ok()?;
 
     // Check if changelog has an [Unreleased] section
-    if !content.contains("[Unreleased]") && !content.contains("Unreleased")
-        && recent_changes.len() >= 3 {
-            return Some(DriftEntry {
-                doc: "CHANGELOG.md".into(),
-                reason:
-                    "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked"
-                        .into(),
-                cwd: cwd_str.into(),
-                ts: ts.into(),
-                resolved: false,
-            });
-        }
+    if !content.contains("[Unreleased]")
+        && !content.contains("Unreleased")
+        && recent_changes.len() >= 3
+    {
+        return Some(DriftEntry {
+            doc: "CHANGELOG.md".into(),
+            reason: "CHANGELOG.md has no [Unreleased] section — recent changes may not be tracked"
+                .into(),
+            cwd: cwd_str.into(),
+            ts: ts.into(),
+            resolved: false,
+        });
+    }
 
     // Check if CHANGELOG is older than recently modified source files.
     // This catches committed changes where CHANGELOG wasn't updated.
@@ -618,6 +629,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
 /// Process on `UserPromptSubmit` — inject update instructions if drift exists.
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = current_session_id(input, ctx.env) else {
+        tracing::warn!("doc_drift skipped prompt state without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd_str = input.cwd.as_deref().unwrap_or(".");
 
     let entries = read_unresolved_drift(ctx.fs, cwd_str);
@@ -625,31 +640,27 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs, ctx.env) {
+    if !cooldown_expired(ctx.fs, &session_id) {
         return HookOutput::allow();
     }
 
     // Re-verify drift is still real (docs might have been updated since detection)
     let cwd = Path::new(cwd_str);
-    let any_still_drifted = entries
-        .iter()
-        .any(|e| {
-            let doc_path = cwd.join(&e.doc);
-            match e.doc.as_str() {
-                "README.md" => {
-                    !doc_path.exists()
-                        || fs::read_to_string(&doc_path)
-                            .map_or(true, |c| c.split_whitespace().count() < 30)
-                }
-                "CLAUDE.md" => {
-                    !doc_path.exists()
-                        || fs::metadata(&doc_path)
-                            .map_or(true, |m| m.len() < 200)
-                }
-                "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
-                _ => false,
+    let any_still_drifted = entries.iter().any(|e| {
+        let doc_path = cwd.join(&e.doc);
+        match e.doc.as_str() {
+            "README.md" => {
+                !doc_path.exists()
+                    || fs::read_to_string(&doc_path)
+                        .map_or(true, |c| c.split_whitespace().count() < 30)
             }
-        });
+            "CLAUDE.md" => {
+                !doc_path.exists() || fs::metadata(&doc_path).map_or(true, |m| m.len() < 200)
+            }
+            "CHANGELOG.md" | "BUILDING.md" | "LICENSE" | "SECURITY.md" => !doc_path.exists(),
+            _ => false,
+        }
+    });
 
     if !any_still_drifted {
         // Drift has been resolved — clean up
@@ -657,7 +668,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs, ctx.env);
+    write_cooldown(ctx.fs, &session_id);
 
     let context = build_drift_context(&entries);
     HookOutput::inject_context(HookEvent::UserPromptSubmit, context)
@@ -666,6 +677,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
 
     #[test]
     fn test_missing_readme_with_sources() {
@@ -795,7 +807,7 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs, ctx.env));
+        assert!(cooldown_expired(ctx.fs, "doc-drift-session"));
     }
 
     #[test]
@@ -846,6 +858,79 @@ mod tests {
         let output = process_prompt(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_use_default_cooldown_or_inject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let entry = DriftEntry {
+            doc: "README.md".into(),
+            reason: "Missing README".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            ts: "2026-05-30T00:00:00Z".into(),
+            resolved: false,
+        };
+        let drift_path = drift_file(&fs).expect("drift path");
+        std::fs::write(
+            &drift_path,
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+        let default_cooldown = std::env::temp_dir().join("claude-doc-drift-default-last");
+        let _ = std::fs::remove_file(&default_cooldown);
+
+        let input = HookInput {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(output.hook_specific_output.is_none());
+        assert!(!default_cooldown.exists());
+    }
+
+    #[test]
+    fn concrete_input_session_writes_session_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let entry = DriftEntry {
+            doc: "README.md".into(),
+            reason: "Missing README".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            ts: "2026-05-30T00:00:00Z".into(),
+            resolved: false,
+        };
+        let drift_path = drift_file(&fs).expect("drift path");
+        std::fs::write(
+            &drift_path,
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+        let cooldown = cooldown_file("doc-drift-session");
+        let _ = std::fs::remove_file(&cooldown);
+
+        let input = HookInput {
+            session_id: Some("doc-drift-session".to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process_prompt(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            output.hook_specific_output.is_some(),
+            "concrete session should receive the drift reminder"
+        );
+        assert!(cooldown.exists());
+        let _ = std::fs::remove_file(cooldown);
     }
 
     #[test]
@@ -905,19 +990,37 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(path).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            path: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(path)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            path: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(p) = path.parent() {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
-            std::fs::write(path, content).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            std::fs::write(path, content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(path).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            path: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(path)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, path: &Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
             std::fs::read_dir(path)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -928,20 +1031,29 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             path.is_dir()
         }
-        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            path: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(path).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            path: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write as _;
             if let Some(p) = path.parent() {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-            f.write_all(content).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            f.write_all(content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
     }
 

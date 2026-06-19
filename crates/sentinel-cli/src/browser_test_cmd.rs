@@ -6,8 +6,7 @@
 //!
 //! The `pre_push_browser_test` hook checks for a state file written by this
 //! command (or by the `PostToolUse` handler for
-//! `mcp__browserbase__release_session`, `mcp__cdp__close_instance`, or
-//! legacy `mcp__steel__release_session`).
+//! `mcp__browserbase__release_session` or `mcp__cdp__close_instance`).
 //!
 //! Usage:
 //!   sentinel browser-test record --session <id>   # Mark test as passed

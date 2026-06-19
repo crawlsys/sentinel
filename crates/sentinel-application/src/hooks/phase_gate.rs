@@ -12,7 +12,7 @@
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookInput, HookOutput, PermissionDecision};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::SkillWorkflow;
 use std::collections::HashMap;
@@ -27,6 +27,76 @@ fn deny_with_context(input: &HookInput, reason: impl Into<String>) -> HookOutput
     HookOutput::deny(full)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseGateDecision {
+    Allow,
+    Block,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhaseGateEvaluation {
+    pub tool: Option<String>,
+    pub tool_present: bool,
+    pub dangerous_mcp_tool: bool,
+    pub safe_mcp_tool: bool,
+    pub tool_calls_before: u64,
+    pub tool_calls_after: u64,
+    pub tool_call_recorded: bool,
+    pub phases_read_before: usize,
+    pub phases_read_after: usize,
+    pub phase_read_recorded: bool,
+    pub phase_hashes_before: usize,
+    pub phase_hashes_after: usize,
+    pub phase_hash_recorded: bool,
+    pub blocked: bool,
+    pub reason_present: bool,
+    pub reason_sha256: String,
+    pub reason_len: usize,
+    pub decision: PhaseGateDecision,
+    output: HookOutput,
+}
+
+impl PhaseGateEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.tool_present
+    }
+}
+
+fn output_reason(output: &HookOutput) -> Option<&str> {
+    output
+        .hook_specific_output
+        .as_ref()
+        .and_then(|hook| hook.permission_decision_reason.as_deref())
+        .or(output.reason.as_deref())
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &PhaseGateEvaluation) -> HookOutput {
+    evaluation.output.clone()
+}
+
+fn phase_gate_decision(output: &HookOutput) -> PhaseGateDecision {
+    if output.blocked != Some(true) {
+        return PhaseGateDecision::Allow;
+    }
+    if output
+        .hook_specific_output
+        .as_ref()
+        .and_then(|hook| hook.permission_decision)
+        == Some(PermissionDecision::Deny)
+    {
+        PhaseGateDecision::Deny
+    } else {
+        PhaseGateDecision::Block
+    }
+}
+
+fn sha256(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
 /// Extracted phase file info from a `Read()` `tool_input` path.
 #[derive(Debug, Clone)]
 struct PhaseFileInfo {
@@ -36,7 +106,7 @@ struct PhaseFileInfo {
     skill: String,
     /// Whether the file passed canonical path validation (exists on disk
     /// and resolves to within ~/.claude/skills/). Untrusted files are
-    /// recorded for tracking but do NOT advance workflow state.
+    /// not recorded and cannot affect workflow state.
     trusted: bool,
     /// **Attack #141 fix**: The canonicalized absolute path to the phase file.
     /// Used for content hashing instead of the user-supplied `tool_input` path
@@ -138,7 +208,7 @@ fn extract_phase_file(
             // Use PathBuf::starts_with() — component-aware, not string prefix.
             // This prevents sibling-directory tricks like `skills_evil/` matching
             // a string prefix of `skills`.
-            // **Attack #97 fix**: Panic instead of empty fallback.
+            // **Attack #97 fix**: Panic instead of accepting an empty value.
             // Empty PathBuf makes skills_dir ".claude/skills" (relative),
             // which never matches canonical absolute paths — all files
             // become "untrusted" but phases_read is still recorded.
@@ -179,6 +249,14 @@ fn extract_phase_file(
 // across hooks. Re-export so call sites here don't need to qualify.
 use sentinel_domain::path_safety::is_safe_name;
 
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty() && *session_id != "unknown")
+}
+
 /// Process a phase-gate hook event (`PreToolUse`)
 ///
 /// This function handles two responsibilities:
@@ -187,6 +265,73 @@ use sentinel_domain::path_safety::is_safe_name;
 #[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
 #[allow(clippy::too_many_lines)] // security gate: cannot split without losing context
 pub fn process(
+    input: &HookInput,
+    state: &mut SessionState,
+    workflows: &HashMap<String, SkillWorkflow>,
+    fs: &dyn super::FileSystemPort,
+) -> HookOutput {
+    let evaluation = evaluate(input, state, workflows, fs);
+    output_from_evaluation(&evaluation)
+}
+
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
+pub fn evaluate(
+    input: &HookInput,
+    state: &mut SessionState,
+    workflows: &HashMap<String, SkillWorkflow>,
+    fs: &dyn super::FileSystemPort,
+) -> PhaseGateEvaluation {
+    let tool = input.tool_name.clone();
+    let tool_present = input
+        .tool_name
+        .as_deref()
+        .is_some_and(|tool| !tool.is_empty());
+    let dangerous_mcp_tool = input
+        .tool_name
+        .as_deref()
+        .is_some_and(|tool| tool.starts_with("mcp__") && is_dangerous_mcp_tool(tool));
+    let safe_mcp_tool = input
+        .tool_name
+        .as_deref()
+        .is_some_and(|tool| tool.starts_with("mcp__") && !is_dangerous_mcp_tool(tool));
+    let tool_calls_before = state.tool_calls;
+    let phases_read_before = state.phases_read_count();
+    let phase_hashes_before = state.phase_file_hashes.len();
+
+    let output = process_core(input, state, workflows, fs);
+    let reason = output_reason(&output);
+    let reason_sha256 = reason.map(sha256).unwrap_or_default();
+    let reason_len = reason.map_or(0, str::len);
+    let tool_calls_after = state.tool_calls;
+    let phases_read_after = state.phases_read_count();
+    let phase_hashes_after = state.phase_file_hashes.len();
+
+    PhaseGateEvaluation {
+        tool,
+        tool_present,
+        dangerous_mcp_tool,
+        safe_mcp_tool,
+        tool_calls_before,
+        tool_calls_after,
+        tool_call_recorded: tool_calls_after > tool_calls_before,
+        phases_read_before,
+        phases_read_after,
+        phase_read_recorded: phases_read_after > phases_read_before,
+        phase_hashes_before,
+        phase_hashes_after,
+        phase_hash_recorded: phase_hashes_after > phase_hashes_before,
+        blocked: output.blocked == Some(true),
+        reason_present: reason.is_some(),
+        reason_sha256,
+        reason_len,
+        decision: phase_gate_decision(&output),
+        output,
+    }
+}
+
+#[allow(clippy::implicit_hasher)] // call sites in hook_cmd.rs are outside edit scope
+#[allow(clippy::too_many_lines)] // security gate: cannot split without losing context
+fn process_core(
     input: &HookInput,
     state: &mut SessionState,
     workflows: &HashMap<String, SkillWorkflow>,
@@ -213,7 +358,7 @@ pub fn process(
 
     // **Attack #200 fix**: MCP tools with write/exec capabilities MUST go through
     // phase gate enforcement. Previously ALL mcp__ tools were auto-allowed, letting
-    // any MCP server (codex, browserbase, cdp, legacy steel, etc.) bypass workflow
+    // any MCP server (codex, browserbase, cdp, etc.) bypass workflow
     // restrictions by writing files, running commands, or applying patches through
     // their own tools.
     //
@@ -247,12 +392,19 @@ pub fn process(
     if tool_name == "Read" {
         if let Some(ref tool_input) = input.tool_input {
             if let Some(info) = extract_phase_file(fs, tool_input) {
-                // Only record phase reads AND advance workflow for trusted files
+                // Only record phase reads for trusted files.
                 // (exist on disk, canonicalize to ~/.claude/skills/).
                 // Untrusted files are NOT recorded — prevents phantom phase
                 // completion and progress inflation via crafted paths.
                 if !info.trusted {
                     return HookOutput::allow();
+                }
+
+                let phase_id = info.file.strip_suffix(".md").unwrap_or(&info.file);
+                if let Some(wf_def) = workflows.get(&info.skill) {
+                    if !wf_def.phases.iter().any(|phase| phase.id == phase_id) {
+                        return HookOutput::allow();
+                    }
                 }
 
                 state.record_phase_read(&info.skill, &info.file);
@@ -298,16 +450,20 @@ pub fn process(
                         // last 60s), accept the new hash and proceed. This is
                         // for legitimate marketplace-wide skill refactors where
                         // phase file content must change mid-session.
-                        let session_id = input.session_id.as_deref().unwrap_or("unknown");
-                        let override_path = super::hygiene_override::phase_gate_override_path(
-                            fs, session_id,
-                        );
-                        if super::hygiene_override::is_signed_override_active(
-                            fs,
-                            &override_path,
-                            "phase-gate",
-                            session_id,
-                        ) {
+                        let phase_gate_override_active =
+                            concrete_session_id(input).is_some_and(|session_id| {
+                                let override_path =
+                                    super::hygiene_override::phase_gate_override_path(
+                                        fs, session_id,
+                                    );
+                                super::hygiene_override::is_signed_override_active(
+                                    fs,
+                                    &override_path,
+                                    "phase-gate",
+                                    session_id,
+                                )
+                            });
+                        if phase_gate_override_active {
                             eprintln!(
                                 "[sentinel] phase_gate_override: accepting new hash for '{canonical_key}' (was tampering)",
                             );
@@ -338,68 +494,9 @@ pub fn process(
                     }
                 }
 
-                // Auto-advance workflow when phase file is read.
-                // Reading the phase file = proof of engagement under hard gate.
-                //
-                // FIX: Derive skill from the path (info.skill), not active_skill.
-                // This prevents misattribution when multiple skills are in play.
-                // Fall back to active_skill only if the path-derived skill has
-                // no workflow definition in the config.
-                let skill_to_advance = if workflows.contains_key(&info.skill) {
-                    Some(info.skill.clone())
-                } else if let Some(ref active) = state.active_skill {
-                    if workflows.contains_key(active.as_str()) {
-                        // Fallback: path-derived skill not in workflows, using active_skill.
-                        // This is a potential misconfiguration — the phase file path
-                        // references a skill that has no workflow definition.
-                        eprintln!(
-                            "[sentinel] WARNING: Phase file path references skill '{}' \
-                             which has no workflow definition. Falling back to active_skill '{}'. \
-                             This may indicate a misconfigured skill or stale phase file.",
-                            info.skill, active
-                        );
-                        Some(active.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(skill_name) = skill_to_advance {
-                    // FIX: Use strip_suffix instead of trim_end_matches.
-                    // trim_end_matches removes repeated char patterns, not the suffix.
-                    // e.g., "add.md" with trim_end_matches(".md") would strip "d" too.
-                    let phase_id = info.file.strip_suffix(".md").unwrap_or(&info.file);
-
-                    // Validate phase_id against known workflow phases before advancing.
-                    // Only advance if this is a recognized phase, preventing
-                    // arbitrary state manipulation via crafted filenames.
-                    let is_known_phase = workflows
-                        .get(&skill_name)
-                        .is_some_and(|w| w.phases.iter().any(|p| p.id == phase_id));
-
-                    if is_known_phase {
-                        // Ensure workflow state exists for this skill
-                        if !state.workflows.contains_key(&skill_name) {
-                            state.workflows.insert(
-                                skill_name.clone(),
-                                sentinel_domain::workflow::WorkflowState::new(
-                                    &skill_name,
-                                    &state.session_id,
-                                ),
-                            );
-                        }
-                        // Use advance_sequential() to enforce phase ordering.
-                        // Reading phase 5 before phase 1 will NOT advance state.
-                        if let (Some(wf), Some(wf_def)) = (
-                            state.workflows.get_mut(&skill_name),
-                            workflows.get(&skill_name),
-                        ) {
-                            wf.advance_sequential(phase_id, wf_def);
-                        }
-                    }
-                }
+                // Reading a phase file is read-side evidence only. LangGraph
+                // owns workflow position and completion; this sync hook records
+                // `phases_read` for gating but never mutates `WorkflowState`.
             }
         }
         // Read calls always pass through (they're safe tools)
@@ -446,8 +543,7 @@ pub fn process(
             // point at a path that doesn't exist. Progress is read from THIS
             // skill's workflow state for the same reason.
             let completed = state
-                .workflows
-                .get(&skill)
+                .graph_workflow(&skill)
                 .map_or(0, |w| w.completed_phases.len());
             let total = workflows
                 .get(&skill)
@@ -470,8 +566,7 @@ pub fn process(
 ///
 /// **Layer 1 — Obfuscation detection**: Catch shell tricks that defeat regex
 /// matching: `eval`, `base64 -d`, `$'\xHH'` hex escapes, variable-based
-/// command construction (e.g. `cmd="browserbase"; $cmd-mcp` or the legacy
-/// `cmd="steel"; $cmd-mcp` attack pattern). If detected AND a workflow with
+/// command construction (e.g. `cmd="browserbase"; $cmd-mcp`). If detected AND a workflow with
 /// blocked patterns or an allowlist is active, hard-deny.
 ///
 /// **Layer 2 — Allowlist (nuclear option)**: If ANY active workflow has a
@@ -482,8 +577,8 @@ pub fn process(
 /// **Layer 3 — Blocklist**: Check patterns against the full command string
 /// AND extracted inner commands from `bash -c "..."` wrappers.
 ///
-/// Checks patterns across ALL workflows with active state (not just
-/// `active_skill`), preventing the skill-switch bypass.
+/// Checks patterns across ALL workflows with durable LangGraph-projected state,
+/// preventing skill-switch bypass without treating `active_skill` as authority.
 #[allow(clippy::too_many_lines)] // security function: multi-layer bash analysis cannot be split
 #[allow(clippy::items_after_statements)] // static LazyLock regex items are placed near first use for readability
 fn check_blocked_bash_patterns(
@@ -499,7 +594,7 @@ fn check_blocked_bash_patterns(
     // to protected sentinel paths. This closes the vector where Write/Edit
     // are protected but `echo '{}' > ~/.claude/sentinel/state/sess.json`
     // can tamper with state files directly (Attack #37).
-    if !state.workflows.is_empty() || state.active_skill.is_some() {
+    if state.has_any_graph_workflow() {
         if let Some(block) = check_bash_redirect_to_protected(fs, cmd, input) {
             return Some(block);
         }
@@ -511,9 +606,7 @@ fn check_blocked_bash_patterns(
     let mut has_any_enforcement = false;
 
     for (skill_name, workflow) in workflows {
-        let is_relevant = state.active_skill.as_deref() == Some(skill_name)
-            || state.workflows.contains_key(skill_name);
-        if !is_relevant {
+        if !state.has_graph_workflow(skill_name) {
             continue;
         }
         for p in &workflow.blocked_bash_patterns {
@@ -558,7 +651,6 @@ fn check_blocked_bash_patterns(
                 ),
                 // Variable-based command construction + execution:
                 // cmd="browserbase-mcp"; $cmd  OR  cmd+="mcp"; $cmd
-                // (legacy: cmd="steel-mcp" — still caught defensively)
                 (
                     "variable command execution",
                     Regex::new(r";\s*\$\w+").unwrap(),
@@ -768,8 +860,8 @@ fn check_blocked_bash_patterns(
     //   e) a shell-normalized version (strips quotes, backslash escapes)
     //
     // The normalization step (e) defeats quote-split evasion:
-    //   "st""eel-mcp" → steel-mcp
-    //   s\t\e\e\l-m\c\p → steel-mcp
+    //   "browserbase""-mcp" → browserbase-mcp
+    //   c\d\p-m\c\p → cdp-mcp
     //   'railway'' up' → railway up
     let mut targets: Vec<String> = vec![cmd.to_string()];
 
@@ -833,9 +925,7 @@ fn check_blocked_bash_patterns(
         let re = match Regex::new(pattern) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!(
-                    "[sentinel] WARNING: Invalid blocked_bash_pattern '{pattern}': {e}"
-                );
+                eprintln!("[sentinel] WARNING: Invalid blocked_bash_pattern '{pattern}': {e}");
                 continue;
             }
         };
@@ -869,9 +959,9 @@ fn check_blocked_bash_patterns(
 /// Normalize shell quoting artifacts from a command string.
 ///
 /// Removes:
-///   - Adjacent double quotes: `"steel""-mcp"` → `steel-mcp`
+///   - Adjacent double quotes: `"browserbase""-mcp"` → `browserbase-mcp`
 ///   - Adjacent single quotes: `'rail''way'` → `railway`
-///   - Standalone backslash escapes: `s\t\e\e\l` → `steel`
+///   - Standalone backslash escapes: `c\d\p` → `cdp`
 ///   - Process substitution wrappers: `<(...)` → contents
 ///
 /// This is NOT a full shell parser — it's a best-effort normalization
@@ -951,7 +1041,7 @@ fn check_bash_redirect_to_protected(
             let normalized = path.replace('\\', "/");
             // Expand ~ to home dir for textual check
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
-                // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
+                // **Attack #90 fix**: Panic instead of accepting an empty PathBuf.
                 // makes all ~/‐prefixed protected path checks silently pass.
                 let home = fs
                     .home_dir()
@@ -995,7 +1085,7 @@ fn check_bash_redirect_to_protected(
             let path = path_match.as_str();
             let normalized = path.replace('\\', "/");
             let expanded = if normalized.starts_with("~/") || normalized.starts_with("~\\") {
-                // **Attack #90 fix**: Panic instead of empty fallback — empty PathBuf
+                // **Attack #90 fix**: Panic instead of accepting an empty PathBuf.
                 // makes all ~/‐prefixed protected path checks silently pass.
                 let home = fs
                     .home_dir()
@@ -1053,8 +1143,8 @@ fn check_protected_path_write(
         return None;
     }
 
-    // Only enforce when at least one workflow has been activated
-    let any_active = !state.workflows.is_empty() || state.active_skill.is_some();
+    // Only enforce when at least one workflow has durable LangGraph projection.
+    let any_active = state.has_any_graph_workflow();
     if !any_active {
         return None;
     }
@@ -1073,7 +1163,7 @@ fn check_protected_path_write(
     let normalized = file_path.replace('\\', "/");
 
     // Build protected directory list
-    // **Attack #91 fix**: Panic instead of empty fallback
+    // **Attack #91 fix**: Panic instead of accepting an empty value.
     let claude_dir = fs
         .home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory")
@@ -1102,30 +1192,13 @@ fn check_protected_path_write(
             return None;
         }
 
-        // Allow editing SKILL.md files for skills OTHER than the active workflow skill.
-        // The active skill's SKILL.md is always protected (prevents self-modification),
-        // but non-active skills should remain editable during normal work.
-        // Phase files (skills/*/phases/*.md) are ALWAYS protected regardless.
-        //
-        // **Phantom-active exception (same root cause as the gate never-entered
-        // downgrade):** the active skill's SKILL.md is only protected when that
-        // skill's workflow has actually been ENTERED (a phase completed or a phase
-        // file read). A skill that became `active_skill` merely via a topical
-        // skill-router match — without the user entering its workflow — must not
-        // lock its own SKILL.md, or routine skill-authoring edits get trapped the
-        // same way unrelated tool calls were (the whole-session deadlock). Once the
-        // workflow is genuinely entered, self-modification protection re-engages.
+        // Allow editing SKILL.md files for skills without a durable graph
+        // workflow projection. Graph-projected workflow skills remain protected;
+        // phase files (skills/*/phases/*.md) are always protected.
         if reason == "skill definition file" {
             if let Some(target_skill) = extract_skill_name_from_path(&normalized) {
-                match state.active_skill.as_deref() {
-                    Some(active) if target_skill == active => {
-                        // Editing the ACTIVE skill's SKILL.md — only protect it if
-                        // that workflow was actually entered (not phantom-active).
-                        if !workflow_entered(state, active) {
-                            return None; // Allow: phantom-active skill, never entered
-                        }
-                    }
-                    _ => return None, // Allow: editing a non-active skill's SKILL.md
+                if !state.has_graph_workflow(&target_skill) {
+                    return None;
                 }
             }
         }
@@ -1135,15 +1208,18 @@ fn check_protected_path_write(
         // config/state, settings.json, and hooks.toml remain protected
         // even with an active override.
         if reason == "phase file modification" || reason == "skill definition file" {
-            let session_id = input.session_id.as_deref().unwrap_or("unknown");
-            let override_path = super::hygiene_override::phase_gate_override_path(fs, session_id);
-            if super::hygiene_override::is_signed_override_active_with_ttl(
-                fs,
-                &override_path,
-                "phase-gate",
-                session_id,
-                super::hygiene_override::PHASE_GATE_OVERRIDE_TTL_SECS,
-            ) {
+            let phase_gate_override_active = concrete_session_id(input).is_some_and(|session_id| {
+                let override_path =
+                    super::hygiene_override::phase_gate_override_path(fs, session_id);
+                super::hygiene_override::is_signed_override_active_with_ttl(
+                    fs,
+                    &override_path,
+                    "phase-gate",
+                    session_id,
+                    super::hygiene_override::PHASE_GATE_OVERRIDE_TTL_SECS,
+                )
+            });
+            if phase_gate_override_active {
                 return None; // Allow: valid phase-gate override token present
             }
         }
@@ -1176,28 +1252,6 @@ fn check_protected_path_write(
 // with the safe-suffixes / safe-prefixes lists. The phase gate is still the
 // only consumer; the domain location makes the lists reviewable.
 use sentinel_domain::mcp_tool::is_dangerous_mcp_tool;
-
-/// Whether a skill's workflow has actually been ENTERED in this session.
-///
-/// "Entered" = the user demonstrably began the workflow, by either completing a
-/// phase or reading any of its phase files. A skill that is merely `active_skill`
-/// via a topical skill-router keyword match — with no phase completed and no phase
-/// file read — is "phantom-active" and returns false here.
-///
-/// Shared predicate for the phantom-arming fixes: the gate's never-entered
-/// block downgrade (`gate::evaluate`) and the SKILL.md self-modification guard
-/// both key off this so a phantom-active skill never traps the session.
-fn workflow_entered(state: &SessionState, skill: &str) -> bool {
-    let completed = state
-        .workflows
-        .get(skill)
-        .is_some_and(|w| !w.completed_phases.is_empty());
-    let read_any = state
-        .phases_read
-        .get(skill)
-        .is_some_and(|files| !files.is_empty());
-    completed || read_any
-}
 
 /// Extract the skill name from a normalized path like `.../skills/loom/SKILL.md`.
 /// Returns the skill directory name (e.g., "loom") or None if path doesn't match.
@@ -1264,7 +1318,7 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
         return Some("MCP server registration file");
     }
 
-    // 5. Sentinel binary (shadow binary system)
+    // 5. Sentinel binary (installed binary swap system)
     // **Attack #87 fix**: Protect sentinel-engine.exe and sentinel-engine.exe.staged
     // from Write/Edit during active workflows. An attacker could overwrite the
     // sentinel binary with a no-op stub, disabling all enforcement.
@@ -1274,7 +1328,7 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
 
     // 7. Sentinel source repo + infrastructure repos
     // **Attack #201 fix**: Protect the sentinel source code from modification during
-    // active workflows. Only repos whose binaries auto-swap via the shadow binary
+    // active workflows. Only repos whose binaries auto-swap via the installed binary
     // system are protected. vulcan-mcp-sdk-rust removed: it is a dependency, not enforcement.
 
     let infra_repos = [
@@ -1368,7 +1422,7 @@ fn check_protected_canonical(
 
     // .claude.json at HOME root (parent of ~/.claude/)
     // canonical_parent is HOME dir, filename is .claude.json
-    // **Attack #92 fix**: Panic instead of empty fallback
+    // **Attack #92 fix**: Panic instead of accepting an empty value.
     let home_dir = fs
         .home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory");
@@ -1429,21 +1483,11 @@ fn check_post_merge_skip(
         return None;
     }
 
-    // **Attack #48**: Use active_skill if available, otherwise fall back to
-    // find_incomplete_workflow to prevent clearing active_skill to bypass this check.
-    let (skill, workflow) = match state
-        .active_skill
-        .as_ref()
-        .and_then(|s| workflows.get(s).map(|w| (s.clone(), w)))
+    // Use the strictest incomplete graph-projected workflow (mirrors gate.rs).
+    let (skill, workflow) = match crate::gate::find_incomplete_workflow_pub(state, workflows, None)
     {
-        Some(pair) => pair,
-        None => {
-            // Fall back to most-progressed incomplete workflow (mirrors gate.rs logic)
-            match crate::gate::find_incomplete_workflow_pub(state, workflows, None) {
-                Some((wf, _ws, skill_name)) => (skill_name, wf),
-                None => return None,
-            }
-        }
+        Some((wf, _ws, skill_name)) => (skill_name, wf),
+        None => return None,
     };
 
     // Check if this workflow has both review and qa-handoff phases
@@ -1460,8 +1504,7 @@ fn check_post_merge_skip(
     // Also check completed phases (from submit_phase_complete)
     // Use the resolved skill name, not active_workflow() which depends on active_skill
     let review_complete = state
-        .workflows
-        .get(&skill)
+        .graph_workflow(&skill)
         .is_some_and(|w| w.is_phase_complete("review"));
 
     if (review_read || review_complete) && !qa_read {
@@ -1513,7 +1556,7 @@ fn format_block_box(
 mod tests {
     use super::*;
     use sentinel_domain::judge::JudgeModel;
-    use sentinel_domain::workflow::WorkflowPhase;
+    use sentinel_domain::workflow::{WorkflowPhase, WorkflowState};
     use std::path::{Path, PathBuf};
 
     /// Real filesystem port for tests — preserves pre-refactor behavior
@@ -1523,19 +1566,36 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(parent)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
-            std::fs::write(p, content).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            std::fs::write(p, content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             std::fs::read_dir(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -1546,25 +1606,119 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, p: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(parent)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-            f.write_all(content).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            f.write_all(content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
     }
 
     fn test_fs() -> RealTestFs {
         RealTestFs
+    }
+
+    struct ScopedHomeFs {
+        home: PathBuf,
+    }
+
+    impl super::super::FileSystemPort for ScopedHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        }
+
+        fn write(
+            &self,
+            p: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+            }
+            std::fs::write(p, content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        }
+
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        }
+
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_dir(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+                .map(|rd| {
+                    rd.filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                        .collect()
+                })
+        }
+
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        }
+
+        fn append(
+            &self,
+            p: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            use std::io::Write;
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+            file.write_all(content)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        }
     }
 
     fn test_workflow() -> SkillWorkflow {
@@ -1653,9 +1807,76 @@ mod tests {
     }
 
     #[test]
-    fn test_allows_when_no_phase_files_on_disk() {
-        // Phase gate skips enforcement when phase files don't exist on disk.
-        // Use a fake skill name that definitely has no phase files.
+    fn context_only_active_skill_does_not_trigger_workflow_gate() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "echo hi" })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows, &test_fs());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !state.has_any_graph_workflow(),
+            "context-only active_skill must not synthesize LangGraph workflow authority"
+        );
+    }
+
+    #[test]
+    fn context_only_active_skill_does_not_protect_skill_md() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let skill_md = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude/skills/linear/SKILL.md");
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": skill_md.to_string_lossy() })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows, &test_fs());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !state.has_any_graph_workflow(),
+            "SKILL.md protection for workflow skills requires LangGraph projection"
+        );
+    }
+
+    #[test]
+    fn context_only_active_skill_does_not_apply_blocked_bash_patterns() {
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        let mut workflow = test_workflow();
+        workflow.blocked_bash_patterns = vec!["rm -rf".to_string()];
+        let workflows = HashMap::from([("linear".to_string(), workflow)]);
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "rm -rf /tmp/sentinel-test" })),
+            ..Default::default()
+        };
+        let output = process(&input, &mut state, &workflows, &test_fs());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !state.has_any_graph_workflow(),
+            "blocked bash patterns require LangGraph-projected workflow state"
+        );
+    }
+
+    #[test]
+    fn test_blocks_when_no_phase_files_on_disk() {
+        // Active configured workflows fail closed when their phase directory is
+        // missing. Use a fake skill name that definitely has no phase files.
         let fake_workflow = SkillWorkflow {
             skill: "nonexistent-test-skill".to_string(),
             phases: vec![WorkflowPhase {
@@ -1672,6 +1893,10 @@ mod tests {
         };
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("nonexistent-test-skill");
+        state.set_graph_projected_workflow(
+            "nonexistent-test-skill",
+            WorkflowState::new("nonexistent-test-skill", "sess-1"),
+        );
         let mut workflows = HashMap::new();
         workflows.insert("nonexistent-test-skill".to_string(), fake_workflow);
 
@@ -1680,23 +1905,19 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &mut state, &workflows, &test_fs());
-        // No phase files on disk → gate allows
-        assert!(output.blocked.is_none());
+        assert_eq!(output.blocked, Some(true));
     }
 
     #[test]
-    fn test_blocks_when_phase_files_exist_and_workflow_entered() {
-        // Phase gate enforces when phase files exist on disk AND the workflow has
-        // actually been ENTERED (a phase file was read). Uses "linear" which has
-        // real phase files at ~/.claude/skills/linear/phases/.
-        //
-        // NOTE: entry is simulated by record_phase_read("linear", "claim.md").
-        // Without entry, the never-entered downgrade (phantom-arming fix) applies
-        // and the gate ALLOWS — see test_never_entered_workflow_does_not_block.
+    fn test_blocks_when_phase_files_exist_and_next_phase_unread() {
+        // Phase gate enforces when the next required phase file was not read.
+        // Uses "linear" which has real phase files at
+        // ~/.claude/skills/linear/phases/.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
-        // Simulate workflow entry so enforcement is active (not a phantom arm).
-        state.record_phase_read("linear", "claim.md");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
+        // A later phase read cannot satisfy the first required phase.
+        state.record_phase_read("linear", "fetch.md");
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
@@ -1705,72 +1926,47 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &mut state, &workflows, &test_fs());
-
-        // Check if linear phase files exist on this machine
-        let claim_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".claude/skills/linear/phases/claim.md");
-        if claim_path.exists() {
-            // Phase files exist + workflow entered → gate blocks.
-            // (claim.md was "read" but the claim phase isn't COMPLETE — reading a
-            // phase file marks entry; completion needs the trusted-read advance in
-            // production process(), which the direct record_phase_read here doesn't
-            // trigger. So fetch/review etc. are still gated.)
-            assert_eq!(output.blocked, Some(true));
-            let reason = output
-                .hook_specific_output
-                .as_ref()
-                .and_then(|h| h.permission_decision_reason.as_deref())
-                .or(output.reason.as_deref())
-                .unwrap();
-            assert!(reason.contains("BLOCKED") || reason.contains("claim"));
-        } else {
-            // No phase files → gate allows (CI/other machines)
-            assert!(output.blocked.is_none());
-        }
+        assert_eq!(output.blocked, Some(true));
+        let reason = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.permission_decision_reason.as_deref())
+            .or(output.reason.as_deref())
+            .unwrap();
+        assert!(reason.contains("BLOCKED") || reason.contains("claim"));
     }
 
     #[test]
-    fn test_never_entered_workflow_does_not_block() {
-        // REGRESSION (phantom-arming deadlock): a `linear` workflow that became
-        // "active" via a topical skill-router match — with ZERO phases completed
-        // and ZERO phase files read — must NOT hard-block unrelated tools. Before
-        // the fix, this trapped the entire session (every Bash/Write/Edit denied)
-        // with the only escape being to actually claim a Linear issue.
-        //
-        // This must hold REGARDLESS of whether linear/phases/*.md exist on disk
-        // (they DO on the dev box, which is exactly what triggered the original
-        // bug), so unlike the sibling test there is no exists() branch — the
-        // never-entered downgrade fires before the on-disk phase check.
+    fn test_active_workflow_blocks_before_phase_entry() {
+        // Active workflows fail closed for mutating tools even before any phase
+        // file has been read. Reading the exact next phase remains the unlock.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
-        // No record_phase_read, no completed phase → never entered.
+        // No record_phase_read, no completed phase.
         for tool in ["Bash", "Write", "Edit"] {
             let input = HookInput {
                 tool_name: Some((*tool).to_string()),
-                tool_input: Some(serde_json::json!({ "command": "echo hi", "file_path": "/tmp/x" })),
+                tool_input: Some(
+                    serde_json::json!({ "command": "echo hi", "file_path": "/tmp/x" }),
+                ),
                 ..Default::default()
             };
             let output = process(&input, &mut state, &workflows, &test_fs());
-            assert!(
-                output.blocked.is_none(),
-                "never-entered `linear` workflow must not block `{tool}` (phantom-arming deadlock)"
-            );
+            assert_eq!(output.blocked, Some(true), "`{tool}` should be gated");
         }
     }
 
     #[test]
-    fn test_phantom_active_skill_can_edit_own_skill_md() {
-        // REGRESSION (phantom-arming, SKILL.md self-mod guard): when `linear` is
-        // active_skill only via a topical router match (never entered), editing
-        // ~/.claude/skills/linear/SKILL.md must be ALLOWED — phantom-active skills
-        // don't lock their own definition. (Authoring a skill's SKILL.md was getting
-        // trapped the same way unrelated tool calls were.)
+    fn test_active_skill_cannot_edit_own_skill_md_before_phase_entry() {
+        // The active workflow cannot rewrite its own instructions, even before
+        // a phase file has been read.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
@@ -1783,24 +1979,71 @@ mod tests {
             ..Default::default()
         };
         let output = process(&input, &mut state, &workflows, &test_fs());
-        assert!(
-            output.blocked.is_none(),
-            "phantom-active `linear` (never entered) must not lock its own SKILL.md"
-        );
-
-        // Once the workflow is ENTERED (a phase file read), self-modification
-        // protection re-engages and the same edit is blocked.
-        state.record_phase_read("linear", "claim.md");
-        let output2 = process(&input, &mut state, &workflows, &test_fs());
         assert_eq!(
-            output2.blocked,
+            output.blocked,
             Some(true),
-            "entered `linear` workflow must protect its own SKILL.md (self-mod guard)"
+            "active `linear` workflow must protect its own SKILL.md"
         );
     }
 
     #[test]
-    fn test_read_on_phase_file_records_and_advances() {
+    fn test_phase_gate_override_requires_concrete_session_id() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        };
+        let skill_md = tmpdir.path().join(".claude/skills/linear/SKILL.md");
+        std::fs::create_dir_all(skill_md.parent().unwrap()).unwrap();
+        std::fs::write(&skill_md, "# Linear\n").unwrap();
+
+        let mut state = SessionState::new("sess-1");
+        state.set_active_skill("linear");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
+        let mut workflows = HashMap::new();
+        workflows.insert("linear".to_string(), test_workflow());
+
+        let unknown_override =
+            super::super::hygiene_override::phase_gate_override_path(&fs, "unknown");
+        super::super::hygiene_override::write_signed_override_for_test(
+            &fs,
+            &unknown_override,
+            "phase-gate",
+            "unknown",
+        );
+
+        let missing_session_input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": skill_md.to_string_lossy() })),
+            session_id: None,
+            ..Default::default()
+        };
+        let output = check_protected_path_write(&fs, &state, &workflows, &missing_session_input)
+            .expect("protected edit must block without concrete session id");
+        assert_eq!(output.blocked, Some(true));
+
+        let concrete_session = "phase-gate-real-session";
+        let concrete_override =
+            super::super::hygiene_override::phase_gate_override_path(&fs, concrete_session);
+        super::super::hygiene_override::write_signed_override_for_test(
+            &fs,
+            &concrete_override,
+            "phase-gate",
+            concrete_session,
+        );
+        let concrete_session_input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": skill_md.to_string_lossy() })),
+            session_id: Some(concrete_session.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            check_protected_path_write(&fs, &state, &workflows, &concrete_session_input).is_none(),
+            "concrete signed phase-gate override should still allow scoped skill edit"
+        );
+    }
+
+    #[test]
+    fn test_read_on_phase_file_records_without_mutating_workflow_phase() {
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("linear");
         let mut workflows = HashMap::new();
@@ -1810,6 +2053,9 @@ mod tests {
         let claim_path = dirs::home_dir()
             .unwrap()
             .join(".claude/skills/linear/phases/claim.md");
+        if claim_path.exists() {
+            state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess-1"));
+        }
 
         let input = HookInput {
             tool_name: Some("Read".to_string()),
@@ -1823,35 +2069,37 @@ mod tests {
         assert!(output.blocked.is_none());
 
         if claim_path.exists() {
-            // File exists on disk → trusted → record happens AND
-            // workflow advances.
+            // File exists on disk → trusted → record happens. Workflow position
+            // and completion remain reserved for LangGraph-backed
+            // submit_phase_complete.
             assert!(state.has_phase_been_read("linear", "claim.md"));
-            let wf_state = state.workflows.get("linear").unwrap();
-            assert!(wf_state.is_phase_complete("claim"));
+            let wf_state = state.graph_workflow("linear").unwrap();
+            assert_eq!(wf_state.current_phase, None);
+            assert!(
+                wf_state.completed_phases.is_empty(),
+                "phase reads must not complete workflow phases"
+            );
         } else {
             // File doesn't exist (CI/other machines) → untrusted →
-            // NO record AND no advance (production
+            // NO record AND no phase entry (production
             // `phase_gate::process` rejects untrusted phase reads
-            // up-front to prevent phantom phase completion via
+            // up-front to prevent phantom phase entry via
             // crafted paths).
             assert!(!state.has_phase_been_read("linear", "claim.md"));
-            assert!(
-                state.workflows.get("linear").is_none()
-                    || !state
-                        .workflows
-                        .get("linear")
-                        .unwrap()
-                        .is_phase_complete("claim")
-            );
+            assert!(!state.has_any_graph_workflow());
         }
     }
 
     #[test]
     fn test_read_derives_skill_from_path() {
-        // Even if active_skill is different, the phase advance should use
-        // the skill derived from the path, not active_skill.
+        // Even if active_skill is different, phase-read evidence should use the
+        // skill derived from the path, not active_skill.
         let mut state = SessionState::new("sess-1");
         state.set_active_skill("some-other-skill");
+        state.set_graph_projected_workflow(
+            "some-other-skill",
+            WorkflowState::new("some-other-skill", "sess-1"),
+        );
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
@@ -1870,14 +2118,20 @@ mod tests {
         assert!(output.blocked.is_none());
 
         if claim_path.exists() {
-            // File exists → trusted → recorded AND advances
-            // "linear" (from path), not "some-other-skill".
+            // File exists → trusted → recorded under "linear" (from path),
+            // not "some-other-skill".
             assert!(state.has_phase_been_read("linear", "claim.md"));
-            let wf_state = state.workflows.get("linear").unwrap();
-            assert!(wf_state.is_phase_complete("claim"));
+            assert!(!state.has_phase_been_read("some-other-skill", "claim.md"));
+            assert!(
+                state.graph_workflow("linear").is_none(),
+                "phase reads must not create or mutate workflow state"
+            );
+            let other = state.graph_workflow("some-other-skill").unwrap();
+            assert_eq!(other.current_phase, None);
+            assert!(other.completed_phases.is_empty());
         } else {
             // File doesn't exist → untrusted → not recorded, no
-            // advance. Pins the security hardening: untrusted
+            // phase entry. Pins the security hardening: untrusted
             // reads never touch state.
             assert!(!state.has_phase_been_read("linear", "claim.md"));
         }
@@ -1908,14 +2162,7 @@ mod tests {
         // (Patch 23: only trusted reads are recorded to prevent progress inflation)
         assert!(!state.has_phase_been_read("linear", "evil-phase.md"));
         // No workflow state should be created for unknown phases
-        assert!(
-            state.workflows.get("linear").is_none()
-                || !state
-                    .workflows
-                    .get("linear")
-                    .unwrap()
-                    .is_phase_complete("evil-phase")
-        );
+        assert!(!state.has_graph_workflow("linear"));
     }
 
     #[test]
@@ -1990,13 +2237,10 @@ mod tests {
         state.record_phase_read("linear", "fetch.md");
         state.record_phase_read("linear", "review.md");
 
-        // Complete claim, fetch, review phases so gate doesn't block on those
-        let tw = test_workflow();
-        if let Some(wf) = state.workflows.get_mut("linear") {
-            wf.advance_sequential("claim", &tw);
-            wf.advance_sequential("fetch", &tw);
-            wf.advance_sequential("review", &tw);
-        }
+        let mut wf_state = WorkflowState::new("linear", "sess-1");
+        wf_state.completed_phases = vec!["claim".into(), "fetch".into(), "review".into()];
+        wf_state.current_phase = Some(3);
+        state.set_graph_projected_workflow("linear", wf_state);
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
@@ -2027,14 +2271,16 @@ mod tests {
         state.record_phase_read("linear", "review.md");
         state.record_phase_read("linear", "qa-handoff.md");
 
-        // Complete all phases
-        let tw = test_workflow();
-        if let Some(wf) = state.workflows.get_mut("linear") {
-            wf.advance_sequential("claim", &tw);
-            wf.advance_sequential("fetch", &tw);
-            wf.advance_sequential("review", &tw);
-            wf.advance_sequential("qa-handoff", &tw);
-        }
+        let mut wf_state = WorkflowState::new("linear", "sess-1");
+        wf_state.completed_phases = vec![
+            "claim".into(),
+            "fetch".into(),
+            "review".into(),
+            "qa-handoff".into(),
+        ];
+        wf_state.current_phase = Some(4);
+        wf_state.complete = true;
+        state.set_graph_projected_workflow("linear", wf_state);
 
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
@@ -2083,14 +2329,7 @@ mod tests {
 
         // Untrusted -> not recorded and no workflow advance.
         assert!(!state.has_phase_been_read("linear", "claim.md"));
-        assert!(
-            state.workflows.get("linear").is_none()
-                || !state
-                    .workflows
-                    .get("linear")
-                    .unwrap()
-                    .is_phase_complete("claim")
-        );
+        assert!(!state.has_graph_workflow("linear"));
     }
 
     #[test]
@@ -2119,14 +2358,16 @@ mod tests {
         // Trusted operator-registered servers (Gary: "MCPs are safe") — all
         // their tools are trusted, including browser navigate/evaluate/click
         // and linear mutations, because the operator controls these servers.
-        assert!(!is_dangerous_mcp_tool("mcp__steel__click"));
-        assert!(!is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
-        assert!(!is_dangerous_mcp_tool("mcp__steel__navigate"));
         assert!(!is_dangerous_mcp_tool("mcp__browserbase__evaluate"));
         assert!(!is_dangerous_mcp_tool("mcp__browserbase__navigate"));
         assert!(!is_dangerous_mcp_tool("mcp__cdp__evaluate"));
         assert!(!is_dangerous_mcp_tool("mcp__linear__create_issue"));
         assert!(!is_dangerous_mcp_tool("mcp__linear__delete_issue"));
+
+        // Retired browser-server aliases are not trusted compatibility paths.
+        assert!(is_dangerous_mcp_tool("mcp__steel__click"));
+        assert!(is_dangerous_mcp_tool("mcp__steel__evaluate_js"));
+        assert!(is_dangerous_mcp_tool("mcp__steel__navigate"));
 
         // Read-only verbs on untrusted servers are still safe (verb-level).
         assert!(!is_dangerous_mcp_tool("mcp__codex__read_file"));
@@ -2167,8 +2408,14 @@ mod tests {
     #[test]
     fn test_infra_source_bypass_only_when_armed_and_only_repo_source() {
         // Repo source is bypassable only when armed.
-        assert!(infra_source_bypass("sentinel infrastructure source code", true));
-        assert!(!infra_source_bypass("sentinel infrastructure source code", false));
+        assert!(infra_source_bypass(
+            "sentinel infrastructure source code",
+            true
+        ));
+        assert!(!infra_source_bypass(
+            "sentinel infrastructure source code",
+            false
+        ));
 
         // Reasons that can neuter a running engine are NEVER bypassed, even armed.
         for reason in [
@@ -2225,19 +2472,37 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             Some(self.0.clone())
         }
-        fn read_to_string(&self, _: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            _: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(String::new())
         }
-        fn write(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
             Ok(vec![])
         }
         fn exists(&self, _: &Path) -> bool {
@@ -2246,8 +2511,13 @@ mod tests {
         fn is_dir(&self, _: &Path) -> bool {
             false
         }
-        fn metadata(&self, _: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("not implemented".into()))
+        fn metadata(
+            &self,
+            _: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "not implemented".into(),
+            ))
         }
     }
 
@@ -2287,7 +2557,10 @@ mod tests {
     fn cat_sentinel_path_is_not_blocked() {
         let cmd = "cat /home/gary/.claude/sentinel/config/settings.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_none(), "cat reading a sentinel path must not be blocked");
+        assert!(
+            result.is_none(),
+            "cat reading a sentinel path must not be blocked"
+        );
     }
 
     #[test]
@@ -2301,7 +2574,10 @@ mod tests {
     fn find_sentinel_path_is_not_blocked() {
         let cmd = "find /home/gary/.claude/sentinel -name '*.json'";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_none(), "find reading sentinel path must not be blocked");
+        assert!(
+            result.is_none(),
+            "find reading sentinel path must not be blocked"
+        );
     }
 
     #[test]
@@ -2309,7 +2585,10 @@ mod tests {
         // ripgrep — another common search tool
         let cmd = "rg 'pattern' /home/gary/.claude/sentinel";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_none(), "rg reading sentinel path must not be blocked");
+        assert!(
+            result.is_none(),
+            "rg reading sentinel path must not be blocked"
+        );
     }
 
     // True-positive checks — write operations targeting sentinel paths must still block.
@@ -2318,14 +2597,20 @@ mod tests {
     fn redirect_gt_to_sentinel_path_is_blocked() {
         let cmd = "echo 'data' > /home/gary/.claude/sentinel/state/test.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_some(), "> redirect to sentinel path must be blocked (true-positive)");
+        assert!(
+            result.is_some(),
+            "> redirect to sentinel path must be blocked (true-positive)"
+        );
     }
 
     #[test]
     fn redirect_append_to_sentinel_path_is_blocked() {
         let cmd = "echo 'line' >> /home/gary/.claude/sentinel/state/test.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_some(), ">> redirect to sentinel path must be blocked");
+        assert!(
+            result.is_some(),
+            ">> redirect to sentinel path must be blocked"
+        );
     }
 
     #[test]
@@ -2354,7 +2639,10 @@ mod tests {
         // The standalone `ln` command (with word boundary) must still be blocked.
         let cmd = "ln -s /tmp/evil /home/gary/.claude/sentinel/config/hook.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
-        assert!(result.is_some(), "ln command symlinking into sentinel path must be blocked");
+        assert!(
+            result.is_some(),
+            "ln command symlinking into sentinel path must be blocked"
+        );
     }
 
     #[test]

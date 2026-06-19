@@ -5,7 +5,7 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-use super::HookContext;
+use super::{concrete_input_session_id, HookContext};
 
 /// Process `PostCompact` event
 ///
@@ -22,7 +22,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // Read active skill from session state
     let active_skill = ctx.fs.home_dir().and_then(|home| {
-        let session_id = input.session_id.as_deref()?;
+        let session_id = concrete_input_session_id(input)?;
         let state_path = home
             .join(".claude")
             .join("sentinel")
@@ -51,6 +51,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
 
     #[test]
     fn test_post_compact_without_skill() {
@@ -58,5 +59,73 @@ mod tests {
         let input = HookInput::default();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_consume_unknown_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let state_dir = tmp.path().join(".claude").join("sentinel").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("unknown.json"),
+            r#"{"active_skill":"linear"}"#,
+        )
+        .unwrap();
+
+        let output = process(&HookInput::default(), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn synthetic_session_does_not_consume_unknown_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let state_dir = tmp.path().join(".claude").join("sentinel").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("unknown.json"),
+            r#"{"active_skill":"linear"}"#,
+        )
+        .unwrap();
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn concrete_session_recovers_active_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let state_dir = tmp.path().join(".claude").join("sentinel").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("post-compact-session.json"),
+            r#"{"active_skill":"linear"}"#,
+        )
+        .unwrap();
+        let input = HookInput {
+            session_id: Some("post-compact-session".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+
+        let context = output
+            .hook_specific_output
+            .and_then(|hook| hook.additional_context)
+            .expect("active skill context");
+        assert!(context.contains("Active skill: linear"));
     }
 }

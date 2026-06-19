@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Test Skill — Step Definitions
 # 30 individually trackable steps across 5 phases
 #

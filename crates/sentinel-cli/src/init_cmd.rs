@@ -96,9 +96,9 @@ fn run_single(repo: &PathBuf, dry_run: bool, force: bool) -> anyhow::Result<()> 
 }
 
 fn run_batch(dry_run: bool, force: bool) -> anyhow::Result<()> {
-    let github_dir = dirs::home_dir()
-        .map(|h| h.join("Documents").join("GitHub"))
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let github_dir = sentinel_infrastructure::paths::home_root_or_fatal()
+        .join("Documents")
+        .join("GitHub");
     let repos = project_init::discover_repos(&github_dir);
 
     eprintln!(

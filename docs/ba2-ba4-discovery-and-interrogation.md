@@ -9,7 +9,7 @@
 - `docs/a13-spec-challenge.md` (A13) — A13's orchestration-start challenge produces the initial gap list; BA2/BA4 expand each gap into either automated or interrogated discovery work
 - `docs/ba1-ba3-sentinel-enforcement.md` — interrogation answers become `ArtifactReference`s with `ProvenanceClass::Interview`; same enforcement rules apply
 - `docs/ba5-adversarial-deck-critique.md` — BA5 reads discovery completeness (was a gap closed by automated retrieval, interrogated answer, or only inference?) when scoring artifacts
-- Consul ADR-016 (Consul Peer Registration) + ADR-017 (Artifact + Requirement Metadata Extensions) — interrogation messages flow through consul to the human; the protocol respects the human-commander framing
+- Legatus AI ADR-016 (Legatus AI Peer Registration) + ADR-017 (Artifact + Requirement Metadata Extensions) — interrogation messages flow through Legatus AI to the human; the protocol respects the human-commander framing
 - Memory: `architecture-hexagonal-ddd`
 
 ---
@@ -19,9 +19,9 @@
 BA2 makes **discovery — the act of acquiring the data a BA recommendation needs — a first-class primitive** with two named modes:
 
 - **Automated discovery** (the BA2-A half): scheduled and on-demand pulls from MCP-connected systems of record (per BA6). Already well-trodden; this doc just names it and slots it into the discovery ledger.
-- **Interrogated discovery** (the BA2-I / BA4 half): structured Q&A with stakeholders, routed through consul, batched by stakeholder, scheduled around availability, follow-up-aware, escalation-routed when answers don't arrive. **This is the novel half.** No current agent system treats interrogation as a primitive; agents either silently infer or write free-form chat — neither produces auditable provenance.
+- **Interrogated discovery** (the BA2-I / BA4 half): structured Q&A with stakeholders, routed through Legatus AI, batched by stakeholder, scheduled around availability, follow-up-aware, escalation-routed when answers don't arrive. **This is the novel half.** No current agent system treats interrogation as a primitive; agents either silently infer or write free-form chat — neither produces auditable provenance.
 
-Both modes write to a **shared discovery ledger** that the BA-orchestrator consults to know: what data does the orchestration need (from A13's gaps), what has it acquired, what is it still missing, what has been asked but not answered. The ledger drives the orchestration's next-step decision.
+Both modes write to a **shared discovery ledger** that the BA-orchestrator queries to know: what data does the orchestration need (from A13's gaps), what has it acquired, what is it still missing, what has been asked but not answered. The ledger drives the orchestration's next-step decision.
 
 The discipline this enables: every BA recommendation traces (via BA3's requirements traceability matrix) back through the artifacts that informed it, and every artifact is either a system-of-record pull or an interview-answered question — never an inference passed off as data. Inferences are still allowed, but they're explicitly typed as `ProvenanceClass::Inference` in the artifact reference, and downstream BA5 critique catches them as such.
 
@@ -153,7 +153,7 @@ Stakeholders dislike being interrogated piecemeal. The discovery-coordinator hoo
 
 - Per-stakeholder queue per orchestration.
 - Batches flush on a schedule (e.g., once per business day) OR when accumulated questions reach a threshold (e.g., 5 questions OR any one is `Catastrophic-blocked`).
-- The batch is delivered as a single structured message via consul (per consul's voice/text supervision channel — the operator's consul session) to the stakeholder, NOT a chat avalanche.
+- The batch is delivered as a single structured message via Legatus AI (per Legatus AI's voice/text supervision channel — the operator's Legatus AI session) to the stakeholder, NOT a chat avalanche.
 
 The operator can configure per-stakeholder batching policies in `config/ba-interrogation.toml`:
 
@@ -174,11 +174,11 @@ batching = { mode = "threshold", threshold = 5 }
 preferred_response_window = "1h"
 ```
 
-### 4.3 Routing via consul
+### 4.3 Routing via Legatus AI
 
-Interrogation messages flow through consul (per consul ADR-016's `HumanOperator` consul peer identity). The BA-orchestrator (an `AutomatedOrchestrator` peer per ADR-016) emits an interrogation request to consul; consul routes the request via the human-operator's voice/text supervision channel; the operator relays to the stakeholder (or the system stakeholder for some channels).
+Interrogation messages flow through Legatus AI (per Legatus AI ADR-016's `HumanOperator` Legatus AI peer identity). The BA-orchestrator (an `AutomatedOrchestrator` peer per ADR-016) emits an interrogation request to Legatus AI; Legatus AI routes the request via the human-operator's voice/text supervision channel; the operator relays to the stakeholder (or the system stakeholder for some channels).
 
-This respects the architecture's human-commander framing: the BA-orchestrator never speaks directly to stakeholders; the operator's consul-app is the channel. The operator can:
+This respects the architecture's human-commander framing: the BA-orchestrator never speaks directly to stakeholders; the operator's legatus-ai-app is the channel. The operator can:
 - Forward the batch directly (most common).
 - Edit before forwarding (clarifying or rephrasing).
 - Reject (this question shouldn't be asked).
@@ -203,7 +203,7 @@ Each question has an optional `timeout`. When the timeout elapses without an ans
 
 - **Low urgency**: question marked `Abandoned { reason: NoResponseWithinTimeout }`; orchestrator proceeds with explicit `Inferred` for the underlying gap (BA5 critique will flag the inference downstream).
 - **Standard urgency**: question marked `Escalated { to: stakeholder_manager_or_alternate }`; same batching applies for the escalation target.
-- **High urgency** or **Catastrophic-blocked**: orchestration pauses, surfaces via consul to the operator with explicit "this question is blocking work; the stakeholder hasn't answered in T time."
+- **High urgency** or **Catastrophic-blocked**: orchestration pauses, surfaces via Legatus AI to the operator with explicit "this question is blocking work; the stakeholder hasn't answered in T time."
 
 Escalation paths are operator-configured in `config/ba-interrogation.toml`'s stakeholder hierarchy.
 
@@ -266,12 +266,12 @@ The chain is auditable. Every recommendation can be traced back to either an int
 
 - **`sentinel-domain/src/ba/discovery.rs`** (new): `DiscoveryLedger`, `DiscoveryEntry`, `DiscoveryEntryId`, `DiscoveryMode`, `DiscoveryStatus`, `DiscoveryResponse`, `InterrogationQuestion`, `QuestionId`, `QuestionIntent`, `AnswerShape`, `Urgency`, `StakeholderRef`, `ResponderRef`, `InferenceConfidence`. Pure data.
 - **`sentinel-domain/src/ports/discovery_ledger_store.rs`** (new): `DiscoveryLedgerStorePort` trait — load/save/query the ledger. Pure trait.
-- **`sentinel-domain/src/ports/interrogation_channel.rs`** (new): `InterrogationChannelPort` trait — `dispatch_batch(stakeholder, batch) -> Result<...>`. Pure trait. The adapter is the consul connection.
+- **`sentinel-domain/src/ports/interrogation_channel.rs`** (new): `InterrogationChannelPort` trait — `dispatch_batch(stakeholder, batch) -> Result<...>`. Pure trait. The adapter is the Legatus AI connection.
 - **`sentinel-application/src/hooks/ba_discovery_coordinator.rs`** (new): the hook. Runs as a PostToolUse on A13's challenge emission (to seed entries from gaps), as a periodic batched dispatch (per stakeholder cron), and as a PreToolUse on BA-orchestrator's "I want to use data X" tool calls (to check if X is in the ledger).
-- **`sentinel-infrastructure/src/discovery/`** (new adapter dir): `ledger_store/` (SQLite/JSONL adapter for the ledger), `interrogation_channel/` (consul adapter that wraps consul ADR-016/017 messages).
+- **`sentinel-infrastructure/src/discovery/`** (new adapter dir): `ledger_store/` (SQLite/JSONL adapter for the ledger), `interrogation_channel/` (Legatus AI adapter that wraps Legatus AI ADR-016/017 messages).
 - **`config/ba-interrogation.toml`** (new, operator-managed): stakeholder registry + batching policies + escalation hierarchy.
 
-All hex/DDD-respecting per `[[architecture-hexagonal-ddd]]`. Pure value objects in domain. Two new ports. Adapters in infrastructure (one consults consul, one is a local store). In-memory adapters for tests.
+All hex/DDD-respecting per `[[architecture-hexagonal-ddd]]`. Pure value objects in domain. Two new ports. Adapters in infrastructure (one queries Legatus AI, one is a local store). In-memory adapters for tests.
 
 ---
 
@@ -291,11 +291,11 @@ Stakeholder fatigue is real. Mitigations: per-stakeholder batch size caps in con
 
 ### 8.4 The operator can't always be the channel
 
-For some workflows the operator isn't the right intermediary (e.g., a stakeholder the operator has no relationship with). The `channels` array per stakeholder in config allows direct channels (email, Slack DM) — but every direct-channel message *still* goes through consul's audit. The operator sees the dispatch even if they aren't relaying.
+For some workflows the operator isn't the right intermediary (e.g., a stakeholder the operator has no relationship with). The `channels` array per stakeholder in config allows direct channels (email, Slack DM) — but every direct-channel message *still* goes through Legatus AI's audit. The operator sees the dispatch even if they aren't relaying.
 
 ### 8.5 Interrogation crosses tenant boundaries
 
-For multi-tenant deployments, interrogation must not leak one tenant's questions to another tenant's stakeholders. Same tenant-scoping concern as BA1, BA5, BA6, A3 — capability tokens (consul ADR-018) provide the boundary; Phase 1 (sandbox) is single-tenant only.
+For multi-tenant deployments, interrogation must not leak one tenant's questions to another tenant's stakeholders. Same tenant-scoping concern as BA1, BA5, BA6, A3 — capability tokens (Legatus AI ADR-018) provide the boundary; Phase 1 (sandbox) is single-tenant only.
 
 ### 8.6 Inference quietly proliferates
 
@@ -319,22 +319,22 @@ If the orchestrator defaults to `Inferred` mode too readily, the ledger fills wi
 
 ## 10. Open questions
 
-1. **Should the stakeholder registry support free-form metadata?** (E.g., "this stakeholder prefers concrete examples in questions"). Recommend yes; `metadata: HashMap<String, String>` field on the stakeholder; prompt templates can consult it for question tone.
+1. **Should the stakeholder registry support free-form metadata?** (E.g., "this stakeholder prefers concrete examples in questions"). Recommend yes; `metadata: HashMap<String, String>` field on the stakeholder; prompt templates can query it for question tone.
 
 2. **What about anonymous answers?** (E.g., survey-style responses where the stakeholder identity is intentionally not in the audit trail.) Out of scope for v1; the protocol assumes identified stakeholders. A future ADR can add anonymity-supporting modes.
 
-3. **Real-time interrogation for voice consul sessions?** Today the model is batched + scheduled. Could the operator's consul-app surface "the orchestrator is asking X; want me to ask the stakeholder now?" in voice? Recommend yes as a v2; v1 ships batched-async only.
+3. **Real-time interrogation for voice Legatus AI sessions?** Today the model is batched + scheduled. Could the operator's legatus-ai-app surface "the orchestrator is asking X; want me to ask the stakeholder now?" in voice? Recommend yes as a v2; v1 ships batched-async only.
 
 4. **Stakeholder-side authoring of structured answers.** Today the operator relays free-text and translates to the structured `AnswerShape`. Could the stakeholder fill in a structured form directly? Possible for some channels (email with structured templates); flagged for future work.
 
-5. **Discovery-graph visualization.** The ledger forms a graph (gaps → entries → artifacts → requirements → recommendations). An operator-facing dashboard rendering this would be valuable. Out of scope for this design doc; flagged.
+5. **Discovery-graph visualization.** The ledger forms a graph (gaps → entries → artifacts → requirements → recommendations). An operator-facing report rendering this would be valuable. Out of scope for this design doc; flagged.
 
 ---
 
 ## 11. Decision and ownership
 
 - **Decision class:** sentinel architectural change. Adds a value-object module, two ports, a hook, an adapter directory, and one new config file.
-- **Owner:** Gary Somerhalder ratifies. Co-requires A13 (the challenge seeds the ledger), BA6 (the automated mode), BA1+BA3 enforcement (the audit + traceability of answers), consul ADR-016+017 (the interrogation transport).
+- **Owner:** Gary Somerhalder ratifies. Co-requires A13 (the challenge seeds the ledger), BA6 (the automated mode), BA1+BA3 enforcement (the audit + traceability of answers), Legatus AI ADR-016+017 (the interrogation transport).
 - **Re-evaluation cadence:** revisit after first 100 interrogations across N orchestrations — calibrate batching defaults, escalation thresholds, inference-ratio warning level.
 - **Related items in the brief:** BA2 (this — automated half), BA4 (this — interrogated half), A13 (substrate), BA6 (automated substrate), BA1 (citation enforcement), BA3 (traceability), BA5 (consumer — inference-ratio feeds critique).
 
@@ -355,5 +355,5 @@ Ratification commits Sentinel to:
 - Building `DiscoveryLedger` + `DiscoveryLedgerStorePort` + `InterrogationChannelPort` and adapters.
 - Building the `ba_discovery_coordinator` hook.
 - Shipping `config/ba-interrogation.toml` with the documented stakeholder schema.
-- Routing interrogation through consul peers (per ADR-016/017).
+- Routing interrogation through Legatus AI peers (per ADR-016/017).
 - Treating A13, BA6, BA1+BA3 enforcement as co-requirements.

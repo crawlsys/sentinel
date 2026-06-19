@@ -27,7 +27,7 @@
 //! [`SpanHandle::trace_context`] returns the W3C [`TraceContext`] for
 //! the active span. The hook stamps that context onto the `StepProof` it
 //! emits — making the proof chain queryable by `trace_id`, and giving
-//! Tempo / Honeycomb dashboards a back-link via `step_id` / `phase_id`
+//! Tempo / Honeycomb views a back-link via `step_id` / `phase_id`
 //! attributes.
 
 use sentinel_domain::tracing::TraceContext;
@@ -132,7 +132,7 @@ pub struct SpanHandle {
     pub kind: SpanKind,
 
     /// Span name — usually `"step.{skill}.{phase}.{step_id}"` for
-    /// step-level spans. Free-form; exporters use it as the dashboard
+    /// step-level spans. Free-form; exporters use it as the operator-view
     /// row label.
     pub name: String,
 }
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn no_op_start_span_inherits_parent_context() {
         // Inbound traceparent → outbound StepProof must carry the same
-        // trace_id so dashboards correlate. NoOp upholds the contract
+        // trace_id so reports correlate. NoOp upholds the contract
         // by cloning the parent ctx.
         let t = NoOpTracer;
         let parent = valid_ctx();

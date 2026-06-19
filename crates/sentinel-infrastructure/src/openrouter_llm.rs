@@ -27,8 +27,8 @@ pub struct OpenRouterLlm {
 }
 
 impl OpenRouterLlm {
-    /// Build from `OPENROUTER_API_KEY`. `Err` if the key is unset so callers
-    /// can fall back / treat `ctx.llm` as `None`.
+    /// Build from `OPENROUTER_API_KEY`. `Err` if the key is unset so callers can
+    /// fail closed or disable LLM-backed behavior explicitly.
     pub fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let client = openrouter::Client::new(&key)
@@ -75,14 +75,11 @@ impl LlmPort for OpenRouterLlm {
             .temperature(0.0)
             .additional_params(serde_json::json!({ "max_tokens": max_tokens }))
             .build();
-        agent
-            .prompt(request.prompt)
-            .await
-            .map_err(|e| {
-                sentinel_domain::port_errors::LlmError::Backend(format!(
-                    "OpenRouter completion ({model_id}): {e}"
-                ))
-            })
+        agent.prompt(request.prompt).await.map_err(|e| {
+            sentinel_domain::port_errors::LlmError::Backend(format!(
+                "OpenRouter completion ({model_id}): {e}"
+            ))
+        })
     }
 }
 
@@ -101,9 +98,18 @@ mod tests {
     #[test]
     fn maps_all_tiers_to_opus_or_codex_only() {
         // Policy: only Opus 4.8 + Codex on OpenRouter — no Haiku/Sonnet/Cerebras.
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Haiku), "openai/gpt-5.5-pro");
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Sonnet), "anthropic/claude-opus-4.8");
-        assert_eq!(OpenRouterLlm::model_id(LlmModel::Opus), "anthropic/claude-opus-4.8");
+        assert_eq!(
+            OpenRouterLlm::model_id(LlmModel::Haiku),
+            "openai/gpt-5.5-pro"
+        );
+        assert_eq!(
+            OpenRouterLlm::model_id(LlmModel::Sonnet),
+            "anthropic/claude-opus-4.8"
+        );
+        assert_eq!(
+            OpenRouterLlm::model_id(LlmModel::Opus),
+            "anthropic/claude-opus-4.8"
+        );
     }
 
     #[test]
@@ -116,5 +122,4 @@ mod tests {
             std::env::set_var("OPENROUTER_API_KEY", k);
         }
     }
-
 }

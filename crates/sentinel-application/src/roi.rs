@@ -15,8 +15,8 @@
 //! * `tickets_shipped` — distinct ticket count in window
 //! * `points_shipped`  — sum of estimates in window (when SEN-13 has data)
 //! * `claude_cost_per_point` — SEN-13 median when present, else
-//!   `claude_cost_usd / points_shipped`, else fallback `cost / tickets`.
-//! * `human_cost_usd` — `points * $327` (or fallback `tickets * avg_points * $327`)
+//!   `claude_cost_usd / points_shipped`.
+//! * `human_cost_usd` — `points * $327`; zero when estimates are unavailable.
 //! * `roi_ratio` — `human_cost_usd / claude_cost_usd`
 //! * `projected_annual_savings_usd` — extrapolates the per-day delta to
 //!   `HUMAN_WORKING_DAYS_PER_YEAR` (260) days.
@@ -28,8 +28,8 @@
 //!
 //! Honest reporting on missing inputs:
 //! * SEN-7 absent → empty report, `headline: None`.
-//! * SEN-13 absent / `tickets_with_estimate == 0` → fallback to ticket-
-//!   level cost with a `fallback_used: true` flag in every window.
+//! * SEN-13 absent / `tickets_with_estimate == 0` → no ROI calculation;
+//!   estimate-backed points are required.
 //! * Projects root absent → all rows in "all-time" window only.
 
 use anyhow::{Context, Result};
@@ -50,11 +50,6 @@ use sentinel_domain::constants::{
 /// Window definitions in days. `None` means "all-time".
 pub const WINDOW_DAYS: &[Option<u32>] = &[Some(7), Some(30), Some(90), None];
 
-/// Default fallback "average story points per ticket" when SEN-13 has no
-/// estimate data. Mid value — not too aggressive, not too conservative.
-/// Used only in fallback path; reported transparently in the row.
-pub const FALLBACK_AVG_POINTS_PER_TICKET: f64 = 3.0;
-
 /// Per-window ROI row written to `roi.jsonl`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RoiWindow {
@@ -67,16 +62,16 @@ pub struct RoiWindow {
     pub points_shipped: f64,
     pub claude_cost_usd: f64,
     /// $/point used for ROI math (median from SEN-13 when present, else
-    /// derived from cost+points or fallback).
+    /// derived from cost+points).
     pub claude_cost_per_point: f64,
     /// Equivalent human-team cost.
     pub human_cost_usd: f64,
     pub roi_ratio: f64,
     pub projected_annual_savings_usd: f64,
-    /// `true` when we synthesised points (no real estimate data).
-    pub fallback_used: bool,
-    /// Reason the fallback engaged (empty when not used).
-    pub fallback_note: String,
+    /// `true` when this row has estimate-backed point data.
+    pub estimate_data_available: bool,
+    /// Reason ROI was not calculated, or empty when estimates are present.
+    pub estimate_note: String,
 }
 
 /// Top-line single-number summary written to `roi-summary.json`.
@@ -90,13 +85,13 @@ pub struct HeadlineRoi {
     pub projected_annual_savings_usd: f64,
     pub claude_cost_per_point: f64,
     pub human_cost_per_point: f64,
-    pub fallback_used: bool,
-    pub fallback_note: String,
+    pub estimate_data_available: bool,
+    pub estimate_note: String,
     pub windows: Vec<RoiWindow>,
 }
 
 /// In-memory report returned by `scan_roi` for human reporting.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RoiReport {
     pub windows: Vec<RoiWindow>,
     pub headline: Option<HeadlineRoi>,
@@ -140,8 +135,8 @@ pub fn scan_roi(
             projected_annual_savings_usd: 0.0,
             claude_cost_per_point: 0.0,
             human_cost_per_point: HUMAN_USD_PER_POINT,
-            fallback_used: false,
-            fallback_note: "no SEN-7 input".to_string(),
+            estimate_data_available: false,
+            estimate_note: "no SEN-7 input".to_string(),
             windows: Vec::new(),
         };
         let mut summary_file = File::create(output_summary)
@@ -201,8 +196,8 @@ pub fn scan_roi(
         projected_annual_savings_usd: all_time.projected_annual_savings_usd,
         claude_cost_per_point: all_time.claude_cost_per_point,
         human_cost_per_point: HUMAN_USD_PER_POINT,
-        fallback_used: all_time.fallback_used,
-        fallback_note: all_time.fallback_note,
+        estimate_data_available: all_time.estimate_data_available,
+        estimate_note: all_time.estimate_note,
         windows: windows.clone(),
     };
 
@@ -260,51 +255,41 @@ fn build_window(
         }
     };
 
-    // Decide $/point + fallback path.
-    let (cost_per_point, human_cost_usd, fallback_used, fallback_note) = if points_shipped > 0.0 {
-        // Real estimate data: prefer SEN-13 median when window is all-
-        // time AND median is positive — keeps it decoupled from whatever
-        // ticket-set the dashboard happens to be looking at. For
-        // narrower windows, derive from the actual filtered totals.
-        let cpp = if window_days.is_none() {
-            sen13
-                .and_then(Sen13Summary::cost_per_point_median)
-                .filter(|m| *m > 0.0)
-                .unwrap_or_else(|| {
-                    if claude_cost_usd > 0.0 {
-                        claude_cost_usd / points_shipped
-                    } else {
-                        0.0
-                    }
-                })
-        } else if claude_cost_usd > 0.0 {
-            claude_cost_usd / points_shipped
+    // Decide $/point. ROI is computed only from real estimate-backed points.
+    let (cost_per_point, human_cost_usd, estimate_data_available, estimate_note) =
+        if points_shipped > 0.0 {
+            // Real estimate data: prefer SEN-13 median when window is all-
+            // time AND median is positive — keeps it decoupled from whatever
+            // ticket-set the client happens to be looking at. For narrower
+            // windows, derive from the actual filtered totals.
+            let cpp = if window_days.is_none() {
+                sen13
+                    .and_then(Sen13Summary::cost_per_point_median)
+                    .filter(|m| *m > 0.0)
+                    .unwrap_or_else(|| {
+                        if claude_cost_usd > 0.0 {
+                            claude_cost_usd / points_shipped
+                        } else {
+                            0.0
+                        }
+                    })
+            } else if claude_cost_usd > 0.0 {
+                claude_cost_usd / points_shipped
+            } else {
+                0.0
+            };
+            let human = points_shipped * HUMAN_USD_PER_POINT;
+            (cpp, human, true, String::new())
+        } else if tickets_shipped > 0 {
+            (
+                0.0,
+                0.0,
+                false,
+                "SEN-13 estimate data required; ROI not computed".to_string(),
+            )
         } else {
-            0.0
+            (0.0, 0.0, false, String::new())
         };
-        let human = points_shipped * HUMAN_USD_PER_POINT;
-        (cpp, human, false, String::new())
-    } else if tickets_shipped > 0 {
-        // No estimate data — fallback: assume FALLBACK_AVG_POINTS_PER_TICKET.
-        // Safe: ticket counts are well below 2^53 in any realistic
-        // dataset; cast precision is not material for ROI reporting.
-        #[allow(clippy::cast_precision_loss)]
-        let synthetic_points = (tickets_shipped as f64) * FALLBACK_AVG_POINTS_PER_TICKET;
-        let cpp = if synthetic_points > 0.0 {
-            claude_cost_usd / synthetic_points
-        } else {
-            0.0
-        };
-        let human = synthetic_points * HUMAN_USD_PER_POINT;
-        (
-            cpp,
-            human,
-            true,
-            format!("no estimate data; assumed {FALLBACK_AVG_POINTS_PER_TICKET:.1} pts/ticket avg"),
-        )
-    } else {
-        (0.0, 0.0, false, String::new())
-    };
 
     let roi_ratio = if claude_cost_usd > 0.0 {
         human_cost_usd / claude_cost_usd
@@ -316,7 +301,9 @@ fn build_window(
     // If window_days = N, claude_cost_usd is the delta for N days. The
     // human cost we computed above is the matching baseline for that
     // same N days of throughput. Scale to a year.
-    let projected_annual_savings_usd = if let Some(days) = window_days {
+    let projected_annual_savings_usd = if !estimate_data_available {
+        0.0
+    } else if let Some(days) = window_days {
         if days > 0 {
             let delta_per_day = (human_cost_usd - claude_cost_usd) / f64::from(days);
             delta_per_day * HUMAN_WORKING_DAYS_PER_YEAR
@@ -361,8 +348,8 @@ fn build_window(
         human_cost_usd,
         roi_ratio,
         projected_annual_savings_usd,
-        fallback_used,
-        fallback_note,
+        estimate_data_available,
+        estimate_note,
     }
 }
 
@@ -729,7 +716,7 @@ mod tests {
         );
         assert!((all_time.human_cost_usd - 32_700.0).abs() < 0.01);
         assert!((all_time.claude_cost_usd - 3_270.0).abs() < 0.01);
-        assert!(!all_time.fallback_used);
+        assert!(all_time.estimate_data_available);
     }
 
     #[test]
@@ -760,7 +747,7 @@ mod tests {
         // Build a fake projects dir so the ticket→last_seen map says all
         // tickets were active 5 days ago (within both the 7d and 30d
         // windows, but we'll mostly verify the 30d window).
-        let projects = dir.path().parent().unwrap().join("projects-shadow"); // not used — we'll point the analyzer at a custom layout.
+        let projects = dir.path().parent().unwrap().join("projects-unused"); // not used — we'll point the analyzer at a custom layout.
 
         // Easier: rely on tokens_input being elsewhere → no projects/
         // root; analyzer will collapse into all-time only.
@@ -837,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_engages_when_sen13_has_zero_estimates() {
+    fn roi_requires_estimates_when_sen13_has_zero_estimates() {
         let dir = TempDir::new().unwrap();
         // SEN-7 has 5 tickets with $100 each = $500 total.
         let tokens = write_tokens(
@@ -861,15 +848,13 @@ mod tests {
             .iter()
             .find(|w| w.window_days.is_none())
             .expect("all-time present");
-        assert!(all_time.fallback_used);
-        assert!(!all_time.fallback_note.is_empty());
-        // 5 tickets * 3 pts/ticket fallback = 15 points.
-        // human = 15 * $327 = $4905, claude = $500 → ratio = 9.81.
+        assert!(!all_time.estimate_data_available);
+        assert!(!all_time.estimate_note.is_empty());
         assert_eq!(all_time.tickets_shipped, 5);
         assert!((all_time.points_shipped - 0.0).abs() < 1e-9); // real points are still 0
         assert!((all_time.claude_cost_usd - 500.0).abs() < 0.01);
-        assert!((all_time.human_cost_usd - 4_905.0).abs() < 0.01);
-        assert!((all_time.roi_ratio - 9.81).abs() < 0.01);
+        assert!((all_time.human_cost_usd - 0.0).abs() < 0.01);
+        assert!((all_time.roi_ratio - 0.0).abs() < 0.01);
     }
 
     #[test]

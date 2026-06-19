@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Research Skill — Step Definitions
 # 16 individually trackable steps across 4 phases
 #
@@ -16,7 +18,7 @@ description = "Define research question precisely"
 
 [[phases.steps]]
 id = "1.2"
-description = "Identify authoritative sources to consult"
+description = "Identify authoritative sources to query"
 
 [[phases.steps]]
 id = "1.3"

@@ -18,6 +18,8 @@
 
 use sentinel_domain::events::{HookInput, HookOutput};
 
+use super::concrete_input_session_id;
+
 const DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES: u64 = 300;
 
 /// Parse `error_details` to extract a cooldown duration in minutes.
@@ -222,8 +224,8 @@ fn rotate_accounts(
     let cooldown_arg = format!("--cooldown-minutes={cooldown_minutes}");
     // Binary was renamed from `accounts` to `claude-accounts` (per
     // claude-accounts-cli-rust Cargo.toml `[[bin]] name = "claude-accounts"`).
-    // The legacy name was kept as a shadow copy at ~/.cargo/bin/accounts.exe
-    // for a while, but that shadow drifts: any cargo install of the CLI only
+    // The legacy name was kept as a duplicate at ~/.cargo/bin/accounts.exe
+    // for a while, but that duplicate drifts: any cargo install of the CLI only
     // updates `claude-accounts.exe`. Call the canonical name directly.
     Ok(ctx
         .process
@@ -249,6 +251,7 @@ fn summarize_process_failure(output: &super::ProcessOutput) -> String {
 /// Logs the error, rotates accounts on rate limits, and requests a clean
 /// relaunch so the handler can resume on the next account automatically.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
+    let session_id = concrete_input_session_id(input);
     let error = input
         .extra
         .get("error")
@@ -264,13 +267,13 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     tracing::warn!(error, error_details, "Turn ended with API error");
 
     // Log to errors.jsonl for diagnostics
-    if let Some(home) = ctx.fs.home_dir() {
+    if let (Some(home), Some(session_id)) = (ctx.fs.home_dir(), session_id) {
         let metrics_dir = super::metrics_dir(&home);
         let entry = serde_json::json!({
             "event": "stop_failure",
             "error": error,
             "error_details": error_details,
-            "session_id": input.session_id,
+            "session_id": session_id,
             "ts": chrono::Utc::now().to_rfc3339(),
         });
 
@@ -278,6 +281,8 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         let _ = ctx
             .fs
             .append(&metrics_dir.join("errors.jsonl"), line.as_bytes());
+    } else {
+        tracing::warn!("StopFailure missing concrete session id; skipping durable error metric");
     }
 
     // If this is a rate limit error, rotate immediately and stop this session
@@ -318,7 +323,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 // restart-style recovery unnecessary.
                 tracing::info!(
                     cooldown_minutes,
-                    session_id = input.session_id.as_deref().unwrap_or("unknown"),
+                    session_id = ?session_id,
                     "Rate limit detected, account rotated, fanout complete (in-place token swap)"
                 );
 
@@ -420,7 +425,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
                 };
 
                 tracing::info!(
-                    session_id = input.session_id.as_deref().unwrap_or("unknown"),
+                    session_id = ?session_id,
                     "Auth error detected, account rotated, fanout complete (in-place token swap)"
                 );
 
@@ -489,6 +494,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
+
     use super::super::{FileSystemPort, GitStatusPort, HookContext, ProcessOutput, ProcessPort};
 
     struct TestFs {
@@ -499,19 +506,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            path: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_to_string(path)?)
         }
-        fn write(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            path: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
             Ok(fs::write(path, content)?)
         }
-        fn create_dir_all(&self, path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            path: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::create_dir_all(path)?)
         }
-        fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::read_dir(path)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -522,10 +542,17 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             path.is_dir()
         }
-        fn metadata(&self, path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            path: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(fs::metadata(path)?)
         }
-        fn append(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            path: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
@@ -541,19 +568,31 @@ mod tests {
 
     struct StubGit;
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok("main".into())
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -568,6 +607,9 @@ mod tests {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -576,6 +618,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -594,18 +639,135 @@ mod tests {
     }
 
     impl ProcessPort for TestProcess {
-        fn run(&self, _: &str, _: &[&str], _: Option<&str>) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
+        fn run(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Option<&str>,
+        ) -> Result<ProcessOutput, sentinel_domain::port_errors::ProcessError> {
             match &self.output {
                 TestProcessResult::Ok(output) => Ok(output.clone()),
-                TestProcessResult::Err(message) => {
-                    Err(sentinel_domain::port_errors::ProcessError::Backend(message.clone()))
-                }
+                TestProcessResult::Err(message) => Err(
+                    sentinel_domain::port_errors::ProcessError::Backend(message.clone()),
+                ),
             }
         }
 
-        fn spawn_detached(&self, _: &str, _: &[&str]) -> Result<(), sentinel_domain::port_errors::ProcessError> {
+        fn spawn_detached(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> Result<(), sentinel_domain::port_errors::ProcessError> {
             Ok(())
         }
+    }
+
+    fn test_ctx<'a>(fs: &'a dyn FileSystemPort, process: &'a dyn ProcessPort) -> HookContext<'a> {
+        let git: &'static StubGit = Box::leak(Box::new(StubGit));
+        let memory_mcp: &'static crate::hooks::test_support::StubMemoryMcp =
+            Box::leak(Box::new(crate::hooks::test_support::StubMemoryMcp));
+        let env: &'static crate::hooks::test_support::StubEnv =
+            Box::leak(Box::new(crate::hooks::test_support::StubEnv::new()));
+        HookContext {
+            git,
+            vector_store: None,
+            fs,
+            process,
+            llm: None,
+            memory_mcp,
+            env,
+            linear_lookup: None,
+        }
+    }
+
+    fn success_process() -> TestProcess {
+        TestProcess {
+            output: TestProcessResult::Ok(ProcessOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        }
+    }
+
+    fn error_input(session_id: Option<&str>) -> HookInput {
+        let mut input = HookInput {
+            session_id: session_id.map(str::to_string),
+            ..Default::default()
+        };
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("api_error"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("transient API failure"),
+        );
+        input
+    }
+
+    #[test]
+    fn missing_session_does_not_append_stop_failure_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let process_port = success_process();
+        let ctx = test_ctx(&fs, &process_port);
+        let errors_path = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join("errors.jsonl");
+
+        let output = process(&error_input(None), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_append_stop_failure_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let process_port = success_process();
+        let ctx = test_ctx(&fs, &process_port);
+        let errors_path = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join("errors.jsonl");
+
+        let output = process(&error_input(Some(" unknown ")), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn concrete_session_appends_stop_failure_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let process_port = success_process();
+        let ctx = test_ctx(&fs, &process_port);
+        let errors_path = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join("errors.jsonl");
+
+        let output = process(&error_input(Some("stop-failure-session")), &ctx);
+
+        assert!(output.blocked.is_none());
+        let content = std::fs::read_to_string(errors_path).expect("errors metric");
+        assert!(content.contains("\"session_id\":\"stop-failure-session\""));
+        assert!(!content.contains("\"session_id\":\"unknown\""));
     }
 
     #[test]
@@ -619,6 +781,77 @@ mod tests {
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
         assert!(output.system_message.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_error_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let errors_path = super::super::metrics_dir(tmp.path()).join("errors.jsonl");
+        let mut input = HookInput::default();
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("api_error"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("transient provider error"),
+        );
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_error_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let errors_path = super::super::metrics_dir(tmp.path()).join("errors.jsonl");
+        let mut input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("api_error"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("transient provider error"),
+        );
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!errors_path.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_error_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let errors_path = super::super::metrics_dir(tmp.path()).join("errors.jsonl");
+        let mut input = HookInput {
+            session_id: Some("stop-failure-session".to_string()),
+            ..Default::default()
+        };
+        input
+            .extra
+            .insert("error".to_string(), serde_json::json!("api_error"));
+        input.extra.insert(
+            "error_details".to_string(),
+            serde_json::json!("transient provider error"),
+        );
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let content = std::fs::read_to_string(errors_path).unwrap();
+        assert!(content.contains("\"session_id\":\"stop-failure-session\""));
+        assert!(!content.contains("\"session_id\":\"unknown\""));
     }
 
     #[test]

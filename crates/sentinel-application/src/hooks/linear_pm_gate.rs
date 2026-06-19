@@ -11,24 +11,23 @@
 //!
 //! A `PreToolUse` on `mcp__linear__update_issue` whose `tool_input` moves an
 //! issue into a *started* state (a `stateId`/`state` change to In Progress).
-//! The gate looks the issue up in the local cache
-//! (`~/.claude/sentinel/linear-assigned.json`) and, if it carries an
-//! `estimate >= OVERSIZED_POINTS` (8), blocks the transition with guidance to
-//! decompose first.
+//! Once a start attempt is identified, the gate requires live Linear authority
+//! for the ticket being started. It blocks blocked tickets, oversized tickets,
+//! missing milestone assignments, and priority cherry-picks before Linear state
+//! can move.
 //!
-//! ## Fail-open by design
+//! ## Authority
 //!
-//! Like the other gates, this one never blocks on uncertainty: no cache, no
-//! identifiable issue, no estimate, or an estimate below the line → allow. It
-//! only blocks the one clear, high-confidence violation: starting a known
-//! oversized ticket. False positives are worse than a missed nudge, and the
-//! `linear-audit` report still surfaces everything the gate lets pass.
+//! The issue being started is read from the live `LinearLookupPort`. The local
+//! assignment snapshot is used only as the queue projection for the
+//! same-assignee priority check; it is not a substitute for target-ticket
+//! authority.
 
 use sentinel_domain::events::{HookEnvelope, HookInput, HookOutput};
 use serde_json::Value;
 use std::path::PathBuf;
 
-use super::HookContext;
+use super::{HookContext, LinearLookupError};
 use crate::linear_pm_audit::OVERSIZED_POINTS;
 
 /// The Linear MCP tool whose calls this gate inspects.
@@ -36,53 +35,120 @@ const TARGET_TOOL: &str = "mcp__linear__update_issue";
 
 /// Tokens in a state name/id that indicate a transition *into* active work.
 /// We can't resolve a Linear state UUID offline, so we gate on the common
-/// case where the caller passes a human-readable state hint, and otherwise
-/// fail open.
+/// case where the caller passes a human-readable state hint or explicit start
+/// flag.
 const STARTED_HINTS: &[&str] = &["in progress", "in-progress", "started", "doing"];
 
-/// `PreToolUse` entry point. Returns `HookOutput::allow()` for everything that
-/// is not a high-confidence "start an oversized ticket" call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearPmDecision {
+    Allow,
+    BlockMissingIssueIdentifier,
+    BlockLiveAuthorityUnavailable,
+    BlockBlockedTicket,
+    BlockOversizedTicket,
+    BlockMissingMilestone,
+    BlockHigherPriorityAvailable,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinearPmEvaluation {
+    pub tool: Option<String>,
+    pub target_tool: bool,
+    pub tool_input_present: bool,
+    pub start_transition: bool,
+    pub issue_key: Option<String>,
+    pub issue_key_present: bool,
+    pub issue_fetched: bool,
+    pub live_authority_error: Option<String>,
+    pub ticket_identifier: Option<String>,
+    pub blocked_ticket: bool,
+    pub blocked_reason: Option<String>,
+    pub estimate_present: bool,
+    pub estimate_points: f64,
+    pub oversized_ticket: bool,
+    pub project_has_milestones: bool,
+    pub milestone_present: bool,
+    pub missing_milestone: bool,
+    pub target_priority_present: bool,
+    pub target_priority: i64,
+    pub target_assignee_present: bool,
+    pub higher_priority_available: bool,
+    pub higher_priority_ticket: Option<String>,
+    pub should_block: bool,
+    pub decision: LinearPmDecision,
+}
+
+impl LinearPmEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.target_tool && self.start_transition
+    }
+}
+
+/// `PreToolUse` entry point.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate_pretool(input, ctx);
+    output_from_evaluation(&evaluation)
+}
+
+pub fn evaluate_pretool(input: &HookInput, ctx: &HookContext<'_>) -> LinearPmEvaluation {
+    let mut evaluation = base_evaluation(input);
+
     // Only inspect the Linear update tool.
     if input.tool_name.as_deref() != Some(TARGET_TOOL) {
-        return HookOutput::allow();
+        return evaluation;
     }
+    evaluation.target_tool = true;
+
     let Some(args) = input.tool_input.as_ref() else {
-        return HookOutput::allow();
+        return evaluation;
     };
+    evaluation.tool_input_present = true;
 
     // Only gate transitions that look like "move to a started state".
     if !is_start_transition(args) {
-        return HookOutput::allow();
+        return evaluation;
     }
+    evaluation.start_transition = true;
 
-    // Identify the ticket being moved.
-    let Some(ticket) = ticket_identifier(args) else {
-        return HookOutput::allow();
+    // Identify the issue being moved. Linear accepts either the display
+    // identifier or the underlying issue ID for live lookup.
+    let Some(ticket_key) = issue_lookup_key(args) else {
+        evaluation.should_block = true;
+        evaluation.decision = LinearPmDecision::BlockMissingIssueIdentifier;
+        return evaluation;
     };
+    evaluation.issue_key = Some(ticket_key.clone());
+    evaluation.issue_key_present = true;
 
-    // Look up the issue — REAL-TIME first (single-ticket live Linear fetch),
-    // falling back to the on-disk cache when the live port is absent or fails.
-    // Fail open (allow) only if neither source can produce the issue.
-    let Some(issue) = live_or_cached(ctx, &ticket) else {
-        return HookOutput::allow();
+    let issue = match live_issue(ctx, &ticket_key) {
+        Ok(issue) => {
+            evaluation.issue_fetched = true;
+            issue
+        }
+        Err(reason) => {
+            evaluation.live_authority_error = Some(reason.to_string());
+            evaluation.should_block = true;
+            evaluation.decision = LinearPmDecision::BlockLiveAuthorityUnavailable;
+            return evaluation;
+        }
     };
+    let ticket = issue
+        .get("identifier")
+        .and_then(Value::as_str)
+        .unwrap_or(&ticket_key);
+    evaluation.ticket_identifier = Some(ticket.to_string());
 
     // Check 1 (hardest stop): the ticket is BLOCKED. Starting a ticket whose
     // upstream work isn't done is wasted/at-risk effort — refuse it
     // regardless of size. Covers an open blocked-by relation, a Blocked
     // workflow state, or a blocked/blocker label.
     if let Some(reason) = blocked_reason(&issue) {
-        let envelope = HookEnvelope::block(
-            "Linear PM-Enforcement Gate",
-            format!(
-                "Refusing to start {ticket}: it is BLOCKED ({reason}). Starting a \
-                 blocked ticket means working on something gated by incomplete \
-                 upstream work. Resolve the blocker (or remove the block) first, \
-                 then start it. Run `sentinel linear-audit scan` for the full PM picture."
-            ),
-        );
-        return HookOutput::block(envelope.render());
+        evaluation.blocked_ticket = true;
+        evaluation.blocked_reason = Some(reason);
+        evaluation.should_block = true;
+        evaluation.decision = LinearPmDecision::BlockBlockedTicket;
+        return evaluation;
     }
 
     // Check 2: oversized & undecomposed.
@@ -91,18 +157,13 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         .and_then(Value::as_f64)
         .filter(|e| e.is_finite() && *e > 0.0);
     if let Some(e) = estimate {
+        evaluation.estimate_present = true;
+        evaluation.estimate_points = e;
         if e >= OVERSIZED_POINTS {
-            let envelope = HookEnvelope::block(
-                "Linear PM-Enforcement Gate",
-                format!(
-                    "Refusing to start {ticket}: it is a {e:.0}-point ticket and \
-                     has not been decomposed. An 8+ point ticket as a single block hides \
-                     risk and defies estimation — split it into sub-issues (each ≤ 5 pts) \
-                     first, then start one of those. Run `sentinel linear-audit scan` for \
-                     the full PM picture."
-                ),
-            );
-            return HookOutput::block(envelope.render());
+            evaluation.oversized_ticket = true;
+            evaluation.should_block = true;
+            evaluation.decision = LinearPmDecision::BlockOversizedTicket;
+            return evaluation;
         }
     }
 
@@ -110,43 +171,183 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // project uses milestones*. A ticket you start should be tied to a tracked
     // deliverable. Projects that don't define milestones are exempt (no false
     // block); we only enforce when `projectHasMilestones` is true in the cache.
+    evaluation.project_has_milestones = issue
+        .get("projectHasMilestones")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    evaluation.milestone_present = issue
+        .get("projectMilestone")
+        .or_else(|| issue.get("milestone"))
+        .map(|m| !m.is_null())
+        .unwrap_or(false);
     if needs_milestone(&issue) {
-        let envelope = HookEnvelope::block(
-            "Linear PM-Enforcement Gate",
-            format!(
-                "Refusing to start {ticket}: it has no milestone, but its project \
-                 uses milestones. Work you start should map to a tracked deliverable \
-                 — assign {ticket} to a project milestone first, then start it. \
-                 (Projects without milestones are exempt.)"
-            ),
-        );
-        return HookOutput::block(envelope.render());
+        evaluation.missing_milestone = true;
+        evaluation.should_block = true;
+        evaluation.decision = LinearPmDecision::BlockMissingMilestone;
+        return evaluation;
     }
 
     // Check 4: cherry-picking — starting a lower-priority ticket while a
     // higher-priority, startable ticket waits in the same person's queue.
     // Work the most urgent thing first. Fails open if the target is
     // unprioritized or has no assignee to scope by.
+    if let Some(priority) = priority_of(&issue) {
+        evaluation.target_priority_present = true;
+        evaluation.target_priority = priority;
+    }
+    evaluation.target_assignee_present = issue
+        .get("assignee")
+        .and_then(|asg| {
+            asg.get("id")
+                .or_else(|| asg.get("name"))
+                .or_else(|| asg.get("displayName"))
+                .and_then(Value::as_str)
+        })
+        .is_some();
     if let Some(higher) = higher_priority_available(ctx, &issue) {
-        let envelope = HookEnvelope::block(
-            "Linear PM-Enforcement Gate",
-            format!(
-                "Refusing to start {ticket}: a higher-priority ticket ({higher}) is \
-                 available and startable in the same queue. Don't cherry-pick — start \
-                 the most urgent work first. Start {higher}, or re-prioritize if {ticket} \
-                 genuinely comes first."
-            ),
-        );
-        return HookOutput::block(envelope.render());
+        evaluation.higher_priority_available = true;
+        evaluation.higher_priority_ticket = Some(higher);
+        evaluation.should_block = true;
+        evaluation.decision = LinearPmDecision::BlockHigherPriorityAvailable;
+        return evaluation;
     }
 
-    HookOutput::allow()
+    evaluation
+}
+
+fn base_evaluation(input: &HookInput) -> LinearPmEvaluation {
+    LinearPmEvaluation {
+        tool: input.tool_name.clone(),
+        target_tool: false,
+        tool_input_present: false,
+        start_transition: false,
+        issue_key: None,
+        issue_key_present: false,
+        issue_fetched: false,
+        live_authority_error: None,
+        ticket_identifier: None,
+        blocked_ticket: false,
+        blocked_reason: None,
+        estimate_present: false,
+        estimate_points: 0.0,
+        oversized_ticket: false,
+        project_has_milestones: false,
+        milestone_present: false,
+        missing_milestone: false,
+        target_priority_present: false,
+        target_priority: 0,
+        target_assignee_present: false,
+        higher_priority_available: false,
+        higher_priority_ticket: None,
+        should_block: false,
+        decision: LinearPmDecision::Allow,
+    }
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &LinearPmEvaluation) -> HookOutput {
+    match evaluation.decision {
+        LinearPmDecision::Allow => HookOutput::allow(),
+        LinearPmDecision::BlockMissingIssueIdentifier => authority_block(
+            "Refusing to start Linear issue: update_issue did not include an issue identifier \
+             or ID. The PM gate requires live Linear authority before a start transition.",
+        ),
+        LinearPmDecision::BlockLiveAuthorityUnavailable => {
+            let ticket_key = evaluation.issue_key.as_deref().unwrap_or("Linear issue");
+            let reason = evaluation
+                .live_authority_error
+                .as_deref()
+                .unwrap_or("unknown live Linear lookup failure");
+            authority_block(format!(
+                "Refusing to start {ticket_key}: the PM gate could not verify the ticket \
+                 through live Linear authority ({reason}). Configure SENTINEL_LINEAR_TOKEN \
+                 and retry; stale local assignment data is not accepted for state changes."
+            ))
+        }
+        LinearPmDecision::BlockBlockedTicket => {
+            let ticket = evaluation
+                .ticket_identifier
+                .as_deref()
+                .or(evaluation.issue_key.as_deref())
+                .unwrap_or("Linear issue");
+            let reason = evaluation
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("blocked by an unresolved dependency");
+            let envelope = HookEnvelope::block(
+                "Linear PM-Enforcement Gate",
+                format!(
+                    "Refusing to start {ticket}: it is BLOCKED ({reason}). Starting a \
+                     blocked ticket means working on something gated by incomplete \
+                     upstream work. Resolve the blocker (or remove the block) first, \
+                     then start it. Run `sentinel linear-audit scan` for the full PM picture."
+                ),
+            );
+            HookOutput::block(envelope.render())
+        }
+        LinearPmDecision::BlockOversizedTicket => {
+            let ticket = evaluation
+                .ticket_identifier
+                .as_deref()
+                .or(evaluation.issue_key.as_deref())
+                .unwrap_or("Linear issue");
+            let estimate = evaluation.estimate_points;
+            let envelope = HookEnvelope::block(
+                "Linear PM-Enforcement Gate",
+                format!(
+                    "Refusing to start {ticket}: it is a {estimate:.0}-point ticket and \
+                     has not been decomposed. An 8+ point ticket as a single block hides \
+                     risk and defies estimation — split it into sub-issues (each ≤ 5 pts) \
+                     first, then start one of those. Run `sentinel linear-audit scan` for \
+                     the full PM picture."
+                ),
+            );
+            HookOutput::block(envelope.render())
+        }
+        LinearPmDecision::BlockMissingMilestone => {
+            let ticket = evaluation
+                .ticket_identifier
+                .as_deref()
+                .or(evaluation.issue_key.as_deref())
+                .unwrap_or("Linear issue");
+            let envelope = HookEnvelope::block(
+                "Linear PM-Enforcement Gate",
+                format!(
+                    "Refusing to start {ticket}: it has no milestone, but its project \
+                     uses milestones. Work you start should map to a tracked deliverable \
+                     — assign {ticket} to a project milestone first, then start it. \
+                     (Projects without milestones are exempt.)"
+                ),
+            );
+            HookOutput::block(envelope.render())
+        }
+        LinearPmDecision::BlockHigherPriorityAvailable => {
+            let ticket = evaluation
+                .ticket_identifier
+                .as_deref()
+                .or(evaluation.issue_key.as_deref())
+                .unwrap_or("Linear issue");
+            let higher = evaluation
+                .higher_priority_ticket
+                .as_deref()
+                .unwrap_or("a higher-priority ticket");
+            let envelope = HookEnvelope::block(
+                "Linear PM-Enforcement Gate",
+                format!(
+                    "Refusing to start {ticket}: a higher-priority ticket ({higher}) is \
+                     available and startable in the same queue. Don't cherry-pick — start \
+                     the most urgent work first. Start {higher}, or re-prioritize if {ticket} \
+                     genuinely comes first."
+                ),
+            );
+            HookOutput::block(envelope.render())
+        }
+    }
 }
 
 /// Does this issue need (but lack) a milestone? True only when the cache says
 /// the project uses milestones (`projectHasMilestones: true`) AND the issue
-/// itself carries no `projectMilestone`/`milestone`. Fails open: if the
-/// project-has-milestones signal is absent, we don't enforce.
+/// itself carries no `projectMilestone`/`milestone`.
 fn needs_milestone(issue: &Value) -> bool {
     let project_uses = issue
         .get("projectHasMilestones")
@@ -169,8 +370,8 @@ fn needs_milestone(issue: &Value) -> bool {
 ///      Canceled),
 ///   2. a `Blocked` workflow state (by name or type), and
 ///   3. a `blocked` / `blocker` label.
-/// The cache is permissive: any of `relations`/`blockedBy`/`state`/`labels`
-/// may be absent, in which case that signal simply doesn't fire (fail open).
+/// Any absent signal simply doesn't fire; positive blocked signals are enough
+/// to stop the transition.
 fn blocked_reason(issue: &Value) -> Option<String> {
     // 1. Open blocked-by relation. Accept a few shapes: a `blockedBy` array of
     //    issue objects, or a `relations` array of `{type, relatedIssue:{state}}`.
@@ -253,8 +454,7 @@ fn related_is_resolved(related: &Value) -> bool {
 /// Does this `update_issue` payload look like a move into active work?
 /// We accept either a human-readable `state`/`stateName` hint, or — to avoid
 /// false negatives on UUID-only callers — a `start: true`/`started: true`
-/// convenience flag if present. Pure UUID `stateId` changes we cannot resolve
-/// offline, so they fail open.
+/// convenience flag if present.
 fn is_start_transition(args: &Value) -> bool {
     for key in ["state", "stateName", "status", "workflowState"] {
         if let Some(s) = args.get(key).and_then(Value::as_str) {
@@ -273,59 +473,28 @@ fn is_start_transition(args: &Value) -> bool {
     false
 }
 
-/// Pull a PREFIX-NUMBER ticket identifier out of the args. Accepts `id`,
-/// `identifier`, or `issueId` — but only when the value *looks* like an
-/// identifier (UUIDs are rejected, since we can't match them to the cache by
-/// identifier).
-fn ticket_identifier(args: &Value) -> Option<String> {
+/// Pull a Linear issue lookup key out of the args. Accepts the display
+/// identifier (`FPCRM-606`) or the underlying Linear issue ID because the live
+/// GraphQL lookup can resolve both.
+fn issue_lookup_key(args: &Value) -> Option<String> {
     for key in ["identifier", "id", "issueId", "issue_id"] {
         if let Some(s) = args.get(key).and_then(Value::as_str) {
-            if looks_like_identifier(s) {
-                return Some(s.to_string());
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
     }
     None
 }
 
-/// `FPCRM-606` style: an all-alphabetic prefix, a dash, then digits.
-fn looks_like_identifier(s: &str) -> bool {
-    let mut parts = s.split('-');
-    let (Some(prefix), Some(num)) = (parts.next(), parts.next()) else {
-        return false;
+fn live_issue(ctx: &HookContext<'_>, ticket: &str) -> Result<Value, LinearLookupError> {
+    let Some(port) = ctx.linear_lookup else {
+        return Err(LinearLookupError::Transport(
+            "SENTINEL_LINEAR_TOKEN is not configured".into(),
+        ));
     };
-    parts.next().is_none()
-        && !prefix.is_empty()
-        && prefix.chars().all(|c| c.is_ascii_alphabetic())
-        && !num.is_empty()
-        && num.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Resolve the issue as real-time as possible: try the live single-ticket
-/// Linear lookup first (so the gate reflects this-instant state), and fall back
-/// to the on-disk cache when the live port is absent (no token configured) or
-/// returns `None` (network error / timeout / not found). This is the
-/// "real-time, cache as fallback" contract — never bricks pickup on a flaky
-/// network, but is live whenever it can be.
-fn live_or_cached(ctx: &HookContext<'_>, ticket: &str) -> Option<Value> {
-    if let Some(port) = ctx.linear_lookup {
-        if let Some(live) = port.fetch_issue(ticket) {
-            return Some(live);
-        }
-    }
-    cache_lookup(ctx, ticket)
-}
-
-fn cache_lookup(ctx: &HookContext<'_>, ticket: &str) -> Option<Value> {
-    let path = cache_path(ctx)?;
-    let text = ctx.fs.read_to_string(&path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    let arr = value
-        .as_array()
-        .or_else(|| value.get("issues").and_then(Value::as_array))?;
-    arr.iter()
-        .find(|issue| issue.get("identifier").and_then(Value::as_str) == Some(ticket))
-        .cloned()
+    port.fetch_issue(ticket)
 }
 
 fn cache_path(ctx: &HookContext<'_>) -> Option<PathBuf> {
@@ -339,7 +508,8 @@ fn cache_path(ctx: &HookContext<'_>) -> Option<PathBuf> {
 }
 
 /// Read the whole issue cache as a list of issue objects (array or
-/// `{issues:[...]}`). Returns an empty vec on any read/parse failure.
+/// `{issues:[...]}`). This is the local queue projection for same-assignee
+/// priority comparison.
 fn cache_all(ctx: &HookContext<'_>) -> Vec<Value> {
     let Some(path) = cache_path(ctx) else {
         return Vec::new();
@@ -386,9 +556,8 @@ fn same_assignee(a: &Value, b: &Value) -> Option<bool> {
 /// Find a higher-priority, startable ticket in the same person's queue than
 /// `target`. "Startable" = open (not done/canceled), not blocked, and strictly
 /// more urgent (lower priority number). Returns the identifier of the first
-/// such ticket, or `None` if the target is already the most urgent available.
-/// Fails open: if the target has no priority, or no assignee to scope by, or
-/// the cache is empty, returns `None` (no cherry-pick block).
+/// such ticket, or `None` if the target is already the most urgent available
+/// in the queue projection.
 fn higher_priority_available(ctx: &HookContext<'_>, target: &Value) -> Option<String> {
     let target_pri = priority_of(target)?; // unprioritized target → don't gate
     let all = cache_all(ctx);
@@ -406,7 +575,9 @@ fn higher_priority_available(ctx: &HookContext<'_>, target: &Value) -> Option<St
             continue;
         }
         // Must be strictly more urgent.
-        let Some(p) = priority_of(issue) else { continue };
+        let Some(p) = priority_of(issue) else {
+            continue;
+        };
         if p >= target_pri {
             continue;
         }
@@ -428,18 +599,50 @@ fn higher_priority_available(ctx: &HookContext<'_>, target: &Value) -> Option<St
     None
 }
 
+fn authority_block(message: impl Into<String>) -> HookOutput {
+    let envelope = HookEnvelope::block("Linear PM-Enforcement Gate", message.into());
+    HookOutput::block(envelope.render())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support;
+
+    #[derive(Clone)]
+    struct MockLookup {
+        result: Result<Value, LinearLookupError>,
+    }
+
+    impl super::super::LinearLookupPort for MockLookup {
+        fn fetch_issue(&self, _identifier_or_id: &str) -> Result<Value, LinearLookupError> {
+            self.result.clone()
+        }
+    }
+
+    fn start_input(issue_key: &str) -> HookInput {
+        HookInput {
+            tool_name: Some(TARGET_TOOL.into()),
+            tool_input: Some(serde_json::json!({
+                "identifier": issue_key,
+                "started": true
+            })),
+            ..Default::default()
+        }
+    }
 
     #[test]
-    fn identifier_recognition() {
-        assert!(looks_like_identifier("FPCRM-606"));
-        assert!(looks_like_identifier("A-1"));
-        assert!(!looks_like_identifier("not-an-id-123")); // 3 parts
-        assert!(!looks_like_identifier("550e8400-e29b")); // looks uuid-ish
-        assert!(!looks_like_identifier("FPCRM")); // no number
-        assert!(!looks_like_identifier("123-456")); // numeric prefix
+    fn issue_lookup_accepts_identifier_or_issue_id() {
+        let by_identifier = serde_json::json!({ "identifier": "FPCRM-606" });
+        assert_eq!(
+            issue_lookup_key(&by_identifier).as_deref(),
+            Some("FPCRM-606")
+        );
+        let by_uuid = serde_json::json!({ "id": "550e8400-e29b-41d4-a716-446655440000" });
+        assert_eq!(
+            issue_lookup_key(&by_uuid).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     #[test]
@@ -451,7 +654,49 @@ mod tests {
         let review = serde_json::json!({ "state": "Code Review" });
         assert!(!is_start_transition(&review));
         let uuid_only = serde_json::json!({ "stateId": "550e8400-e29b-41d4" });
-        assert!(!is_start_transition(&uuid_only)); // can't resolve → fail open
+        assert!(!is_start_transition(&uuid_only));
+    }
+
+    #[test]
+    fn start_transition_without_live_lookup_blocks() {
+        let ctx = test_support::stub_ctx();
+        let out = process_pretool(&start_input("FPCRM-606"), &ctx);
+        assert_eq!(out.blocked, Some(true));
+        let reason = out.reason.as_deref().expect("missing block reason");
+        assert!(reason.contains("SENTINEL_LINEAR_TOKEN"));
+        assert!(reason.contains("stale local assignment data is not accepted"));
+    }
+
+    #[test]
+    fn live_lookup_failure_blocks() {
+        let lookup: &'static MockLookup = Box::leak(Box::new(MockLookup {
+            result: Err(LinearLookupError::Transport("timeout".into())),
+        }));
+        let mut ctx = test_support::stub_ctx();
+        ctx.linear_lookup = Some(lookup);
+        let out = process_pretool(&start_input("FPCRM-606"), &ctx);
+        assert_eq!(out.blocked, Some(true));
+        let reason = out.reason.as_deref().expect("missing block reason");
+        assert!(reason.contains("timeout"));
+        assert!(reason.contains("live Linear authority"));
+    }
+
+    #[test]
+    fn live_lookup_is_authority_for_oversized_ticket() {
+        let lookup: &'static MockLookup = Box::leak(Box::new(MockLookup {
+            result: Ok(serde_json::json!({
+                "identifier": "FPCRM-606",
+                "estimate": 8,
+                "state": { "name": "Todo", "type": "backlog" }
+            })),
+        }));
+        let mut ctx = test_support::stub_ctx();
+        ctx.linear_lookup = Some(lookup);
+        let out = process_pretool(&start_input("FPCRM-606"), &ctx);
+        assert_eq!(out.blocked, Some(true));
+        let reason = out.reason.as_deref().expect("missing block reason");
+        assert!(reason.contains("FPCRM-606"));
+        assert!(reason.contains("8-point ticket"));
     }
 
     #[test]
@@ -504,10 +749,12 @@ mod tests {
         let by_type = serde_json::json!({ "state": { "name": "Waiting", "type": "blocked" } });
         assert!(blocked_reason(&by_type).is_some());
         // Pedro's QA redesign: "QA Blocked" must count as a blocked state.
-        let qa_blocked = serde_json::json!({ "state": { "name": "QA Blocked", "type": "started" } });
+        let qa_blocked =
+            serde_json::json!({ "state": { "name": "QA Blocked", "type": "started" } });
         assert!(blocked_reason(&qa_blocked).is_some());
         // But "QA Testing (UI)" must NOT be treated as blocked.
-        let qa_testing = serde_json::json!({ "state": { "name": "QA Testing (UI)", "type": "started" } });
+        let qa_testing =
+            serde_json::json!({ "state": { "name": "QA Testing (UI)", "type": "started" } });
         assert!(blocked_reason(&qa_testing).is_none());
     }
 
@@ -575,7 +822,7 @@ mod tests {
             "identifier": "M-3", "projectHasMilestones": false, "projectMilestone": null
         });
         assert!(!needs_milestone(&exempt));
-        // Absent signal → also exempt (fail open).
+        // Absent signal → also exempt.
         let unknown = serde_json::json!({ "identifier": "M-4" });
         assert!(!needs_milestone(&unknown));
     }

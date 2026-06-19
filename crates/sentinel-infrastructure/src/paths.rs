@@ -17,8 +17,8 @@
 //!
 //! Note this is distinct from `SENTINEL_CLAUDE_DIR` (honored by
 //! `FileSystemPort::claude_dir`), which overrides the `.claude` dir specifically;
-//! `SENTINEL_HOME` overrides the home root that everything (including the legacy
-//! `home_dir().join(".claude")` call sites) derives from.
+//! `SENTINEL_HOME` overrides the home root used by all sentinel-owned
+//! `~/.claude/sentinel` paths.
 
 use std::path::PathBuf;
 
@@ -36,34 +36,72 @@ pub fn home_root() -> Option<PathBuf> {
 
 /// Like [`home_root`] but panics with the standard FATAL message when no home is
 /// resolvable — matches the existing fail-closed behavior of `config_dir` /
-/// `state_dir` (Attack #84/#85: never fall back to CWD).
+/// `state_dir` (Attack #84/#85: never write to CWD).
 #[must_use]
 pub fn home_root_or_fatal() -> PathBuf {
     home_root()
         .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
 }
 
+/// Root directory for sentinel-owned files under the user's Claude home.
+#[must_use]
+pub fn sentinel_root() -> PathBuf {
+    home_root_or_fatal().join(".claude").join("sentinel")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn sentinel_home_overrides_when_set() {
-        // Serialize via a single test (env is process-global) — set, assert, clear.
+        let _guard = env_lock();
         let tmp = std::env::temp_dir().join("sentinel-home-test-root");
-        // SAFETY: single-threaded test; restored before returning.
-        std::env::set_var("SENTINEL_HOME", &tmp);
+        let _env = EnvGuard::set("SENTINEL_HOME", &tmp);
         assert_eq!(home_root(), Some(tmp.clone()));
         assert_eq!(home_root_or_fatal(), tmp);
-        std::env::remove_var("SENTINEL_HOME");
-        // After clearing, falls back to the OS home (non-None on a real box).
-        assert_eq!(home_root(), dirs::home_dir());
+    }
+
+    #[test]
+    fn sentinel_root_uses_authoritative_home_root() {
+        let _guard = env_lock();
+        let tmp = std::env::temp_dir().join("sentinel-root-test-root");
+        let _env = EnvGuard::set("SENTINEL_HOME", &tmp);
+        assert_eq!(sentinel_root(), tmp.join(".claude").join("sentinel"));
     }
 
     #[test]
     fn empty_sentinel_home_is_ignored() {
-        std::env::set_var("SENTINEL_HOME", "");
+        let _guard = env_lock();
+        let _env = EnvGuard::set("SENTINEL_HOME", "");
         assert_eq!(home_root(), dirs::home_dir());
-        std::env::remove_var("SENTINEL_HOME");
     }
 }

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, HookContext};
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between activity summaries.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_LONG_MS;
@@ -75,20 +75,43 @@ fn log_file(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(metrics_dir(fs)?.join("activity-log.jsonl"))
 }
 
+fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id == "unknown"
+        || session_id == "default"
+        || session_id.len() > 128
+    {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(session_id)
+}
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
+}
+
 fn summary_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
     Some(metrics_dir(fs)?.join(format!("activity-summary-{session_id}.json")))
 }
 
-fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
-    let session_id = env
-        .var("CLAUDE_SESSION_ID")
-        .or_else(|| env.var("SESSION_ID"))
-        .unwrap_or_else(|| "default".to_string());
-    std::env::temp_dir().join(format!("claude-activity-tracker-{session_id}-last"))
+fn cooldown_file(session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
+    Some(std::env::temp_dir().join(format!("claude-activity-tracker-{session_id}-last")))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let Ok(content) = fs.read_to_string(&cooldown_file(env)) else {
+fn cooldown_expired(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let Some(path) = cooldown_file(session_id) else {
+        return true;
+    };
+    let Ok(content) = fs.read_to_string(&path) else {
         return true;
     };
     let Ok(last) = content.trim().parse::<u64>() else {
@@ -97,8 +120,11 @@ fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
-    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, session_id: &str) {
+    let Some(path) = cooldown_file(session_id) else {
+        return;
+    };
+    let _ = fs.write(&path, now_ms().to_string().as_bytes());
 }
 
 /// Extract file path from tool input (Edit, Write, Read, Glob, Grep).
@@ -187,7 +213,9 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
         None => return HookOutput::allow(),
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown").to_string();
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
     let tool_input = input.tool_input.clone().unwrap_or_default();
 
     let file_path = extract_file_path(&tool, &tool_input);
@@ -196,8 +224,8 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
     } else {
         None
     };
-    let (mcp_server, mcp_action) = extract_mcp_info(&tool)
-        .map_or((None, None), |(s, a)| (Some(s), Some(a)));
+    let (mcp_server, mcp_action) =
+        extract_mcp_info(&tool).map_or((None, None), |(s, a)| (Some(s), Some(a)));
     let skill = extract_skill_name(&tool, &tool_input);
 
     let entry = ActivityEntry {
@@ -207,7 +235,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
         mcp_server,
         mcp_action,
         skill,
-        session_id,
+        session_id: session_id.to_string(),
         ts: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -224,7 +252,9 @@ pub fn process_post_tool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput
 // ---------------------------------------------------------------------------
 
 pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
 
     let Some(path) = log_file(ctx.fs) else {
         return HookOutput::allow();
@@ -317,7 +347,9 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // ---------------------------------------------------------------------------
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
 
     let Some(path) = summary_file(ctx.fs, session_id) else {
         return HookOutput::allow();
@@ -350,11 +382,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs, ctx.env) {
+    if !cooldown_expired(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs, ctx.env);
+    write_cooldown(ctx.fs, session_id);
 
     let ctx_text = build_summary_context(&summary);
     HookOutput::inject_context(HookEvent::UserPromptSubmit, ctx_text)
@@ -362,6 +394,9 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
 /// Check if context monitor reported Yellow+ zone for this session.
 fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let Some(session_id) = session_path_component(session_id) else {
+        return false;
+    };
     let Some(path) = metrics_dir(fs).map(|d| d.join(format!("context-zone-{session_id}.json")))
     else {
         return false;
@@ -451,6 +486,7 @@ fn build_summary_context(summary: &ActivitySummary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use serde_json::json;
 
     #[test]
@@ -588,7 +624,7 @@ mod tests {
     #[test]
     fn test_activity_entry_serializes_skill_when_present() {
         // The serde representation must include `"skill":"<name>"` so
-        // downstream tools (telemetry dashboards, M7 router corpus
+        // downstream tools (telemetry views, M7 router corpus
         // queries) can group by skill without re-deriving from MCP
         // traffic patterns.
         let entry = ActivityEntry {
@@ -652,6 +688,52 @@ mod tests {
     }
 
     #[test]
+    fn post_tool_missing_session_does_not_write_unknown_activity_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let path = log_file(&fs).expect("activity log path");
+        let _ = std::fs::remove_file(&path);
+
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            tool_input: Some(json!({"file_path": "/test/file.rs"})),
+            session_id: None,
+            ..Default::default()
+        };
+        let output = process_post_tool(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !path.exists(),
+            "missing session must not write activity-log entries under unknown"
+        );
+    }
+
+    #[test]
+    fn post_tool_concrete_session_writes_activity_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let path = log_file(&fs).expect("activity log path");
+        let _ = std::fs::remove_file(&path);
+
+        let input = HookInput {
+            tool_name: Some("Edit".into()),
+            tool_input: Some(json!({"file_path": "/test/file.rs"})),
+            session_id: Some("activity-real".to_string()),
+            ..Default::default()
+        };
+        let output = process_post_tool(&input, &ctx);
+        let log = std::fs::read_to_string(&path).expect("activity log row");
+        let entry: ActivityEntry = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+
+        assert!(output.blocked.is_none());
+        assert_eq!(entry.session_id, "activity-real");
+        assert_eq!(entry.tool, "Edit");
+    }
+
+    #[test]
     fn test_build_summary_context() {
         let summary = ActivitySummary {
             session_id: "test".into(),
@@ -692,7 +774,7 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs, ctx.env));
+        assert!(cooldown_expired(ctx.fs, "test-activity-cooldown"));
     }
 
     #[test]
@@ -704,5 +786,65 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process_stop(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn stop_missing_session_does_not_write_unknown_summary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let log = ActivityEntry {
+            tool: "Edit".to_string(),
+            file_path: None,
+            command: None,
+            mcp_server: None,
+            mcp_action: None,
+            skill: None,
+            session_id: "unknown".to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+        };
+        let log_path = log_file(&fs).expect("activity log path");
+        fs.append(
+            &log_path,
+            format!("{}\n", serde_json::to_string(&log).unwrap()).as_bytes(),
+        )
+        .unwrap();
+        let unknown_summary = summary_file(&fs, "unknown");
+
+        let output = process_stop(&HookInput::default(), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(unknown_summary.is_none());
+    }
+
+    #[test]
+    fn prompt_without_concrete_session_ignores_legacy_unknown_summary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let metrics = metrics_dir(&fs).expect("metrics dir");
+        let legacy_summary = metrics.join("activity-summary-unknown.json");
+        std::fs::write(
+            &legacy_summary,
+            serde_json::to_string(&ActivitySummary {
+                session_id: "unknown".to_string(),
+                total_calls: MIN_CALLS_FOR_SUMMARY,
+                tool_counts: vec![("Edit".to_string(), MIN_CALLS_FOR_SUMMARY)],
+                files_touched: vec![],
+                mcp_actions: vec![],
+                git_commands: vec![],
+                ts: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let output = process_prompt(&HookInput::default(), &ctx);
+
+        assert!(output.hook_specific_output.is_none());
+        assert!(
+            legacy_summary.exists(),
+            "missing prompt session must not consume legacy unknown summary"
+        );
     }
 }

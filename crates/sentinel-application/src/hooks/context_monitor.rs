@@ -11,7 +11,7 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{EnvPort, FileSystemPort, HookContext};
+use super::{FileSystemPort, HookContext};
 
 /// Cooldown between context warnings.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_SHORT_MS;
@@ -70,23 +70,46 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id == "unknown"
+        || session_id == "default"
+        || session_id.len() > 128
+    {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(session_id)
+}
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
+}
+
 fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
     let home = fs.home_dir()?;
     let dir = super::metrics_dir(&home);
     fs.create_dir_all(&dir).ok()?;
     Some(dir.join(format!("context-zone-{session_id}.json")))
 }
 
-fn cooldown_file(env: &dyn EnvPort) -> PathBuf {
-    let session_id = env
-        .var("CLAUDE_SESSION_ID")
-        .or_else(|| env.var("SESSION_ID"))
-        .unwrap_or_else(|| "default".to_string());
-    std::env::temp_dir().join(format!("claude-context-monitor-{session_id}-last"))
+fn cooldown_file(session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
+    Some(std::env::temp_dir().join(format!("claude-context-monitor-{session_id}-last")))
 }
 
-fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
-    let content = match fs.read_to_string(&cooldown_file(env)) {
+fn cooldown_expired(fs: &dyn FileSystemPort, session_id: &str) -> bool {
+    let Some(path) = cooldown_file(session_id) else {
+        return true;
+    };
+    let content = match fs.read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return true,
     };
@@ -97,8 +120,11 @@ fn cooldown_expired(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> bool {
     now_ms().saturating_sub(last) >= COOLDOWN_MS
 }
 
-fn write_cooldown(fs: &dyn FileSystemPort, env: &dyn EnvPort) {
-    let _ = fs.write(&cooldown_file(env), now_ms().to_string().as_bytes());
+fn write_cooldown(fs: &dyn FileSystemPort, session_id: &str) {
+    let Some(path) = cooldown_file(session_id) else {
+        return;
+    };
+    let _ = fs.write(&path, now_ms().to_string().as_bytes());
 }
 
 /// Extract usage percentage from `context_window` payload.
@@ -136,8 +162,10 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         None => return HookOutput::allow(),
     };
 
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
     let zone = Zone::from_pct(pct);
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
 
     let state = ContextState {
         percent_used: pct,
@@ -201,7 +229,9 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 // ---------------------------------------------------------------------------
 
 pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
     let path = match state_file(ctx.fs, session_id) {
         Some(p) => p,
         None => return HookOutput::allow(),
@@ -229,11 +259,11 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     }
 
-    if !cooldown_expired(ctx.fs, ctx.env) {
+    if !cooldown_expired(ctx.fs, session_id) {
         return HookOutput::allow();
     }
 
-    write_cooldown(ctx.fs, ctx.env);
+    write_cooldown(ctx.fs, session_id);
 
     let context = format!(
         "[Context Monitor] {zone} zone — {pct:.0}% context used.\n{strategy}",
@@ -248,6 +278,7 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use serde_json::json;
 
     #[test]
@@ -300,6 +331,49 @@ mod tests {
     }
 
     #[test]
+    fn stop_missing_session_does_not_write_unknown_context_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let unknown_state = crate::hooks::metrics_dir(tmp.path()).join("context-zone-unknown.json");
+        let _ = std::fs::remove_file(&unknown_state);
+
+        let input = HookInput {
+            context_window: Some(json!({ "percentUsed": 70.0 })),
+            session_id: None,
+            ..Default::default()
+        };
+        let output = process_stop(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !unknown_state.exists(),
+            "missing session must not write context-zone-unknown state"
+        );
+    }
+
+    #[test]
+    fn stop_concrete_session_writes_scoped_context_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+
+        let input = HookInput {
+            context_window: Some(json!({ "percentUsed": 70.0 })),
+            session_id: Some("context-real".into()),
+            ..Default::default()
+        };
+        let output = process_stop(&input, &ctx);
+        let path = state_file(&fs, "context-real").expect("context state path");
+        let state: ContextState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert!(output.blocked.is_none());
+        assert_eq!(state.session_id, "context-real");
+        assert_eq!(state.zone, "Orange");
+    }
+
+    #[test]
     fn test_prompt_green_zone_no_inject() {
         let input = HookInput {
             session_id: Some("test-green".into()),
@@ -309,6 +383,35 @@ mod tests {
         let output = process_prompt(&input, &ctx);
         // StubFs returns error on read → allow
         assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn prompt_without_concrete_session_ignores_legacy_unknown_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let metrics = crate::hooks::metrics_dir(tmp.path());
+        std::fs::create_dir_all(&metrics).unwrap();
+        let unknown_state = metrics.join("context-zone-unknown.json");
+        std::fs::write(
+            &unknown_state,
+            serde_json::to_string(&ContextState {
+                percent_used: 80.0,
+                zone: "Red".to_string(),
+                session_id: "unknown".to_string(),
+                ts: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let output = process_prompt(&HookInput::default(), &ctx);
+
+        assert!(output.hook_specific_output.is_none());
+        assert!(
+            unknown_state.exists(),
+            "missing prompt session must not consume legacy unknown context state"
+        );
     }
 
     #[test]
@@ -323,90 +426,21 @@ mod tests {
     fn test_cooldown_logic() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // StubFs returns error on read → expired
-        assert!(cooldown_expired(ctx.fs, ctx.env));
+        assert!(cooldown_expired(ctx.fs, "test-context-cooldown"));
     }
-    /// Regression test: cooldown stamp file is keyed on the process temp_dir
-    /// but NOT on session_id. Session A writes the stamp; Session B (different
-    /// session_id, same process, same temp_dir) must NOT be suppressed by
-    /// Session A's stamp -- but with the current code it IS suppressed.
-    ///
-    /// Expected (correct) behaviour: `cooldown_expired` returns `true` for
-    /// Session B because it is a fresh session.
-    ///
-    /// Actual (buggy) behaviour: `cooldown_expired` returns `false` because
-    /// the stamp file path does not include a session_id, so Session A's
-    /// recently-written stamp suppresses Session B.
-    ///
-    /// This test therefore FAILS on the current codebase (red regression test).
+
+    /// Regression test: cooldown stamp files must be scoped per concrete
+    /// session, so Session A cannot suppress Session B's prompt guidance.
     #[test]
-    fn test_cross_session_cooldown_suppression_bug() {
-        use super::super::FileSystemPort;
-        use std::path::{Path, PathBuf};
+    fn test_cross_session_cooldown_is_session_scoped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let session_a_path = cooldown_file("session-a").expect("session A cooldown path");
+        let session_b_path = cooldown_file("session-b").expect("session B cooldown path");
+        let _ = std::fs::remove_file(&session_a_path);
+        let _ = std::fs::remove_file(&session_b_path);
 
-        // A minimal FileSystemPort that delegates to real std::fs so that
-        // `cooldown_file()` -- which calls std::env::temp_dir() directly --
-        // resolves to an actual on-disk path.
-        struct RealTestFs;
-        impl FileSystemPort for RealTestFs {
-            fn home_dir(&self) -> Option<PathBuf> {
-                dirs::home_dir()
-            }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-            }
-            fn write(&self, p: &Path, data: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-                }
-                std::fs::write(p, data).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-            }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-            }
-            fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_dir(p)
-                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
-                    .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            }
-            fn exists(&self, p: &Path) -> bool {
-                p.exists()
-            }
-            fn is_dir(&self, p: &Path) -> bool {
-                p.is_dir()
-            }
-            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-            }
-            fn append(&self, p: &Path, data: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                use std::io::Write;
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-                }
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(p)
-                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-                f.write_all(data).map_err(sentinel_domain::port_errors::FileSystemError::backend)
-            }
-        }
-
-        let fs = RealTestFs;
-        use crate::hooks::test_support::StubEnv;
-
-        // -- Session A fires: write a cooldown stamp right now
-        // Each session has its own EnvPort so the test isolates cleanly
-        // without touching process-global env state.
-        let env_a = StubEnv::with(&[("CLAUDE_SESSION_ID", "session-a")]);
-        let session_a_path = cooldown_file(&env_a);
-        write_cooldown(&fs, &env_a);
-
-        // -- Session B arrives immediately after
-        // Session B is a completely different session. With the session-id-
-        // scoped stamp file, Session A's stamp must not suppress Session B's
-        // cooldown check.
-        let env_b = StubEnv::with(&[("CLAUDE_SESSION_ID", "session-b")]);
-        let session_b_path = cooldown_file(&env_b);
+        write_cooldown(&fs, "session-a");
 
         assert_ne!(
             session_a_path, session_b_path,
@@ -414,7 +448,7 @@ mod tests {
         );
 
         assert!(
-            cooldown_expired(&fs, &env_b),
+            cooldown_expired(&fs, "session-b"),
             concat!(
                 "Session B's cooldown check must not be suppressed by Session A's stamp. ",
                 "The cooldown file path must include the session_id so that each ",

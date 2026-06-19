@@ -8,9 +8,10 @@
 ## TL;DR
 
 The report's recommended architecture is a **governed multi-model factory**:
-Claude Code as the operator cockpit, a Rust/Axum control plane (Sentinel) in
-front of every meaningful tool action, specialist work delegated to Codex/Kimi
-workers, and every decision producing a proof-chained receipt.
+Claude Code as the operator cockpit, Sentinel as the local Rust/LangGraph
+enforcement engine in front of every meaningful tool action, specialist work
+delegated to Codex/Kimi workers, and every decision producing a proof-chained
+receipt.
 
 **Sentinel already implements most of this.** The report reads less like a
 spec to build from scratch and more like a description of what's already here.
@@ -55,7 +56,7 @@ disagreement signal, all confirmed callable.
 | **Local signed command shim** (fail-secure, not HTTP) | ✅ Hooks run as `sentinel hook --event` command invocations; deny via `HookOutput::deny`. Fail-secure by construction. | Report wants Ed25519-signed envelopes on the shim→broker hop. Sentinel runs in-process (no broker hop), so the threat differs — but the `[Sentinel-Authority]` prefix is the provenance equivalent. |
 | **Append-only proof chain (SHA-256 + Ed25519)** | ✅ `sentinel-domain/proof.rs` + `step_proof.rs`: SHA-256 combined-hash chain, optional Ed25519 `signature`. | Ed25519 signing is *optional* (`signature: None` common path). Report wants it mandatory for high-assurance. M1.7 ceiling per [[hsm_pq_scoped_out]]. |
 | **Model router (MR)** | ✅ `capability.rs` + `capability_router.rs` (A2 capability-aware routing). | Report's MR also fronts Kimi/Codex *workers*; sentinel's router selects *judges/auditors*. Worker-delegation surface is thinner. |
-| **Worker delegation (Anthropic/Kimi/Codex)** | ⚠️ `anthropic.rs`, `rig_judge.rs`, `dry_run_auditor.rs` via OpenRouter (single gateway fronts all). No dedicated Codex-CLI / Kimi-thinking-mode workers. | Report wants model-native worker adapters + a task queue (`POST /v1/tasks`). Sentinel has no task-delegation API. **Genuine gap.** |
+| **Worker delegation (Anthropic/Kimi/Codex)** | ⚠️ `rig_judge.rs` and `dry_run_auditor.rs` route through OpenRouter/A2 profiles. No dedicated Codex-CLI / Kimi-thinking-mode workers. | Report wants model-native worker adapters + a task queue (`POST /v1/tasks`). Sentinel has no task-delegation API. **Genuine gap.** |
 | **Prometheus `/metrics`** | ✅ `/legatus/metrics` (hand-rolled exposition, added in Tier 3 hardening). | Report wants the full metric set (hook latency, policy denies, approvals pending, task queue depth). Partial. |
 | **Approvals API + glass-break overrides** | ✅ `hygiene_override` + phase-gate override TTL (3600s). | Report wants scoped, signed, dual-control override *tokens* as first-class objects with proofchain entries. Sentinel's override is coarser. |
 | **`Stop` gate enforces completion** | ✅ `verification_gate`, `task_completed`, `teammate_idle` hooks. | Aligned. |
@@ -102,15 +103,10 @@ disagreement signal, all confirmed callable.
 
 ## Stale-checkout lesson (resolved this session)
 
-The engine rebuild *appeared* blocked by a half-built feature: `sentinel-domain`
-failed to compile (`consul_domain::identity::republic` missing) and
-`sentinel-legatus` referenced `consul_protocol` items (`AckDecision`,
-`RegisterSession.operator_id`, `ConsularMessage::CatastrophicAck`,
-`ChallengeNonce::to_hex`) that "didn't exist." **They did exist** — the local
-`legatus-consul-agent` checkout was ~9 commits behind `origin/main`, which
-already shipped the full `republic` module, the voiceprint/witness
-canonicalization, and the `CatastrophicAckProducer` runtime drain
-(`origin/main` @ `1a99058`). Syncing the consul-agent checkout to `origin/main`
-made the entire sentinel workspace compile with no sentinel-side changes. The
-lesson: when a path-dependency import "vanishes," check the dep repo is current
-before reverse-engineering the missing surface.
+The engine rebuild *appeared* blocked by a half-built feature: Sentinel could
+not resolve several Legatus AI identity and protocol items that "didn't exist."
+They did exist — the local `legatus-ai` checkout was behind `origin/main`.
+Syncing the Legatus AI checkout made the entire sentinel workspace compile with
+no sentinel-side changes. The lesson: when a path-dependency import "vanishes,"
+check the dependency repo is current before reverse-engineering the missing
+surface.

@@ -12,7 +12,7 @@
 //! Default mode is dry-run — print orphans, don't touch them. `--apply`
 //! does the actual removal.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -41,8 +41,8 @@ struct PersistMeta {
 ///
 /// `Live { cwd, task_count }` carries data that today's `print_report`
 /// only summarises numerically — the fields are kept for the
-/// machine-readable report variant that's coming next (M6.2 dashboard
-/// integration) and for `Debug` output during diagnosis. Marking
+/// machine-readable report variant that's coming next and for `Debug`
+/// output during diagnosis. Marking
 /// `dead_code` here rather than removing keeps that future surface in
 /// place.
 #[derive(Debug)]
@@ -67,11 +67,7 @@ enum Status {
 /// orphan buckets. Returns the human-readable report as String so the
 /// dispatch site can `println!` it (cleaner than mid-function I/O).
 pub fn run_persistent_tasks(apply: bool) -> Result<()> {
-    let home = dirs::home_dir().context("could not resolve home dir")?;
-    let root = home
-        .join(".claude")
-        .join("sentinel")
-        .join("persistent-tasks");
+    let root = sentinel_infrastructure::paths::sentinel_root().join("persistent-tasks");
     if !root.is_dir() {
         println!("No persistent-tasks directory at {}", root.display());
         return Ok(());
@@ -100,9 +96,7 @@ pub fn run_persistent_tasks(apply: bool) -> Result<()> {
              Live buckets preserved."
         );
     } else {
-        println!(
-            "\nDry-run only — pass --apply to actually remove the orphan buckets above."
-        );
+        println!("\nDry-run only — pass --apply to actually remove the orphan buckets above.");
     }
     Ok(())
 }
@@ -115,7 +109,7 @@ fn classify(bucket_dir: &Path) -> Status {
         Err(e) => {
             return Status::Unreadable {
                 reason: format!("cannot read meta.json: {e}"),
-            }
+            };
         }
     };
     let meta: PersistMeta = match serde_json::from_str(&content) {
@@ -123,7 +117,7 @@ fn classify(bucket_dir: &Path) -> Status {
         Err(e) => {
             return Status::Unreadable {
                 reason: format!("malformed meta.json: {e}"),
-            }
+            };
         }
     };
     if meta.cwd.is_empty() {
@@ -184,7 +178,10 @@ fn print_report(buckets: &HashMap<String, Status>) {
     println!("Persistent-tasks bucket audit:");
     println!("  total buckets: {}", buckets.len());
     println!("  live (cwd still exists): {live}");
-    println!("  unreadable (missing/malformed meta): {}", unreadable.len());
+    println!(
+        "  unreadable (missing/malformed meta): {}",
+        unreadable.len()
+    );
     println!("  orphans (cwd no longer exists): {}", orphans.len());
 
     if !unreadable.is_empty() {
@@ -219,10 +216,7 @@ fn apply_removals(root: &Path, buckets: &HashMap<String, Status>) -> Result<usiz
                 removed += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  warning: failed to remove {} — {e}",
-                    path.display()
-                );
+                eprintln!("  warning: failed to remove {} — {e}", path.display());
             }
         }
     }
@@ -247,10 +241,7 @@ enum TaskStatus {
     Live { transcript: PathBuf },
     /// `session_id` has no matching `.jsonl` anywhere AND the dir mtime
     /// is older than the cutoff — safe to remove.
-    Orphan {
-        age_days: u64,
-        size_bytes: u64,
-    },
+    Orphan { age_days: u64, size_bytes: u64 },
     /// `session_id` has no matching `.jsonl` but the dir mtime is within
     /// the cutoff — could be a fresh session whose transcript hasn't
     /// been written yet. Kept to avoid races.
@@ -275,7 +266,7 @@ enum TaskStatus {
 /// 3. Report. If `apply`, remove `Orphan` directories. `NotASession`
 ///    and `YoungerThanCutoff` are never auto-removed.
 pub fn run_session_tasks(older_than_days: u64, apply: bool) -> Result<()> {
-    let home = dirs::home_dir().context("could not resolve home dir")?;
+    let home = sentinel_infrastructure::paths::home_root_or_fatal();
     let tasks_root = home.join(".claude").join("tasks");
     let projects_root = home.join(".claude").join("projects");
 
@@ -295,7 +286,11 @@ pub fn run_session_tasks(older_than_days: u64, apply: bool) -> Result<()> {
         if !path.is_dir() {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let status = classify_session_task(&path, &name, &live_sessions, &now, cutoff_secs);
@@ -311,9 +306,7 @@ pub fn run_session_tasks(older_than_days: u64, apply: bool) -> Result<()> {
              Live + younger-than-cutoff dirs preserved."
         );
     } else {
-        println!(
-            "\nDry-run only — pass --apply to actually remove the orphan dirs above."
-        );
+        println!("\nDry-run only — pass --apply to actually remove the orphan dirs above.");
     }
     Ok(())
 }
@@ -365,9 +358,7 @@ fn classify_session_task(
         };
     }
     let age_secs = match path.metadata().and_then(|m| m.modified()) {
-        Ok(mtime) => now
-            .duration_since(mtime)
-            .map_or(0, |d| d.as_secs()),
+        Ok(mtime) => now.duration_since(mtime).map_or(0, |d| d.as_secs()),
         Err(_) => 0,
     };
     let age_days = age_secs / 86_400;
@@ -375,7 +366,10 @@ fn classify_session_task(
         TaskStatus::YoungerThanCutoff { age_days }
     } else {
         let size_bytes = dir_size_bytes(path);
-        TaskStatus::Orphan { age_days, size_bytes }
+        TaskStatus::Orphan {
+            age_days,
+            size_bytes,
+        }
     }
 }
 
@@ -431,7 +425,10 @@ fn print_report_tasks(entries: &[(String, TaskStatus)], cutoff_days: u64) {
             TaskStatus::Live { .. } => live += 1,
             TaskStatus::YoungerThanCutoff { .. } => younger += 1,
             TaskStatus::NotASession => not_session += 1,
-            TaskStatus::Orphan { age_days, size_bytes } => {
+            TaskStatus::Orphan {
+                age_days,
+                size_bytes,
+            } => {
                 orphans.push((name, *age_days, *size_bytes));
                 total_orphan_bytes = total_orphan_bytes.saturating_add(*size_bytes);
             }
@@ -462,7 +459,10 @@ fn print_report_tasks(entries: &[(String, TaskStatus)], cutoff_days: u64) {
     if !orphans.is_empty() {
         println!("\nOrphans (oldest first):");
         for (name, age_days, size_bytes) in &orphans {
-            println!("  {name}  age={age_days}d  size={}", format_size(*size_bytes));
+            println!(
+                "  {name}  age={age_days}d  size={}",
+                format_size(*size_bytes)
+            );
         }
     }
 }
@@ -479,10 +479,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn apply_session_task_removals(
-    root: &Path,
-    entries: &[(String, TaskStatus)],
-) -> Result<usize> {
+fn apply_session_task_removals(root: &Path, entries: &[(String, TaskStatus)]) -> Result<usize> {
     let mut removed = 0usize;
     for (name, status) in entries {
         if !matches!(status, TaskStatus::Orphan { .. }) {
@@ -629,8 +626,16 @@ mod tests {
     fn collect_live_session_ids_finds_jsonl_across_projects() {
         let tmp = tempfile::tempdir().unwrap();
         let projects_root = tmp.path().join("projects");
-        write_jsonl(&projects_root, "C--proj-one", "11111111-1111-4111-8111-111111111111");
-        write_jsonl(&projects_root, "C--proj-two", "22222222-2222-4222-8222-222222222222");
+        write_jsonl(
+            &projects_root,
+            "C--proj-one",
+            "11111111-1111-4111-8111-111111111111",
+        );
+        write_jsonl(
+            &projects_root,
+            "C--proj-two",
+            "22222222-2222-4222-8222-222222222222",
+        );
         // Stray non-jsonl file — must be ignored.
         std::fs::write(projects_root.join("C--proj-one").join("notes.txt"), "x").unwrap();
 
@@ -727,7 +732,8 @@ mod tests {
         let mut live = std::collections::HashSet::new();
         live.insert(live_id.to_string());
         // For the orphan, pretend "now" is a year in the future so it's stale.
-        let now_for_orphan = std::time::SystemTime::now() + std::time::Duration::from_secs(365 * 86_400);
+        let now_for_orphan =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(365 * 86_400);
         let now_for_young = std::time::SystemTime::now();
 
         let entries = vec![

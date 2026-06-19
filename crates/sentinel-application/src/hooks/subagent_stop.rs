@@ -79,9 +79,10 @@ mod tests {
         // With a stub ctx (no task dir / no session) it must fail open — never
         // block the subagent — exactly like the Stop arm.
         let mut input = HookInput::default();
-        input
-            .extra
-            .insert("agent_type".to_string(), serde_json::json!("general-purpose"));
+        input.extra.insert(
+            "agent_type".to_string(),
+            serde_json::json!("general-purpose"),
+        );
         input.session_id = Some("missing-session".to_string());
 
         let ctx = crate::hooks::test_support::stub_ctx();

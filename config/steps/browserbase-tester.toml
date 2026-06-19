@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Browserbase Tester Skill — Step Definitions
 # Localhost target: mcp__cdp__* (edge-cdp skill, no cloudflared needed).
 # Remote target (staging, production): mcp__browserbase__*.

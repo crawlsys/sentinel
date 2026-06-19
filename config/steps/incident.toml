@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Incident Skill — Step Definitions
 # ~40 individually trackable steps across 7 phases
 #

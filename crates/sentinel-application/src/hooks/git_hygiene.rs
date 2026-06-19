@@ -16,6 +16,47 @@ const MAX_UNCOMMITTED_FILES: usize = constants::MAX_UNCOMMITTED_FILES;
 /// Protected branch names that should not receive direct edits.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHygieneDecision {
+    Allow,
+    DenyProtectedBranch,
+    DenyUncommittedFileLimit,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitHygieneEvaluation {
+    pub tool: Option<String>,
+    pub cwd: String,
+    pub file_path: Option<String>,
+    pub edit_write_tool: bool,
+    pub file_path_present: bool,
+    pub path_inside_repo: bool,
+    pub session_env_path: bool,
+    pub hook_applies: bool,
+    pub effective_repo: Option<String>,
+    pub branch_known: bool,
+    pub branch: Option<String>,
+    pub protected_branch: bool,
+    pub worktree: bool,
+    pub merge_in_progress: bool,
+    pub protected_branch_block: bool,
+    pub has_uncommitted_changes_known: bool,
+    pub has_uncommitted_changes: bool,
+    pub changed_files_known: bool,
+    pub changed_files: Vec<String>,
+    pub changed_file_count: usize,
+    pub uncommitted_file_limit_exceeded: bool,
+    pub should_deny: bool,
+    pub decision: GitHygieneDecision,
+}
+
+impl GitHygieneEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.hook_applies
+    }
+}
+
 /// Extract the target file path from a `HookInput`.
 ///
 /// Checks `input.file_path` (Claude Code 2.1.89+), then falls back to
@@ -127,17 +168,30 @@ pub fn process(
     fs: &dyn super::FileSystemPort,
     _state: &SessionState,
 ) -> HookOutput {
+    let evaluation = evaluate(input, git, fs);
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(
+    input: &HookInput,
+    git: &dyn GitStatusPort,
+    fs: &dyn super::FileSystemPort,
+) -> GitHygieneEvaluation {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
-        None => return HookOutput::allow(),
+        None => {
+            return base_evaluation(input, None, false);
+        }
     };
 
     // Only gate Edit and Write
     if tool != "Edit" && tool != "Write" {
-        return HookOutput::allow();
+        return base_evaluation(input, input.tool_name.clone(), false);
     }
 
     let cwd = input.cwd.as_deref().unwrap_or(".");
+    let cwd_owned = input.cwd.clone().unwrap_or_else(|| ".".to_string());
 
     // If the target file is outside the cwd's repo, this hook doesn't apply.
     // git_hygiene governs the *current* repo — edits to files outside it
@@ -145,7 +199,31 @@ pub fn process(
     let file_path = file_path_from_input(input);
     if let Some(fp) = file_path.as_deref() {
         if !is_path_inside_repo(fs, fp, cwd, git) {
-            return HookOutput::allow();
+            return GitHygieneEvaluation {
+                tool: input.tool_name.clone(),
+                cwd: cwd_owned,
+                file_path,
+                edit_write_tool: true,
+                file_path_present: true,
+                path_inside_repo: false,
+                session_env_path: false,
+                hook_applies: false,
+                effective_repo: None,
+                branch_known: false,
+                branch: None,
+                protected_branch: false,
+                worktree: false,
+                merge_in_progress: false,
+                protected_branch_block: false,
+                has_uncommitted_changes_known: false,
+                has_uncommitted_changes: false,
+                changed_files_known: false,
+                changed_files: Vec::new(),
+                changed_file_count: 0,
+                uncommitted_file_limit_exceeded: false,
+                should_deny: false,
+                decision: GitHygieneDecision::Allow,
+            };
         }
         // Exempt Claude Code's session-env scratch tree even when it
         // happens to live inside a git repo. These writes are harness
@@ -153,7 +231,31 @@ pub fn process(
         // gated by the protected-branch check, otherwise plan-mode
         // dead-locks against itself.
         if is_session_env_path(fp) {
-            return HookOutput::allow();
+            return GitHygieneEvaluation {
+                tool: input.tool_name.clone(),
+                cwd: cwd_owned,
+                file_path,
+                edit_write_tool: true,
+                file_path_present: true,
+                path_inside_repo: true,
+                session_env_path: true,
+                hook_applies: false,
+                effective_repo: None,
+                branch_known: false,
+                branch: None,
+                protected_branch: false,
+                worktree: false,
+                merge_in_progress: false,
+                protected_branch_block: false,
+                has_uncommitted_changes_known: false,
+                has_uncommitted_changes: false,
+                changed_files_known: false,
+                changed_files: Vec::new(),
+                changed_file_count: 0,
+                uncommitted_file_limit_exceeded: false,
+                should_deny: false,
+                decision: GitHygieneDecision::Allow,
+            };
         }
     }
 
@@ -183,6 +285,15 @@ pub fn process(
         .and_then(|dir| git.repo_root(&dir))
         .unwrap_or_else(|| cwd.to_string());
     let effective_repo_str = effective_repo.as_str();
+    let branch = git.current_branch(effective_repo_str).ok();
+    let branch_known = branch.is_some();
+    let protected_branch = branch
+        .as_deref()
+        .is_some_and(|branch| PROTECTED_BRANCHES.contains(&branch));
+    let worktree = git.is_worktree(effective_repo_str);
+    let merge_in_progress = is_merge_in_progress(fs, effective_repo_str, git);
+    let protected_branch_block =
+        branch_known && protected_branch && !worktree && !merge_in_progress;
 
     // Check 1: BLOCK if on a protected branch and not in a worktree.
     //
@@ -191,37 +302,141 @@ pub fn process(
     // a worktree dance mid-conflict-resolution can drop conflict markers into
     // the merge commit (this happened in the build_notify-ntfy merge — see
     // commit 4fc2f35 for the cleanup).
-    if let Ok(branch) = git.current_branch(effective_repo_str) {
-        if PROTECTED_BRANCHES.contains(&branch.as_str())
-            && !git.is_worktree(effective_repo_str)
-            && !is_merge_in_progress(fs, effective_repo_str, git)
-        {
-            return HookOutput::deny(format!(
+    if protected_branch_block {
+        return GitHygieneEvaluation {
+            tool: input.tool_name.clone(),
+            cwd: cwd_owned,
+            file_path,
+            edit_write_tool: true,
+            file_path_present: file_path_from_input(input).is_some(),
+            path_inside_repo: true,
+            session_env_path: false,
+            hook_applies: true,
+            effective_repo: Some(effective_repo),
+            branch_known,
+            branch,
+            protected_branch,
+            worktree,
+            merge_in_progress,
+            protected_branch_block,
+            has_uncommitted_changes_known: false,
+            has_uncommitted_changes: false,
+            changed_files_known: false,
+            changed_files: Vec::new(),
+            changed_file_count: 0,
+            uncommitted_file_limit_exceeded: false,
+            should_deny: true,
+            decision: GitHygieneDecision::DenyProtectedBranch,
+        };
+    }
+
+    // Check 2: Block if too many uncommitted files
+    let has_uncommitted_changes_result = git.has_uncommitted_changes(effective_repo_str);
+    let has_uncommitted_changes_known = has_uncommitted_changes_result.is_ok();
+    let has_uncommitted_changes = matches!(has_uncommitted_changes_result, Ok(true));
+    let (changed_files_known, changed_files) = if has_uncommitted_changes {
+        match git.changed_files(effective_repo_str) {
+            Ok(files) => (true, files),
+            Err(_) => (false, Vec::new()),
+        }
+    } else {
+        (false, Vec::new())
+    };
+    let changed_file_count = changed_files.len();
+    let uncommitted_file_limit_exceeded =
+        changed_files_known && changed_file_count > MAX_UNCOMMITTED_FILES;
+    let should_deny = uncommitted_file_limit_exceeded;
+    GitHygieneEvaluation {
+        tool: input.tool_name.clone(),
+        cwd: cwd_owned,
+        file_path: file_path.clone(),
+        edit_write_tool: true,
+        file_path_present: file_path.is_some(),
+        path_inside_repo: true,
+        session_env_path: false,
+        hook_applies: true,
+        effective_repo: Some(effective_repo),
+        branch_known,
+        branch,
+        protected_branch,
+        worktree,
+        merge_in_progress,
+        protected_branch_block,
+        has_uncommitted_changes_known,
+        has_uncommitted_changes,
+        changed_files_known,
+        changed_files,
+        changed_file_count,
+        uncommitted_file_limit_exceeded,
+        should_deny,
+        decision: if should_deny {
+            GitHygieneDecision::DenyUncommittedFileLimit
+        } else {
+            GitHygieneDecision::Allow
+        },
+    }
+}
+
+fn base_evaluation(
+    input: &HookInput,
+    tool: Option<String>,
+    edit_write_tool: bool,
+) -> GitHygieneEvaluation {
+    GitHygieneEvaluation {
+        tool,
+        cwd: input.cwd.clone().unwrap_or_else(|| ".".to_string()),
+        file_path: file_path_from_input(input),
+        edit_write_tool,
+        file_path_present: file_path_from_input(input).is_some(),
+        path_inside_repo: false,
+        session_env_path: false,
+        hook_applies: false,
+        effective_repo: None,
+        branch_known: false,
+        branch: None,
+        protected_branch: false,
+        worktree: false,
+        merge_in_progress: false,
+        protected_branch_block: false,
+        has_uncommitted_changes_known: false,
+        has_uncommitted_changes: false,
+        changed_files_known: false,
+        changed_files: Vec::new(),
+        changed_file_count: 0,
+        uncommitted_file_limit_exceeded: false,
+        should_deny: false,
+        decision: GitHygieneDecision::Allow,
+    }
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &GitHygieneEvaluation) -> HookOutput {
+    match evaluation.decision {
+        GitHygieneDecision::Allow => HookOutput::allow(),
+        GitHygieneDecision::DenyProtectedBranch => {
+            let branch = evaluation.branch.as_deref().unwrap_or("protected branch");
+            HookOutput::deny(format!(
                 "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
                  Call `EnterWorktree` now to create an isolated feature branch, then retry \
                  the edit against the worktree path. Direct edits to protected branches are \
                  never permitted; this is a Gary-authorized policy and overrides any \
                  mode-state caution about agent-driven tool calls."
-            ));
+            ))
         }
-    }
-
-    // Check 2: Block if too many uncommitted files
-    match git.has_uncommitted_changes(cwd) {
-        Ok(true) => match git.changed_files(cwd) {
-            Ok(files) if files.len() > MAX_UNCOMMITTED_FILES => {
-                HookOutput::deny(format!(
-                    "Git hygiene: {} uncommitted files (threshold: {}). \
-                     Commit your changes before making more edits.\n\
-                     Changed files: {}",
-                    files.len(),
-                    MAX_UNCOMMITTED_FILES,
-                    files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
-                ))
-            }
-            _ => HookOutput::allow(),
-        },
-        _ => HookOutput::allow(),
+        GitHygieneDecision::DenyUncommittedFileLimit => HookOutput::deny(format!(
+            "Git hygiene: {} uncommitted files (threshold: {}). \
+                 Commit your changes before making more edits.\n\
+                 Changed files: {}",
+            evaluation.changed_file_count,
+            MAX_UNCOMMITTED_FILES,
+            evaluation
+                .changed_files
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
@@ -275,19 +490,31 @@ mod tests {
     }
 
     impl GitStatusPort for StubGit {
-        fn has_uncommitted_changes(&self, _repo_path: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _repo_path: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(self.has_changes)
         }
-        fn changed_files(&self, _repo_path: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _repo_path: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(self.files.clone())
         }
-        fn current_branch(&self, _repo_path: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _repo_path: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok(self.branch.clone())
         }
         fn is_worktree(&self, _repo_path: &str) -> bool {
             self.worktree
         }
-        fn has_unpushed_commits(&self, _repo_path: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _repo_path: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _path: &str) -> Option<String> {
@@ -302,6 +529,9 @@ mod tests {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -310,6 +540,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -323,13 +556,22 @@ mod tests {
     }
 
     impl GitStatusPort for PathAwareStubGit {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, repo_path: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            repo_path: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             if repo_path == self.worktree_root {
                 Ok("feat/wt".to_string())
             } else {
@@ -339,7 +581,10 @@ mod tests {
         fn is_worktree(&self, repo_path: &str) -> bool {
             repo_path == self.worktree_root
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, path: &str) -> Option<String> {
@@ -360,6 +605,9 @@ mod tests {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -368,6 +616,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -423,9 +674,11 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
-            .blocked
-            .is_none());
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -449,9 +702,11 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
-            .blocked
-            .is_none());
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -494,9 +749,11 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
-            .blocked
-            .is_none());
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -540,9 +797,11 @@ mod tests {
             cwd: Some(".".to_string()),
             ..Default::default()
         };
-        assert!(process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
-            .blocked
-            .is_none());
+        assert!(
+            process(&input, &git, &crate::hooks::test_support::StubFs, &nb())
+                .blocked
+                .is_none()
+        );
     }
 
     #[test]
@@ -651,19 +910,31 @@ mod tests {
     }
 
     impl GitStatusPort for DiskRepoStub {
-        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
-        fn changed_files(&self, _: &str) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
             Ok(vec![])
         }
-        fn current_branch(&self, _: &str) -> Result<String, sentinel_domain::port_errors::GitError> {
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
             Ok(self.branch.clone())
         }
         fn is_worktree(&self, _: &str) -> bool {
             self.worktree
         }
-        fn has_unpushed_commits(&self, _: &str) -> Result<bool, sentinel_domain::port_errors::GitError> {
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
             Ok(false)
         }
         fn repo_root(&self, _: &str) -> Option<String> {
@@ -678,6 +949,9 @@ mod tests {
         fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
             None
         }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
         fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
             None
         }
@@ -686,6 +960,9 @@ mod tests {
         }
         fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
             Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
         }
     }
 
@@ -736,16 +1013,31 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+        {
             Ok(vec![])
         }
         fn exists(&self, p: &std::path::Path) -> bool {
@@ -754,10 +1046,17 @@ mod tests {
         fn is_dir(&self, p: &std::path::Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &std::path::Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -822,16 +1121,31 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn read_to_string(
+                &self,
+                p: &std::path::Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+            {
                 Ok(vec![])
             }
             fn exists(&self, p: &std::path::Path) -> bool {
@@ -840,10 +1154,18 @@ mod tests {
             fn is_dir(&self, p: &std::path::Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                p: &std::path::Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }

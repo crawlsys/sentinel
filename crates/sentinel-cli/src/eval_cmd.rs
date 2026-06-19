@@ -2,7 +2,8 @@
 //!
 //! Phase 2 ships the `list` subcommand. Phase 3e adds `run`: load
 //! cases, replay recorded candidate outputs through an
-//! [`EvalScorerPort`], persist the run via [`EvalRunStorePort`].
+//! [`EvalScorerPort`], persist the run via [`EvalRunStorePort`], then
+//! authorize the aggregate verdict through a durable LangGraph.
 
 use std::collections::HashMap;
 use std::fs;
@@ -78,7 +79,11 @@ fn render_table(base_dir: &std::path::Path, entries: &[CorpusEntry]) {
     println!("  {:<40}  split", "case_id");
     println!("  {:-<40}  --------", "");
     for e in entries {
-        let split = if e.is_private_test { "private" } else { "public" };
+        let split = if e.is_private_test {
+            "private"
+        } else {
+            "public"
+        };
         println!("  {:<40}  {split}", e.case_id.as_str());
     }
 }
@@ -92,7 +97,8 @@ fn render_table(base_dir: &std::path::Path, entries: &[CorpusEntry]) {
 pub struct RunArgs {
     pub run_id: String,
     /// Path to a JSON file mapping `case_id -> candidate_output`.
-    /// Phase 3e is replay-style only — live-LLM dispatch comes later.
+    /// Eval scoring operates on explicit candidate artifacts; agent
+    /// dispatch belongs to the upstream orchestration path.
     pub candidates_path: String,
     /// Optional filter: if non-empty, only these `case_id`s run.
     pub case_ids: Vec<String>,
@@ -102,17 +108,29 @@ pub struct RunArgs {
 }
 
 /// `sentinel eval run` — production entry point. Builds an
-/// [`LlmEvalScorer`] from env and delegates to [`run_with`].
-pub fn run(mut args: RunArgs) -> Result<()> {
-    let scorer = LlmEvalScorer::from_env()
-        .context("failed to build eval scorer from environment")?;
+/// [`LlmEvalScorer`] from env, executes the run, and writes a durable
+/// LangGraph audit row for the aggregate benchmark verdict.
+pub async fn run(mut args: RunArgs) -> Result<()> {
+    let scorer =
+        LlmEvalScorer::from_env().context("failed to build eval scorer from environment")?;
     let corpus = build_corpus(args.corpus_dir.take())?;
     let store = build_run_store(args.runs_dir.take())?;
-    run_with(&args, &corpus, &store, &scorer)
+    let run = run_with(&args, &corpus, &store, &scorer)?;
+    let graph_runs = store
+        .base_dir()
+        .join(format!("{}.graph-runs.jsonl", run.run_id.as_str()));
+    let graph_audit = crate::eval_graph::run_eval_graph_audit(&run, &graph_runs).await?;
+    if args.json {
+        render_run_json(&run, &graph_audit);
+    } else {
+        render_run_summary(&run);
+        render_graph_summary(&graph_audit);
+    }
+    Ok(())
 }
 
 /// Test seam — accepts pre-built corpus / store / scorer so tests
-/// can inject stubs and tempdir-scoped adapters without env vars.
+/// can inject tempdir-scoped adapters without env vars.
 /// Generic over the store + scorer types (not `&dyn`) so the
 /// downstream call to [`execute_run`] stays on the static-dispatch
 /// path; `&dyn` would require the use case to relax its `Sized`
@@ -122,7 +140,7 @@ pub fn run_with<St, Sc>(
     corpus: &FilesystemEvalCorpus,
     store: &St,
     scorer: &Sc,
-) -> Result<()>
+) -> Result<EvalRunResult>
 where
     St: EvalRunStorePort,
     Sc: EvalScorerPort,
@@ -152,12 +170,7 @@ where
         .save(&run)
         .map_err(|e| anyhow::anyhow!("failed to save run: {e}"))?;
 
-    if args.json {
-        render_run_json(&run);
-    } else {
-        render_run_summary(&run);
-    }
-    Ok(())
+    Ok(run)
 }
 
 fn build_run_store(runs_dir: Option<String>) -> Result<FilesystemEvalRunStore> {
@@ -167,9 +180,8 @@ fn build_run_store(runs_dir: Option<String>) -> Result<FilesystemEvalRunStore> {
 }
 
 fn load_candidates(path: &Path) -> Result<HashMap<EvalCaseId, String>> {
-    let bytes = fs::read(path).with_context(|| {
-        format!("failed to read candidates file {}", path.display())
-    })?;
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read candidates file {}", path.display()))?;
     let raw: HashMap<String, String> = serde_json::from_slice(&bytes).with_context(|| {
         format!(
             "candidates file {} must be a JSON object mapping case_id -> output",
@@ -201,9 +213,26 @@ fn load_cases(
     Ok(cases)
 }
 
-fn render_run_json(run: &EvalRunResult) {
-    let out = serde_json::to_string_pretty(run).unwrap_or_else(|_| "{}".to_string());
+fn render_run_json(run: &EvalRunResult, graph_audit: &crate::eval_graph::EvalGraphAudit) {
+    let out = serde_json::to_string_pretty(&serde_json::json!({
+        "workflow_authority": "langgraph",
+        "run": run,
+        "graph_audit": graph_audit,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
     println!("{out}");
+}
+
+fn render_graph_summary(graph_audit: &crate::eval_graph::EvalGraphAudit) {
+    println!(
+        "  graph:     {} ({})",
+        graph_audit.decision,
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .unwrap_or("<missing checkpoint>")
+    );
+    println!("  graph log: {}", graph_audit.graph_runs_path.display());
 }
 
 fn render_run_summary(run: &EvalRunResult) {
@@ -231,11 +260,8 @@ fn render_run_summary(run: &EvalRunResult) {
             println!("    {:<32} {mean:.3}", axis.key());
         }
     }
-    let errored: Vec<&sentinel_domain::eval::EvalCaseResult> = run
-        .case_results
-        .iter()
-        .filter(|c| c.is_error())
-        .collect();
+    let errored: Vec<&sentinel_domain::eval::EvalCaseResult> =
+        run.case_results.iter().filter(|c| c.is_error()).collect();
     if !errored.is_empty() {
         println!();
         println!("  Errored cases:");
@@ -382,7 +408,9 @@ mod tests {
 
     impl RecordingStore {
         fn new() -> Self {
-            Self { saved: Mutex::new(None) }
+            Self {
+                saved: Mutex::new(None),
+            }
         }
         fn last_saved(&self) -> Option<EvalRunResult> {
             self.saved.lock().unwrap().clone()
@@ -394,10 +422,7 @@ mod tests {
             *self.saved.lock().unwrap() = Some(run.clone());
             Ok(())
         }
-        fn load(
-            &self,
-            _run_id: &EvalRunId,
-        ) -> Result<Option<EvalRunResult>, EvalRunStoreError> {
+        fn load(&self, _run_id: &EvalRunId) -> Result<Option<EvalRunResult>, EvalRunStoreError> {
             Ok(self.saved.lock().unwrap().clone())
         }
         fn list_run_ids(&self) -> Result<Vec<EvalRunId>, EvalRunStoreError> {
@@ -406,8 +431,7 @@ mod tests {
     }
 
     fn write_candidates(path: &std::path::Path, entries: &[(&str, &str)]) {
-        let map: std::collections::BTreeMap<&str, &str> =
-            entries.iter().copied().collect();
+        let map: std::collections::BTreeMap<&str, &str> = entries.iter().copied().collect();
         fs::write(path, serde_json::to_string(&map).unwrap()).unwrap();
     }
 
@@ -417,10 +441,7 @@ mod tests {
         write_case(dir.path(), "c1", false);
         write_case(dir.path(), "c2", false);
         let candidates_path = dir.path().join("candidates.json");
-        write_candidates(
-            &candidates_path,
-            &[("c1", "output 1"), ("c2", "output 2")],
-        );
+        write_candidates(&candidates_path, &[("c1", "output 1"), ("c2", "output 2")]);
 
         let corpus = FilesystemEvalCorpus::at_dir(dir.path().to_path_buf());
         let store = RecordingStore::new();
@@ -448,10 +469,7 @@ mod tests {
         write_case(dir.path(), "c1", false);
         write_case(dir.path(), "c2", false);
         let candidates_path = dir.path().join("candidates.json");
-        write_candidates(
-            &candidates_path,
-            &[("c1", "output 1"), ("c2", "output 2")],
-        );
+        write_candidates(&candidates_path, &[("c1", "output 1"), ("c2", "output 2")]);
 
         let corpus = FilesystemEvalCorpus::at_dir(dir.path().to_path_buf());
         let store = RecordingStore::new();

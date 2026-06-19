@@ -242,7 +242,7 @@ impl AuditorAxes {
         }
     }
 
-    /// Mean of the four axes — a quick composite for sorting / dashboards.
+    /// Mean of the four axes — a quick composite for sorting / reports.
     /// The hook uses [`AuditorVerdict::confidence`] for human-sampling
     /// decisions, not this mean; provided for operator diagnostics.
     #[must_use]

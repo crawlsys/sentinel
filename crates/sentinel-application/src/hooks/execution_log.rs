@@ -18,9 +18,38 @@ fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(dir)
 }
 
+fn session_path_component(session_id: &str) -> Option<&str> {
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id == "unknown"
+        || session_id == "default"
+        || session_id.len() > 128
+    {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return None;
+    }
+    Some(session_id)
+}
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input.session_id.as_deref().and_then(session_path_component)
+}
+
+fn offset_path(session_id: &str) -> Option<PathBuf> {
+    let session_id = session_path_component(session_id)?;
+    Some(std::env::temp_dir().join(format!("claude-execlog-offset-{session_id}")))
+}
+
 /// Read the byte-offset marker so we only process new transcript lines.
 fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
-    let path = std::env::temp_dir().join(format!("claude-execlog-offset-{session_id}"));
+    let Some(path) = offset_path(session_id) else {
+        return 0;
+    };
     fs.read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -29,7 +58,9 @@ fn read_offset(fs: &dyn FileSystemPort, session_id: &str) -> usize {
 
 /// Persist the line-offset marker for next invocation.
 fn write_offset(fs: &dyn FileSystemPort, session_id: &str, offset: usize) {
-    let path = std::env::temp_dir().join(format!("claude-execlog-offset-{session_id}"));
+    let Some(path) = offset_path(session_id) else {
+        return;
+    };
     let _ = fs.write(&path, offset.to_string().as_bytes());
 }
 
@@ -61,20 +92,25 @@ fn extract_context(line: &str) -> Option<String> {
 /// Read the current skill from the telemetry state file written by skill-router.
 /// Uses sentinel's protected telemetry dir instead of world-writable `temp_dir()`. (Attack #51)
 fn current_skill(fs: &dyn FileSystemPort) -> String {
-    let dir = fs
-        .home_dir().map_or_else(std::env::temp_dir, |h| h.join(".claude").join("sentinel").join("telemetry"));
+    let dir = fs.home_dir().map_or_else(std::env::temp_dir, |h| {
+        h.join(".claude").join("sentinel").join("telemetry")
+    });
     let path = dir.join("claude-current-skill");
-    fs.read_to_string(&path).map_or_else(|_| "none".to_string(), |s| s.trim().to_string())
+    fs.read_to_string(&path)
+        .map_or_else(|_| "none".to_string(), |s| s.trim().to_string())
 }
 
 /// Process the execution-log hook event (Stop).
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = concrete_session_id(input) else {
+        return HookOutput::allow();
+    };
+
     let metrics = match metrics_dir(ctx.fs) {
         Some(d) => d,
         None => return HookOutput::allow(),
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
     let transcript_path = match &input.transcript_path {
@@ -183,6 +219,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use serde_json::json;
     use std::io::Write;
 
@@ -259,6 +296,119 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_offset_or_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let unknown_offset = std::env::temp_dir().join("claude-execlog-offset-unknown");
+        let log_path = super::metrics_dir(&fs)
+            .expect("metrics dir")
+            .join("execution-log.jsonl");
+        let _ = std::fs::remove_file(&unknown_offset);
+        let _ = std::fs::remove_file(&log_path);
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "[RUN] linear | run_id: run-123 | session: missing"
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: None,
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!unknown_offset.exists());
+        assert!(!log_path.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_does_not_write_offset_or_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let raw_offset = std::env::temp_dir().join("claude-execlog-offset- unknown ");
+        let trimmed_offset = std::env::temp_dir().join("claude-execlog-offset-unknown");
+        let log_path = super::metrics_dir(&fs)
+            .expect("metrics dir")
+            .join("execution-log.jsonl");
+        let _ = std::fs::remove_file(&raw_offset);
+        let _ = std::fs::remove_file(&trimmed_offset);
+        let _ = std::fs::remove_file(&log_path);
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "[RUN] linear | run_id: run-123 | session: synthetic"
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some(".".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!raw_offset.exists());
+        assert!(!trimmed_offset.exists());
+        assert!(!log_path.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_scoped_log_and_offset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let session_id = format!("test-exec-real-{}", std::process::id());
+        let offset = offset_path(&session_id).expect("safe offset path");
+        let log_path = super::metrics_dir(&fs)
+            .expect("metrics dir")
+            .join("execution-log.jsonl");
+        let _ = std::fs::remove_file(&offset);
+        let _ = std::fs::remove_file(&log_path);
+
+        let transcript = make_transcript(&[json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "[RUN] linear | run_id: run-123 | session: concrete"
+                }]
+            }
+        })]);
+
+        let input = HookInput {
+            transcript_path: Some(transcript.path().to_string_lossy().to_string()),
+            session_id: Some(session_id.clone()),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+        let log = std::fs::read_to_string(&log_path).expect("execution log");
+        let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+
+        assert!(output.blocked.is_none());
+        assert_eq!(entry["session_id"], session_id);
+        assert_eq!(entry["type"], "run");
+        assert!(offset.exists());
+        let _ = std::fs::remove_file(offset);
     }
 
     #[test]

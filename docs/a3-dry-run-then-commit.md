@@ -231,14 +231,13 @@ pub struct AuditorAxes {
 }
 ```
 
-The adapter lives in `sentinel-infrastructure/src/auditor/` and is selected at startup based on configuration. **The architectural requirement is that the auditor model is from a different vendor than the acting model.** Concrete adapter implementations:
+The auditor implementation lives in `sentinel-infrastructure/src/dry_run_auditor.rs` and is selected through the A2 capability router. **The architectural requirement is that the auditor model is from a different underlying vendor than the acting model.** Concrete model seats are router profiles, not direct SDK adapters:
 
-- `AnthropicAuditor` — for sessions where the acting agent is OpenAI / Google / etc.
-- `OpenAIAuditor` — for sessions where the acting agent is Anthropic.
-- `GoogleAuditor` — third-vendor option.
-- `OllamaAuditor` — local open-weights option (for the open-weights-commitment path; also lower-cost).
+- OpenRouter-backed frontier profiles for vendor-separated hosted judging.
+- Ollama/OpenRouter open-weights profiles for the open-weights-commitment path and lower-cost review.
+- Capability requirements (`DifferentVendorFrom`, `StructuredOutput`, reasoning tier, cost budget) decide the seat.
 
-The selector ensures the auditor is *never* the same vendor as the acting agent. Sentinel reads the session's acting model from environment + config and picks accordingly.
+The selector ensures the auditor is *never* the same underlying vendor as the acting agent. Sentinel reads the session's acting model from environment + config and picks through the router accordingly.
 
 ### 4.5 Human-sampling escalation
 
@@ -256,9 +255,9 @@ Human escalation paths:
 - **Catastrophic class** — always.
 - **Auditor confidence < 0.85** — always.
 - **Random 5% spot-check** of passed actions — calibration; without it, auditor drift goes undetected.
-- **Explicit operator request** — operator can mark a session "always human review" via consul for sensitive workflows.
+- **Explicit operator request** — operator can mark a session "always human review" via Legatus AI for sensitive workflows.
 
-The escalation is routed through consul (per consul ADR-016's `ConsulIdentity::HumanOperator` path) — the same channel the operator already uses for voice/text supervision. No new UI required.
+The escalation is routed through Legatus AI (per Legatus AI ADR-016's `LegatusAiIdentity::HumanOperator` path) — the same channel the operator already uses for voice/text supervision. No new UI required.
 
 ### 4.6 Proof-chain integration
 
@@ -315,7 +314,7 @@ Every Irreversible/Catastrophic action gains one auditor MCP call. Cost depends 
 
 - The trigger is reversibility class, not action count. Trivial / reversible-with-effort actions are unaffected.
 - For BA-vertical work, most actions are reversible-with-effort (drafts, intermediate artifacts). The irreversible-class actions are the high-value commits that benefit from the gate.
-- Operator-facing dashboards should surface auditor cost / latency over time so the cost is visible.
+- Operator-facing reports should surface auditor cost / latency over time so the cost is visible.
 
 ### 5.6 Operator override
 
@@ -325,13 +324,13 @@ The existing `hygiene_override` mechanism (signed token, 60s TTL) lets the opera
 
 ## 6. Multi-vendor MCP commitment
 
-A3 forces a decision: Sentinel commits to **multi-vendor MCP** for the auditor seat. Currently sentinel has 3 MCP servers wired (linear, sentinel, sequential-thinking — all Anthropic-stack-adjacent). A3 means at least one more MCP server for the auditor, on a vendor different from the acting model.
+A3 forces a decision: Sentinel commits to **multi-vendor model routing** for the auditor seat. The production path is the A2 capability router over OpenRouter/Ollama-backed model profiles, with underlying-vendor identity tracked even when a gateway fronts the model.
 
 Practical implications:
 
-- The auditor MCP server is a new component (likely a thin wrapper around the vendor's API).
-- Multiple auditor adapters exist (Anthropic, OpenAI, Google, Ollama) so the right one can be selected per acting-agent vendor.
-- The operator's MCP configuration in `~/.claude.json` registers whichever auditor adapters they want available.
+- The auditor is selected as a capability-routed model seat, not a direct-vendor SDK side path.
+- Multiple model profiles exist across underlying vendors so the right one can be selected per acting-agent vendor.
+- The operator's model/router configuration registers which profiles are available.
 
 This is also where the **deferred OpenRouter / Ollama Cloud / Kimi K2.6 cost-comparison decision** (per `model-routing-decisions` memory) intersects directly. The auditor seat is one of the model slots that decision will fill. Recommend treating the cost comparison as a prerequisite for A3 implementation:
 
@@ -349,7 +348,7 @@ This is also where the **deferred OpenRouter / Ollama Cloud / Kimi K2.6 cost-com
 
 3. **Two-pass auditor for catastrophic actions.** Should every Catastrophic action route to two auditors automatically (proto-A4)? Argues for: catastrophic by definition deserves the strongest available gate. Argues against: cost. Recommend yes, with both auditors running in parallel.
 
-4. **Dry-run metadata format standardization.** Tool calls today don't have a standard place to put `_intent` / `_reasoning` / `_expected_effect`. Either Sentinel proposes a Claude Code convention (preferred) or Sentinel infers from transcript context (fallback). Inference path is implementable now; convention path requires Anthropic engagement.
+4. **Dry-run metadata format standardization.** Tool calls today don't have a standard place to put `_intent` / `_reasoning` / `_expected_effect`. Sentinel should define a structured convention for its own hook/tool envelopes and treat transcript inference as weaker evidence.
 
 5. **Interaction with `phase_gate`.** Sentinel's existing `phase_gate` hook gates skill execution through claim → verify → execute phases. Where does dry-run fit? Recommend: between `verify` and `execute` for irreversible actions inside a skill, parallel to (not replacing) phase_gate's existing flow.
 
@@ -361,7 +360,7 @@ This is also where the **deferred OpenRouter / Ollama Cloud / Kimi K2.6 cost-com
 
 - **Unit tests**: `dry_run_then_commit` hook with in-memory `AuditorPort` returning canned verdicts. Cover Pass, Block, low-confidence, network-error.
 - **Reversibility classification tests**: every entry in `CATASTROPHIC_BASH_PATTERNS` classifies correctly; edge cases (e.g., `git push` without `--force` is not catastrophic, `git push --force` is).
-- **Auditor-vendor separation tests**: assert that when acting model is `claude-opus-4-7`, the auditor selector picks a non-Anthropic adapter; cycle through all (acting, auditor) pairs.
+- **Auditor-vendor separation tests**: assert that when acting model is `claude-opus-4-7`, the auditor selector picks a profile with a different underlying vendor; cycle through all (acting, auditor) pairs.
 - **Human-sample escalation tests**: Catastrophic always samples; auditor confidence < 0.85 always samples; random sampling produces ~5% over many runs.
 - **Proof-chain integration tests**: each dry-run produces a chain entry; chain links to prior proof; chain re-verifies cleanly with `sentinel verify`.
 - **End-to-end test in sentinel-cli**: simulate a session that proposes an Irreversible action; auditor blocks; action does not commit; audit log shows the block reason.
@@ -374,7 +373,7 @@ This is also where the **deferred OpenRouter / Ollama Cloud / Kimi K2.6 cost-com
 - **`sentinel-domain`**: new `AuditorPort` trait, new `DryRunRequest`/`AuditorVerdict`/`AuditorAxes` value objects, new `ReversibilityClass` enum. All pure data; no IO.
 - **`sentinel-application/src/hooks/dry_run_then_commit.rs`**: new hook module. Reads from `FileSystemPort`, `EnvPort`, `AuditorPort`. No direct IO.
 - **`sentinel-application/src/hooks/mod.rs`**: register `dry_run_then_commit` in `HOOK_NAMES`.
-- **`sentinel-infrastructure/src/auditor/`**: new adapter directory with `anthropic.rs`, `openai.rs`, `google.rs`, `ollama.rs` implementations of `AuditorPort`. These do the actual API calls.
+- **`sentinel-infrastructure/src/dry_run_auditor.rs`**: A2-routed auditor implementation over configured OpenRouter/Ollama model profiles. No direct-vendor SDK adapter side path.
 - **`crates/sentinel-cli/src/hook_cmd.rs`**: dispatcher knows about the new hook event; routes appropriately.
 - **`config/hooks.toml`**: new entry registering the hook for `PreToolUse`.
 - **`config/reversibility.toml`** (new): per-tool reversibility classification overrides operators can edit.
@@ -386,7 +385,7 @@ All hex/DDD-respecting per `[[architecture-hexagonal-ddd]]`. No new IO in `senti
 ## 10. Decision and ownership
 
 - **Decision class:** sentinel architectural change. Adds a new hook, a new port, and a new adapter category. Not a quarantine, not a retirement.
-- **Owner:** Gary Somerhalder ratifies; once ratified, implementation can be sequenced (probably hook scaffolding + AnthropicAuditor + OpenAIAuditor first; Google + Ollama follow).
+- **Owner:** Gary Somerhalder ratifies; once ratified, implementation can be sequenced through the hook scaffolding plus A2 router profile coverage.
 - **Re-evaluation cadence:** revisit after first 1000 dry-runs accumulated — calibrate confidence threshold, prune false-positive auditor blocks, tune human-sample rate.
 - **Related items in the brief:** A3 (this), A4 (debate — the natural upgrade), A6 (reversibility-graded tripwires — the trigger classification), A7 (honeypot canaries — the empirical check), A8 (interpretability probes — the latent-aware addition), BA5 (presentation generation with adversarial critique — the BA-vertical specialization of A3's auditor logic), R5 (quarantine on replay mining — must hold for A3's safety to hold).
 

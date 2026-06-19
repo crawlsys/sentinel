@@ -61,6 +61,36 @@ const BUG_KEYWORDS: &[&str] = &[
     "crash",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BugTaskDecision {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct BugTaskEvaluation {
+    pub tool: Option<String>,
+    pub cwd: Option<String>,
+    pub repo_root: Option<String>,
+    pub repo_root_present: bool,
+    pub pending_bug_present: bool,
+    pub pending_bug_stale: bool,
+    pub pending_state_repo_root_matches: bool,
+    pub allowed_tool: bool,
+    pub evidence: Option<String>,
+    pub evidence_present: bool,
+    pub first_seen_at_present: bool,
+    pub should_block: bool,
+    pub decision: BugTaskDecision,
+}
+
+impl BugTaskEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.repo_root_present && self.pending_bug_present && !self.pending_bug_stale
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingBugState {
     first_seen_at: String,
@@ -74,7 +104,11 @@ fn repo_hash(repo_root: &str) -> String {
     hasher.update(repo_root.as_bytes());
     hasher.finalize()[..4]
         .iter()
-        .fold(String::new(), |mut s, b| { use std::fmt::Write; write!(s, "{b:02x}").unwrap(); s })
+        .fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            write!(s, "{b:02x}").unwrap();
+            s
+        })
 }
 
 fn state_file(fs: &dyn FileSystemPort, repo_root: &str) -> Option<PathBuf> {
@@ -240,26 +274,102 @@ pub fn process_posttool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput 
 /// for this repo. Allowlists Task* / Read / Skill / sequential-thinking so
 /// the model can satisfy the gate.
 pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate_pretool(input, ctx);
+    apply_pretool_side_effects(&evaluation, ctx);
+    output_from_pretool_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate_pretool(input: &HookInput, ctx: &HookContext<'_>) -> BugTaskEvaluation {
+    let tool = input.tool_name.clone();
+    let tool_name = input.tool_name.as_deref().unwrap_or("");
+    let cwd_text = input.cwd.clone();
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let repo_root = match ctx.git.repo_root(cwd) {
         Some(r) => r,
-        None => return HookOutput::allow(),
+        None => {
+            return BugTaskEvaluation {
+                tool,
+                cwd: cwd_text,
+                repo_root: None,
+                repo_root_present: false,
+                pending_bug_present: false,
+                pending_bug_stale: false,
+                pending_state_repo_root_matches: false,
+                allowed_tool: ALLOWED_TOOLS.contains(&tool_name),
+                evidence: None,
+                evidence_present: false,
+                first_seen_at_present: false,
+                should_block: false,
+                decision: BugTaskDecision::Allow,
+            };
+        }
     };
 
     let state = match load_state(ctx.fs, &repo_root) {
         Some(s) => s,
-        None => return HookOutput::allow(),
+        None => {
+            return BugTaskEvaluation {
+                tool,
+                cwd: cwd_text,
+                repo_root: Some(repo_root),
+                repo_root_present: true,
+                pending_bug_present: false,
+                pending_bug_stale: false,
+                pending_state_repo_root_matches: false,
+                allowed_tool: ALLOWED_TOOLS.contains(&tool_name),
+                evidence: None,
+                evidence_present: false,
+                first_seen_at_present: false,
+                should_block: false,
+                decision: BugTaskDecision::Allow,
+            };
+        }
     };
 
-    if is_stale(&state.first_seen_at) {
-        clear_state(ctx.fs, &repo_root);
+    let pending_bug_stale = is_stale(&state.first_seen_at);
+    let allowed_tool = ALLOWED_TOOLS.contains(&tool_name);
+    let pending_state_repo_root_matches = state.repo_root == repo_root;
+    let evidence_present = !state.evidence.trim().is_empty();
+    let first_seen_at_present = !state.first_seen_at.trim().is_empty();
+    let should_block = !pending_bug_stale && !allowed_tool;
+    BugTaskEvaluation {
+        tool,
+        cwd: cwd_text,
+        repo_root: Some(repo_root),
+        repo_root_present: true,
+        pending_bug_present: true,
+        pending_bug_stale,
+        pending_state_repo_root_matches,
+        allowed_tool,
+        evidence: Some(state.evidence),
+        evidence_present,
+        first_seen_at_present,
+        should_block,
+        decision: if should_block {
+            BugTaskDecision::Block
+        } else {
+            BugTaskDecision::Allow
+        },
+    }
+}
+
+pub fn apply_pretool_side_effects(evaluation: &BugTaskEvaluation, ctx: &HookContext<'_>) {
+    if evaluation.pending_bug_present && evaluation.pending_bug_stale {
+        if let Some(repo_root) = evaluation.repo_root.as_deref() {
+            clear_state(ctx.fs, repo_root);
+        }
+    }
+}
+
+#[must_use]
+pub fn output_from_pretool_evaluation(evaluation: &BugTaskEvaluation) -> HookOutput {
+    if !matches!(evaluation.decision, BugTaskDecision::Block) {
         return HookOutput::allow();
     }
 
-    let tool_name = input.tool_name.as_deref().unwrap_or("");
-    if ALLOWED_TOOLS.contains(&tool_name) {
-        return HookOutput::allow();
-    }
+    let evidence = evaluation.evidence.as_deref().unwrap_or("").trim();
+    let tool_name = evaluation.tool.as_deref().unwrap_or("");
 
     let envelope = HookEnvelope::block(
         "Bug Task Gate",
@@ -268,8 +378,7 @@ pub fn process_pretool(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
              the bug (subject or description must include one of: bug, fix, \
              error, regression, broken, failure, failing, panic, crash) before \
              using `{}`. Auto-clears after 10 minutes.",
-            state.evidence.trim(),
-            tool_name,
+            evidence, tool_name,
         ),
     );
     HookOutput::block(envelope.render())

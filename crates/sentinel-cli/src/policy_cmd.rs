@@ -121,9 +121,9 @@ impl PolicySuggestion {
             "provenance" => {
                 StepVerifierRequirement::provenance_only(skill, phase_id, step_id, adapter)
             }
-            other => bail!(
-                "unknown mode '{other}' — accepted: 'verified' (default) or 'provenance'"
-            ),
+            other => {
+                bail!("unknown mode '{other}' — accepted: 'verified' (default) or 'provenance'")
+            }
         };
         Ok(Self { requirement })
     }
@@ -207,29 +207,30 @@ mod tests {
 
     #[test]
     fn parses_explicit_verified() {
-        let s = PolicySuggestion::parse(
-            "linear/qa-handoff/3.5.5 requires browserbase verified",
-        )
-        .unwrap();
+        let s = PolicySuggestion::parse("linear/qa-handoff/3.5.5 requires browserbase verified")
+            .unwrap();
         assert!(s.requirement.verified_only);
     }
 
     #[test]
     fn parses_provenance_mode() {
-        let s = PolicySuggestion::parse(
-            "linear/qa-handoff/3.5.5 requires browserbase provenance",
-        )
-        .unwrap();
+        let s = PolicySuggestion::parse("linear/qa-handoff/3.5.5 requires browserbase provenance")
+            .unwrap();
         assert!(!s.requirement.verified_only);
     }
 
     #[test]
     fn mode_is_case_insensitive() {
-        for mode in ["verified", "VERIFIED", "Verified", "provenance", "PROVENANCE"] {
+        for mode in [
+            "verified",
+            "VERIFIED",
+            "Verified",
+            "provenance",
+            "PROVENANCE",
+        ] {
             let input = format!("linear/qa-handoff/3.5.5 requires browserbase {mode}");
-            PolicySuggestion::parse(&input).unwrap_or_else(|e| {
-                panic!("case-insensitive parse failed for '{mode}': {e}")
-            });
+            PolicySuggestion::parse(&input)
+                .unwrap_or_else(|e| panic!("case-insensitive parse failed for '{mode}': {e}"));
         }
     }
 
@@ -268,19 +269,16 @@ mod tests {
 
     #[test]
     fn unknown_mode_errors() {
-        let err = PolicySuggestion::parse(
-            "linear/qa-handoff/3.5.5 requires browserbase strict",
-        )
-        .unwrap_err();
+        let err = PolicySuggestion::parse("linear/qa-handoff/3.5.5 requires browserbase strict")
+            .unwrap_err();
         assert!(err.to_string().contains("strict"), "{err}");
     }
 
     #[test]
     fn trailing_garbage_errors() {
-        let err = PolicySuggestion::parse(
-            "linear/qa-handoff/3.5.5 requires browserbase verified please",
-        )
-        .unwrap_err();
+        let err =
+            PolicySuggestion::parse("linear/qa-handoff/3.5.5 requires browserbase verified please")
+                .unwrap_err();
         assert!(err.to_string().contains("trailing"), "{err}");
     }
 
@@ -290,8 +288,7 @@ mod tests {
         // by the parser at one of two layers (either the target-shape
         // check sees "lin" without slashes, or the unexpected-trailing
         // check fires). Either way: invalid input MUST produce Err.
-        let err =
-            PolicySuggestion::parse("lin ear/qa/1 requires browserbase").unwrap_err();
+        let err = PolicySuggestion::parse("lin ear/qa/1 requires browserbase").unwrap_err();
         // We don't pin the exact wording — different inputs hit different
         // grammar layers — just confirm it's a structural complaint.
         let msg = err.to_string();
@@ -330,17 +327,14 @@ mod tests {
     fn toml_fragment_roundtrips_through_toml_parser() {
         // The emitted fragment must actually parse as TOML so a
         // human pasting it into a config doesn't get a syntax error.
-        let s = PolicySuggestion::parse(
-            "linear/qa-handoff/3.5.5 requires browserbase provenance",
-        )
-        .unwrap();
+        let s = PolicySuggestion::parse("linear/qa-handoff/3.5.5 requires browserbase provenance")
+            .unwrap();
         let frag = s.to_toml_fragment("test policy");
         #[derive(serde::Deserialize)]
         struct Wrapper {
             step_verifiers: Vec<StepVerifierRequirement>,
         }
-        let parsed: Wrapper = toml::from_str(&frag)
-            .expect("emitted fragment must be valid TOML");
+        let parsed: Wrapper = toml::from_str(&frag).expect("emitted fragment must be valid TOML");
         assert_eq!(parsed.step_verifiers.len(), 1);
         assert_eq!(parsed.step_verifiers[0], s.requirement);
     }

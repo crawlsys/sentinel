@@ -269,7 +269,7 @@ impl CompletenessFinding {
 }
 
 /// Names of the five challenge categories. Used in
-/// [`CompletenessFinding::SilentEmpty`] so dashboards can render
+/// [`CompletenessFinding::SilentEmpty`] so local clients can render
 /// "missing: gaps" without parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChallengeCategoryName {

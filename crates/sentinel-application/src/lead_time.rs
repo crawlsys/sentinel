@@ -15,10 +15,9 @@
 //!   * `sentinel lead-time aggregate` — rolling 30-day p50/p75/p95 per
 //!     (repo, env) plus DORA tier classification via
 //!     [`deploy_freq::DoraTier::from_lead_time_hours`].
-//!   * SENTINEL-19's master dashboard panel.
-//!   * The TS dashboard's `GetDoraTier` use case (apps/dashboard/src/
-//!     application/get-dora-tier.ts) reads the underlying JSONL via the
-//!     `JsonlMetricsRepository` adapter once lines start appearing.
+//!   * SENTINEL-19's operational summary.
+//!   * Local DORA clients can read the underlying JSONL once lines
+//!     start appearing.
 //!
 //! ## Schema
 //!

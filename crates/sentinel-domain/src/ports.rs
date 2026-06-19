@@ -70,12 +70,7 @@ pub trait GitStatusPort {
     /// [`rev_list_count`]). Use for ranges where HEAD is not the right-hand
     /// side — e.g. `"HEAD..origin/main"` to count how far *behind* the local
     /// branch is. Returns `None` on git failure (bad ref / not a repo).
-    ///
-    /// Default impl returns `None` so existing test stubs keep compiling; the
-    /// real infrastructure adapter overrides it.
-    fn rev_list_count_range(&self, _repo_path: &str, _range: &str) -> Option<u32> {
-        None
-    }
+    fn rev_list_count_range(&self, repo_path: &str, range: &str) -> Option<u32>;
 
     /// Run `git diff --name-only <range>` and return the changed file paths.
     /// `range` is the diff spec — `"HEAD"`, `"--cached"`, `"main..HEAD"`,
@@ -102,12 +97,7 @@ pub trait GitStatusPort {
     /// `None` when the path is not a git repo, HEAD is unborn (no commits yet),
     /// or git is unavailable. Used by `task_coverage_check` to detect a new
     /// commit between consecutive Stop events (the "done signal").
-    ///
-    /// A default `None` impl keeps existing test stubs compiling — only the
-    /// real adapter needs to implement it.
-    fn head_sha(&self, _repo_path: &str) -> Option<String> {
-        None
-    }
+    fn head_sha(&self, repo_path: &str) -> Option<String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,8 +116,11 @@ pub trait GitStatusPort {
 pub trait VectorStorePort: Send + Sync {
     /// Upsert points with server-side embedding. Each point has an id,
     /// text (for embedding), and a JSON payload.
-    async fn upsert_points(&self, collection: &str, points: Vec<VectorPoint>)
-        -> Result<(), VectorStoreError>;
+    async fn upsert_points(
+        &self,
+        collection: &str,
+        points: Vec<VectorPoint>,
+    ) -> Result<(), VectorStoreError>;
 
     /// Scroll (list) points with optional filter. Returns payloads.
     async fn scroll(
@@ -185,11 +178,13 @@ pub trait FileSystemPort: Send + Sync {
     /// clobbering its state).
     ///
     /// Test stubs that mock `home_dir()` inherit the default join
-    /// behavior automatically — no need to override unless they want
-    /// to assert different resolution.
+    /// behavior automatically. Missing home is a fatal configuration
+    /// error; implementations must not fall back to attacker-controlled CWD.
     fn claude_dir(&self) -> PathBuf {
         self.home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .expect(
+                "[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.",
+            )
             .join(".claude")
     }
 
@@ -198,6 +193,18 @@ pub trait FileSystemPort: Send + Sync {
 
     /// Write bytes to a file (creates parent dirs if needed).
     fn write(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError>;
+
+    /// Atomically replace a file's full contents.
+    ///
+    /// Adapters that support durable authority snapshots must implement this
+    /// explicitly. The default fails closed so callers cannot accidentally
+    /// degrade to a truncate-and-write path for Sentinel state.
+    fn replace_file_atomic(&self, path: &Path, _content: &[u8]) -> Result<(), FileSystemError> {
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::replace_file_atomic unsupported by adapter: {}",
+            path.display()
+        )))
+    }
 
     /// Create a directory and all parent directories.
     fn create_dir_all(&self, path: &Path) -> Result<(), FileSystemError>;
@@ -217,33 +224,38 @@ pub trait FileSystemPort: Send + Sync {
     /// Append bytes to a file (creates if needed, does not truncate).
     fn append(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError>;
 
-    /// Copy a file from `src` to `dst`. Required for the metrics-dir migration
-    /// in `session_init` (move = copy + remove for cross-device safety).
+    /// Copy a file from `src` to `dst`.
     ///
-    /// Default impl: returns Ok(()) without doing anything. Stub adapters in
-    /// tests that exercise the copy path must override; the real adapter in
-    /// `sentinel-infrastructure` overrides with `std::fs::copy`. Default
-    /// exists so the 20+ existing test stubs don't need to change.
-    fn copy(&self, _src: &Path, _dst: &Path) -> Result<(), FileSystemError> {
-        Ok(())
+    /// Adapters that support copying must implement this explicitly. The default
+    /// fails closed so an incomplete adapter cannot silently report success.
+    fn copy(&self, src: &Path, dst: &Path) -> Result<(), FileSystemError> {
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::copy unsupported by adapter: {} -> {}",
+            src.display(),
+            dst.display()
+        )))
     }
 
-    /// Remove a single file. No-op if the file doesn't exist; errors only on
-    /// permission failures or unexpected IO errors. Used by hooks that maintain
-    /// short-lived state markers (`skill_router`, `verification_gate`, `session_init`).
+    /// Remove a single file.
     ///
-    /// Default impl: Ok(()). See `copy` for rationale.
-    fn remove_file(&self, _path: &Path) -> Result<(), FileSystemError> {
-        Ok(())
+    /// Adapters that support deletion must implement this explicitly. The
+    /// production adapter treats a missing file as success; the trait default
+    /// does not guess.
+    fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::remove_file unsupported by adapter: {}",
+            path.display()
+        )))
     }
 
-    /// Remove an empty directory. Errors if the directory is non-empty —
-    /// callers should clear contents first. Used by `session_init` to prune
-    /// the legacy `~/.claude/metrics/` directory after migrating its contents.
+    /// Remove an empty directory.
     ///
-    /// Default impl: Ok(()). See `copy` for rationale.
-    fn remove_dir(&self, _path: &Path) -> Result<(), FileSystemError> {
-        Ok(())
+    /// Adapters that support deletion must implement this explicitly.
+    fn remove_dir(&self, path: &Path) -> Result<(), FileSystemError> {
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::remove_dir unsupported by adapter: {}",
+            path.display()
+        )))
     }
 
     /// Resolve `path` to its canonical absolute form (follows symlinks /
@@ -251,24 +263,26 @@ pub trait FileSystemPort: Send + Sync {
     /// `git_hygiene` to compare worktree-edit targets against the canonical
     /// repo root, and by `phase_gate`'s symlink-escape detector.
     ///
-    /// Default impl: returns the input path unchanged. The real adapter
-    /// in `sentinel-infrastructure` overrides with `std::fs::canonicalize`.
-    /// Stub callers that don't exercise canonicalization can rely on the
-    /// no-op default.
+    /// Adapters that support canonicalization must implement this explicitly.
+    /// The default fails closed so symlink/security checks cannot accidentally
+    /// run against an uncanonicalized path.
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
-        Ok(path.to_path_buf())
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::canonicalize unsupported by adapter: {}",
+            path.display()
+        )))
     }
 
     /// Recursively remove a directory and all its contents. Used by
     /// `channel_events::cleanup_stale_sessions` to prune stale per-session
     /// event directories on `SessionStart`.
     ///
-    /// Default impl: Ok(()) — non-destructive no-op so existing test stubs
-    /// don't need updating. The real adapter in `sentinel-infrastructure`
-    /// overrides with `std::fs::remove_dir_all`. Tests that exercise
-    /// recursive removal must inject an adapter that performs the deletion.
-    fn remove_dir_all(&self, _path: &Path) -> Result<(), FileSystemError> {
-        Ok(())
+    /// Adapters that support recursive removal must implement this explicitly.
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FileSystemError> {
+        Err(FileSystemError::backend(format!(
+            "FileSystemPort::remove_dir_all unsupported by adapter: {}",
+            path.display()
+        )))
     }
 }
 
@@ -283,8 +297,12 @@ pub trait FileSystemPort: Send + Sync {
 /// `pre_push_browser_test` (git).
 pub trait ProcessPort: Send + Sync {
     /// Run a command and capture output. Returns (`exit_success`, stdout, stderr).
-    fn run(&self, command: &str, args: &[&str], cwd: Option<&str>)
-        -> Result<ProcessOutput, ProcessError>;
+    fn run(
+        &self,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+    ) -> Result<ProcessOutput, ProcessError>;
 
     /// Spawn a detached process (fire-and-forget). Returns immediately.
     fn spawn_detached(&self, command: &str, args: &[&str]) -> Result<(), ProcessError>;
@@ -312,21 +330,46 @@ pub struct ProcessOutput {
 /// `labels`, `assignee`, `projectMilestone`, `projectHasMilestones`,
 /// `blockedBy`/`relations`) so the gate's existing parsing works unchanged.
 ///
-/// The gate prefers this live fetch and falls back to the cache file when the
-/// port is absent or returns `None` (no token, network error, timeout) — so
-/// pickup is real-time when possible and never bricked when not.
+/// The gate treats this live fetch as authority for the ticket being started.
+/// Missing configuration, network failures, malformed responses, and missing
+/// issues are surfaced as errors so the caller can fail closed instead of
+/// consulting stale local state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearLookupError {
+    /// The HTTP client could not reach or complete the Linear request.
+    Transport(String),
+    /// Linear returned JSON that could not be decoded.
+    Decode(String),
+    /// The GraphQL response did not contain the expected issue payload.
+    MalformedResponse(String),
+    /// Linear returned no issue for the requested identifier or ID.
+    MissingIssue(String),
+}
+
+impl std::fmt::Display for LinearLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(msg) => write!(f, "Linear transport error: {msg}"),
+            Self::Decode(msg) => write!(f, "Linear response decode error: {msg}"),
+            Self::MalformedResponse(msg) => write!(f, "Malformed Linear response: {msg}"),
+            Self::MissingIssue(id) => write!(f, "Linear issue not found: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for LinearLookupError {}
+
 pub trait LinearLookupPort: Send + Sync {
-    /// Fetch one issue by identifier. `None` on any failure (missing token,
-    /// network error, timeout, not found) — callers fall back to the cache.
-    fn fetch_issue(&self, identifier: &str) -> Option<serde_json::Value>;
+    /// Fetch one issue by identifier or Linear issue ID.
+    fn fetch_issue(&self, identifier_or_id: &str) -> Result<serde_json::Value, LinearLookupError>;
 }
 
 /// Port for free-form LLM text completion.
 ///
-/// Wraps Anthropic / `OpenRouter` / etc. for hooks that need an LLM call but
-/// don't fit the existing `AiClassifier` or `JudgeService` shapes (those are
-/// classification- and verdict-shaped). Used by `memory_verify` for claim
-/// extraction (Claude Haiku) and is generic enough for future LLM hooks.
+/// Wraps the standardized `OpenRouter` adapter for hooks that need an LLM call
+/// but don't fit the existing `AiClassifier` or `JudgeService` shapes (those
+/// are classification- and verdict-shaped). Model identity remains explicit in
+/// [`LlmRequest`] so policy can route by tier without direct-vendor side paths.
 #[async_trait::async_trait]
 pub trait LlmPort: Send + Sync {
     /// Run a completion. Returns the model's text response.
@@ -369,8 +412,8 @@ pub enum LlmModel {
 ///
 /// Abstracts `std::env::var` / `std::env::var_os` so hooks don't reach for
 /// the global env directly. Tests inject a `StubEnv` with a fixed map; the
-/// real adapter delegates to `std::env`. Used for the session-id idiom
-/// (`CLAUDE_SESSION_ID` → fallback `SESSION_ID`), the `SENTINEL_AUTOPILOT`
+/// real adapter delegates to `std::env`. Used for the session-id precedence
+/// (`CLAUDE_SESSION_ID`, then `SESSION_ID`), the `SENTINEL_AUTOPILOT`
 /// flag, and ntfy/`CLAUDE_ENV_FILE` config reads.
 pub trait EnvPort: Send + Sync {
     /// Read a UTF-8 environment variable. Returns `None` if absent or the
@@ -396,10 +439,9 @@ pub trait EnvPort: Send + Sync {
 #[async_trait::async_trait]
 pub trait MemoryMcpPort: Send + Sync {
     /// Call any tool on memory-mcp. Returns the parsed JSON payload from
-    /// `result.structuredContent` (preferred) or `result.content[0].text`
-    /// (fallback) on the MCP response. Errors when the subprocess fails to
+    /// typed `result.structuredContent`. Errors when the subprocess fails to
     /// spawn, the handshake fails, the tool returns an error, or the
-    /// response payload is missing.
+    /// structured response payload is missing.
     async fn call_tool(
         &self,
         name: &str,
@@ -413,7 +455,7 @@ pub trait MemoryMcpPort: Send + Sync {
 
 /// Port for classifying a tool call by its reversibility class (A6 design,
 /// `docs/a6-reversibility-graded-tripwires.md`). The single shared
-/// blast-radius axis every gate in sentinel consults.
+/// blast-radius axis every gate in sentinel queries.
 ///
 /// Consumers (specified across the A-tier design docs):
 /// - `tool_usage_gate` — replaces the binary `in_scope` decision with the
@@ -485,16 +527,13 @@ pub trait AuditorPort: Send + Sync {
 
     /// Cross-vendor DUAL audit for the highest-stakes (Irreversible /
     /// Catastrophic) actions: score with two frontier models and reconcile
-    /// conservatively (block if either dissents). The default delegates to
-    /// [`score`](Self::score) — implementors with a real second model (e.g.
-    /// the OpenRouter `RigAuditor`) override it. Used by the dry-run gate when
-    /// the action's reversibility class is Irreversible or Catastrophic.
+    /// conservatively (block if either dissents). Implementors must make the
+    /// dual-audit behavior explicit; production adapters must not silently
+    /// delegate this to a single-model score.
     fn score_dual(
         &self,
         dry_run: &crate::dry_run::DryRunRequest,
-    ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError> {
-        self.score(dry_run)
-    }
+    ) -> Result<crate::dry_run::AuditorVerdict, crate::dry_run::AuditorError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -509,10 +548,32 @@ pub enum RoutingError {
     /// nearest-miss diagnostics so the operator can fix profiles or
     /// relax the requirement.
     NoAgentSatisfies(Vec<crate::agent_routing::UnsatisfiedRequirement>),
+    /// Multiple agents satisfy the requirement and remain tied after every
+    /// evidence-bearing tie-breaker. Sentinel refuses to choose by lexical
+    /// ordering; operators must add a real capability, cost, latency, or
+    /// appraisal signal.
+    AmbiguousRoute(Vec<crate::capability::AgentId>),
     /// Operator-side misconfiguration — malformed profile, contradictory
     /// tie-breaker policy, etc. Surfaced at startup; sentinel refuses
     /// to dispatch until corrected.
     Configuration(String),
+}
+
+impl RoutingError {
+    #[must_use]
+    pub fn from_explanation(explanation: &crate::agent_routing::RoutingExplanation) -> Self {
+        if !explanation.candidates.is_empty() {
+            return Self::AmbiguousRoute(explanation.candidates.clone());
+        }
+
+        let mut all_unsat = Vec::new();
+        for (_id, reason) in &explanation.eliminated {
+            if let crate::agent_routing::EliminationReason::UnsatisfiedRequirement(items) = reason {
+                all_unsat.extend_from_slice(items);
+            }
+        }
+        Self::NoAgentSatisfies(all_unsat)
+    }
 }
 
 impl std::fmt::Display for RoutingError {
@@ -523,6 +584,13 @@ impl std::fmt::Display for RoutingError {
                     f,
                     "no registered agent satisfies the requirement ({} unsatisfied capability/agent pairs)",
                     reqs.len()
+                )
+            }
+            Self::AmbiguousRoute(candidates) => {
+                write!(
+                    f,
+                    "ambiguous route: {} agents remain tied after capability, appraisal, cost, and latency tie-breakers",
+                    candidates.len()
                 )
             }
             Self::Configuration(msg) => {
@@ -549,13 +617,15 @@ impl std::error::Error for RoutingError {}
 /// about choices.
 ///
 /// Implementations must be `Send + Sync` because the router is shared
-/// across hook invocations within a session and is consulted from the
+/// across hook invocations within a session and is queried from the
 /// hook engine (synchronous, single-thread) plus the daemon (async,
 /// multi-thread).
 pub trait CapabilityRouterPort: Send + Sync {
     /// Pick the best-fit agent for the requirement. Returns
     /// [`RoutingError::NoAgentSatisfies`] when no candidate clears the
-    /// `required` + `forbidden` filters.
+    /// `required` + `forbidden` filters and [`RoutingError::AmbiguousRoute`]
+    /// when multiple candidates remain tied after all evidence-bearing
+    /// tie-breakers.
     fn route(
         &self,
         requirement: &crate::capability::CapabilityRequirement,
@@ -616,9 +686,8 @@ pub trait AppraisalStorePort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProvenanceError {
     /// The audit chain backing store was unreachable (filesystem
-    /// error, locked file, etc.). Hooks treat as a soft-warn —
-    /// `provenance_validate` can't validate without history, but
-    /// the operator should see why.
+    /// error, locked file, etc.). BA provenance gates fail closed
+    /// in blocking modes because citations cannot be validated.
     StoreUnavailable(String),
     /// Backing-store data was malformed (corrupt JSONL line,
     /// schema mismatch). Carries the offending detail.
@@ -694,10 +763,8 @@ pub trait ProvenanceWritePort: Send + Sync {
 /// Errors `RequirementMatrixPort` can surface.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RequirementMatrixError {
-    /// The matrix endpoint was unreachable. Per spec §8.3 the
-    /// adapter has a `last_known_good` fallback — this error is
-    /// reserved for the case where no snapshot is available at
-    /// all (fresh install / never-fetched orchestration).
+    /// The matrix snapshot could not be read. BA recommendation gates
+    /// treat this as fail-closed because citations cannot be validated.
     MatrixUnavailable(String),
     /// The orchestration is registered but no row matches the
     /// supplied `matrix_row_id`. Distinct from `Ok(None)`: this
@@ -1001,7 +1068,7 @@ impl SpecChallengeScore {
     }
 
     /// Minimum axis value across all five. Useful for ranking + for
-    /// rendering "weakest axis" in operator dashboards.
+    /// rendering "weakest axis" in reports.
     #[must_use]
     pub fn min_axis(&self) -> f32 {
         [
@@ -1048,7 +1115,7 @@ impl std::error::Error for SpecChallengeScorerError {}
 /// Per `docs/a13-spec-challenge.md` §3, **Catastrophic-class** work
 /// requires both deterministic completeness AND every axis of this
 /// scorer ≥ operator-configured threshold. Irreversible and below
-/// pass on completeness alone — this port is *not* consulted for
+/// pass on completeness alone — this port is *not* queried for
 /// non-Catastrophic gates, which keeps the auditor-call budget
 /// bounded.
 ///

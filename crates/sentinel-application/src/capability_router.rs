@@ -1,7 +1,7 @@
 //! A2 — Capability router (pure algorithm + test helpers).
 //!
 //! Per `docs/a2-capability-aware-routing.md` §3. Implements the
-//! deterministic 6-step tie-breaker chain that picks an [`AgentId`]
+//! deterministic tie-breaker chain that picks an [`AgentId`]
 //! from a set of [`AgentCapabilityProfile`]s given a
 //! [`CapabilityRequirement`].
 //!
@@ -33,7 +33,9 @@
 //!    success rate wins.
 //! 4. Cost — cheapest `cost_per_input_token` wins.
 //! 5. Latency — fastest `typical_latency_ms` wins.
-//! 6. Stable `AgentId` ordering — final deterministic fallback.
+//! If preferred capability, appraisal, cost, and latency do not produce a
+//! single winner, routing fails closed as ambiguous instead of choosing by an
+//! arbitrary stable-id fallback.
 
 use sentinel_domain::agent_routing::{
     AppraisalWindow, EliminationReason, RequirementSignature, RoutingExplanation, TieBreaker,
@@ -74,7 +76,7 @@ pub const MIN_COHORT_FOR_APPRAISAL_TIE_BREAK: u32 = 20;
 /// step 3 effectively). Operators can also disable appraisal-based
 /// tie-breaking via `config/routing-policy.toml` (Phase 3b) for the
 /// same outcome.
-#[allow(clippy::too_many_lines)] // the 6-step tie-breaker chain is more readable inline than split across helpers
+#[allow(clippy::too_many_lines)] // the evidence-bearing tie-breaker chain is more readable inline than split across helpers
 pub fn pick(
     profiles: &[AgentCapabilityProfile],
     requirement: &CapabilityRequirement,
@@ -255,20 +257,13 @@ pub fn pick(
         );
     }
 
-    // Step 6 — stable AgentId ordering (lexically lowest wins).
-    candidates.sort_by(|a, b| a.agent_id.as_str().cmp(b.agent_id.as_str()));
-    if let Some(winner) = candidates.first() {
-        tie_breakers.push(TieBreaker::StableId {
-            winner: winner.agent_id.clone(),
-        });
-    }
-    finalize(
-        candidates[0],
-        candidate_ids,
+    RoutingExplanation {
+        chosen: None,
+        candidates: candidate_ids,
         eliminated,
-        tie_breakers,
-        signature,
-    )
+        tie_breakers_applied: tie_breakers,
+        requirement_signature: signature,
+    }
 }
 
 fn finalize(
@@ -372,16 +367,10 @@ impl CapabilityRouterPort for StaticCapabilityRouter {
             self.appraisal_store.as_deref(),
             self.window,
         );
-        explanation.chosen.ok_or_else(|| {
-            // Collect unsatisfied diagnostics from every eliminated agent.
-            let mut all_unsat: Vec<UnsatisfiedRequirement> = Vec::new();
-            for (_id, reason) in &explanation.eliminated {
-                if let EliminationReason::UnsatisfiedRequirement(items) = reason {
-                    all_unsat.extend_from_slice(items);
-                }
-            }
-            RoutingError::NoAgentSatisfies(all_unsat)
-        })
+        explanation
+            .chosen
+            .clone()
+            .ok_or_else(|| RoutingError::from_explanation(&explanation))
     }
 
     fn candidates(&self, requirement: &CapabilityRequirement) -> Vec<AgentId> {
@@ -582,21 +571,21 @@ mod tests {
     }
 
     #[test]
-    fn tie_breaker_step6_stable_id_final_fallback() {
-        // Two identical profiles (cost + latency + reasoning) — only
-        // step 6 can decide.
+    fn route_rejects_ambiguous_after_evidence_tie_breakers() {
+        // Two identical profiles (cost + latency + reasoning) cannot be
+        // routed without inventing an arbitrary stable-id decision.
         let mut a = kimi();
         a.agent_id = id("zeta");
         let mut b = kimi();
         b.agent_id = id("alpha");
         let r = static_router(vec![a, b]);
         let req = CapabilityRequirement::new(vec![Capability::Reasoning(ReasoningLevel::Standard)]);
-        let chosen = r.route(&req).unwrap();
-        assert_eq!(
-            chosen,
-            id("alpha"),
-            "lexically lowest wins as final fallback"
-        );
+        let err = r.route(&req).unwrap_err();
+        assert!(matches!(err, RoutingError::AmbiguousRoute(candidates) if candidates.len() == 2));
+        let explanation = r.explain(&req);
+        assert!(explanation.chosen.is_none());
+        assert_eq!(explanation.candidates.len(), 2);
+        assert!(explanation.tie_breakers_applied.is_empty());
     }
 
     // ---- candidates() ----

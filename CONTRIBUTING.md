@@ -84,7 +84,7 @@ with v1→v2 migration. We get to skip the lesson.
 ### 3. Skill subgraphs own their data
 
 A skill's step config is the only authority on that skill's steps.
-Other skills, the router, the dashboard — none of them reach into
+Other skills, the router, the report — none of them reach into
 another skill's proofs/state directly. They go through typed
 StepProof artifact handoffs.
 
@@ -279,7 +279,7 @@ design doc, name them. Search will find them years from now.
   `submit_step_evidence`. `PhaseProof` is the template for
   `StepProof`. Mirror the existing pattern unless you have a strong
   reason not to.
-- **Consult the milestone task descriptions** — every M1.x / M2.x /
+- **Query the milestone task descriptions** — every M1.x / M2.x /
   M4.x task in `tasks.md` includes design rationale. The reasons we
   did things one way and not another are written down there.
 - **Ask before designing around a constraint.** If a feature feels

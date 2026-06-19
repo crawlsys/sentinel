@@ -12,9 +12,11 @@
 //!
 //! Every test runs the binary with a fresh temp directory as `HOME` /
 //! `USERPROFILE` and `SENTINEL_CLAUDE_DIR`, so `~/.claude/...` fixtures never
-//! touch the real home. External-service env (`OPENROUTER_API_KEY`,
-//! `QDRANT_URL`, `LINEAR_API_KEY`) is cleared so service-dependent hooks fail
-//! open offline (CI-safe). Each test uses a unique `sessionId`.
+//! touch the real home. The enterprise hook constructor is given a dummy
+//! `OPENROUTER_API_KEY` so A2/A3/A13 routing initializes without using real
+//! credentials; other service env (`QDRANT_URL`, `LINEAR_API_KEY`) is cleared
+//! so service-dependent hooks stay offline/CI-safe. Each test uses a unique
+//! `sessionId`.
 //!
 //! ## Contract (from `hook_cmd.rs` / `events.rs`)
 //!
@@ -132,7 +134,7 @@ impl HookTest {
 
         // IMPORTANT: spawn the ENGINE bin, not the `sentinel` launcher.
         // `sentinel` (src/launcher.rs) is a thin shim that execs the INSTALLED
-        // `sentinel-engine` (the shadow-binary hot-swap system) — so spawning it
+        // `sentinel-engine` (the installed-binary hot-swap system) — so spawning it
         // would run the stale installed engine, not the freshly-built code under
         // test. The engine bin (src/main.rs) is the real hook processor.
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sentinel-engine"));
@@ -151,11 +153,11 @@ impl HookTest {
             .env("SENTINEL_ALLOW_TERMINAL", "1")
             .env("CLAUDE_CODE_ENTRY_POINT", "cli")
             .env("CLAUDE_SESSION_ID", &self.session_id)
-            // Force fail-open for service-dependent hooks (offline / CI-safe).
-            .env_remove("OPENROUTER_API_KEY")
+            // Satisfy enterprise router/scorer construction without using real
+            // credentials. These tests do not exercise live A3/A13 model calls.
+            .env("OPENROUTER_API_KEY", "test-openrouter-key")
             .env_remove("QDRANT_URL")
             .env_remove("LINEAR_API_KEY")
-            .env_remove("ANTHROPIC_API_KEY")
             .env_remove("CEREBRAS_API_KEY");
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
@@ -177,7 +179,11 @@ impl HookTest {
         } else {
             // The binary prints exactly one JSON object; take the last
             // non-empty line in case any stray text precedes it.
-            let line = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("{}");
+            let line = stdout
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("{}");
             serde_json::from_str(line.trim())
                 .unwrap_or_else(|e| panic!("stdout not JSON ({e}): {stdout:?}\nstderr: {stderr}"))
         };
@@ -199,7 +205,11 @@ struct HookResult {
 impl HookResult {
     /// The hook allowed: empty `{}` (no block, no injection, no stop).
     fn assert_allow(&self) {
-        assert!(self.exit_ok, "process should exit 0; stderr: {}", self.stderr);
+        assert!(
+            self.exit_ok,
+            "process should exit 0; stderr: {}",
+            self.stderr
+        );
         assert_eq!(
             self.json,
             json!({}),
@@ -534,7 +544,11 @@ fn readonly_bash_in_real_repo_is_allowed() {
         res.json
     );
     assert_ne!(dec, Some("deny"), "read-only git status must not be denied");
-    assert_ne!(dec, Some("ask"), "read-only git status must not require ask");
+    assert_ne!(
+        dec,
+        Some("ask"),
+        "read-only git status must not require ask"
+    );
 }
 
 #[test]

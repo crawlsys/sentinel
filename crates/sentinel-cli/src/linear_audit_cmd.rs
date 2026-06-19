@@ -7,25 +7,23 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 
-use sentinel_application::linear_pm_audit::{scan_pm_audit, BurndownInputs};
+use sentinel_application::linear_pm_audit::{scan_pm_audit_report, BurndownInputs};
 
 /// `velocity` (pts/week) and `weeks` (until target date) enable the
 /// burndown projection; both must be supplied or it is skipped.
-pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+pub async fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
+    let sentinel_dir: PathBuf = sentinel_infrastructure::paths::sentinel_root();
     let linear_cache = sentinel_dir.join("linear-assigned.json");
-    let output_summary = sentinel_dir
-        .join("metrics")
-        .join("linear-pm-audit.json");
+    let output_summary = sentinel_dir.join("metrics").join("linear-pm-audit.json");
+    let graph_runs = output_summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Linear PM Audit".bold());
     println!("Linear cache:   {}", linear_cache.display());
     println!("Output summary: {}", output_summary.display());
+    println!("Graph audit:    {}", graph_runs.display());
     println!();
 
-    let summary = scan_pm_audit(
+    let report = scan_pm_audit_report(
         &linear_cache,
         &output_summary,
         BurndownInputs {
@@ -34,6 +32,10 @@ pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
         },
     )
     .context("scan_pm_audit failed")?;
+    let graph_audit = crate::pm_audit_graph::run_pm_audit_graph_audit(&report.flags, &graph_runs)
+        .await
+        .context("PM audit graph audit failed")?;
+    let summary = report.summary;
 
     if summary.issues_total == 0 {
         println!(
@@ -53,6 +55,10 @@ pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
     println!(
         "  Points: {:.0} total · {:.0} done · {:.0} remaining",
         summary.points_total, summary.points_done, summary.points_remaining
+    );
+    println!(
+        "  {} PM graph run(s) · {} hard · {} advisory",
+        graph_audit.flags_audited, graph_audit.hard_violations, graph_audit.advisory_flags
     );
     println!();
 
@@ -118,10 +124,15 @@ pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
             "Calibration: no completed tickets with start+complete timestamps in cache".dimmed()
         );
     } else {
-        println!("{}", "Estimate-vs-actual calibration (median calendar days):".bold());
+        println!(
+            "{}",
+            "Estimate-vs-actual calibration (median calendar days):".bold()
+        );
         for (bucket, c) in &summary.calibration {
             let flag = if c.low_confidence {
-                "  ⚠ low-confidence (thin/coarse sample)".dimmed().to_string()
+                "  ⚠ low-confidence (thin/coarse sample)"
+                    .dimmed()
+                    .to_string()
             } else {
                 String::new()
             };
@@ -135,7 +146,7 @@ pub fn run(velocity: Option<f64>, weeks: Option<f64>) -> Result<()> {
             "{}",
             format!(
                 "⚠ {} hard PM violation(s) — these would be blocked by the linear_pm_gate hook.",
-                summary.oversized_open + summary.missing_estimate
+                graph_audit.hard_violations
             )
             .red()
             .bold()

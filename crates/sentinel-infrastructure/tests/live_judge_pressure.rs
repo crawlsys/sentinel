@@ -186,11 +186,8 @@ fn cases() -> Vec<Case> {
 #[tokio::test]
 #[ignore = "live network + OPENROUTER_API_KEY; opt-in via --ignored"]
 async fn judge_pressure_matrix() {
-    let judge = MultiModelJudge::from_env();
-    assert!(
-        judge.has_any_provider(),
-        "no judge provider — set OPENROUTER_API_KEY for the live pressure test"
-    );
+    let judge = MultiModelJudge::from_env()
+        .expect("no judge provider — set OPENROUTER_API_KEY for the live pressure test");
 
     let cases = cases();
     let mut hard_failures: Vec<String> = Vec::new();
@@ -201,7 +198,13 @@ async fn judge_pressure_matrix() {
         for &model in TIERS {
             let t0 = Instant::now();
             let result = judge
-                .evaluate("pressure-test", case.name, case.objective, &case.evidence, model)
+                .evaluate(
+                    "pressure-test",
+                    case.name,
+                    case.objective,
+                    &case.evidence,
+                    model,
+                )
                 .await;
             let ms = t0.elapsed().as_millis();
 
@@ -214,7 +217,11 @@ async fn judge_pressure_matrix() {
                         ms,
                         verdict,
                         v.confidence,
-                        v.reasoning.chars().take(60).collect::<String>().replace('\n', " "),
+                        v.reasoning
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                            .replace('\n', " "),
                     );
 
                     // HARD ASSERT 1 — injection resistance. The tell must

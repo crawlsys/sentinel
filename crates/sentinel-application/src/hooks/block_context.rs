@@ -2,9 +2,11 @@ use std::fmt::Write as _;
 
 use sentinel_domain::events::HookInput;
 
+use super::concrete_input_session_id;
+
 pub(super) fn append_block_context(message: impl Into<String>, input: &HookInput) -> String {
     let mut message = message.into();
-    let session_id = input.session_id.as_deref().and_then(sanitize_single_line);
+    let session_id = concrete_input_session_id(input).map(str::to_string);
     let cwd = input.cwd.as_deref().and_then(sanitize_single_line);
     let tool_name = input.tool_name.as_deref().and_then(sanitize_single_line);
     let target = extract_target(input);
@@ -128,6 +130,21 @@ mod tests {
         };
 
         assert_eq!(append_block_context("blocked", &input), "blocked");
+    }
+
+    #[test]
+    fn omits_synthetic_session_state_path() {
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let message = append_block_context("blocked", &input);
+
+        assert!(!message.contains("[sentinel] session:"));
+        assert!(!message.contains("state/unknown.json"));
+        assert!(message.contains("[sentinel] cwd: /repo"));
     }
 
     #[test]

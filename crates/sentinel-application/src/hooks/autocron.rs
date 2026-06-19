@@ -37,7 +37,11 @@ pub fn process(input: &HookInput) -> HookOutput {
 
     for rule in rules.iter().filter(|r| r.tool == tool) {
         // Cheap literal guard before the regex.
-        if rule.skip_tokens.iter().any(|t| haystack.contains(t.as_str())) {
+        if rule
+            .skip_tokens
+            .iter()
+            .any(|t| haystack.contains(t.as_str()))
+        {
             continue;
         }
 
@@ -59,7 +63,10 @@ pub fn process(input: &HookInput) -> HookOutput {
 
         // Exclude guard.
         if let Some(ex) = &rule.exclude {
-            if Regex::new(ex).map(|r| r.is_match(&haystack)).unwrap_or(false) {
+            if Regex::new(ex)
+                .map(|r| r.is_match(&haystack))
+                .unwrap_or(false)
+            {
                 continue;
             }
         }
@@ -209,8 +216,7 @@ fn ledger_path(input: &HookInput) -> PathBuf {
         .session_id
         .clone()
         .unwrap_or_else(|| "nosession".to_string());
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".claude")
+    crate::paths::claude_dir()
         .join("sentinel")
         .join("state")
         .join(format!("autocron-suggested-{session}.jsonl"))
@@ -290,21 +296,30 @@ mod tests {
         // Regression for the `!contains("main")` bug.
         let out = fresh(&bash("git push origin feat/main-menu"));
         let c = ctx_of(&out);
-        assert!(c.contains("CronCreate"), "feat/main-menu push must arm a monitor: {c}");
+        assert!(
+            c.contains("CronCreate"),
+            "feat/main-menu push must arm a monitor: {c}"
+        );
         assert!(c.contains("feat/main-menu"), "branch must render: {c}");
     }
 
     #[test]
     fn push_to_main_is_skipped() {
         let out = process(&bash("git push origin main"));
-        assert!(ctx_of(&out).is_empty(), "pushing main must not arm a PR-branch monitor");
+        assert!(
+            ctx_of(&out).is_empty(),
+            "pushing main must not arm a PR-branch monitor"
+        );
     }
 
     #[test]
     fn wrangler_deploy_emits_authoritative_deploy_cron() {
         let out = fresh(&bash("wrangler deploy --env staging"));
         let c = ctx_of(&out);
-        assert!(c.contains("[Sentinel-Authority]"), "deploy rule is authoritative: {c}");
+        assert!(
+            c.contains("[Sentinel-Authority]"),
+            "deploy rule is authoritative: {c}"
+        );
         assert!(c.contains("*/2 * * * *"));
         assert!(c.contains("CronDelete"));
     }
@@ -312,7 +327,10 @@ mod tests {
     #[test]
     fn dry_run_deploy_is_skipped() {
         let out = process(&bash("wrangler deploy --dry-run"));
-        assert!(ctx_of(&out).is_empty(), "--dry-run must be suppressed by skip_tokens");
+        assert!(
+            ctx_of(&out).is_empty(),
+            "--dry-run must be suppressed by skip_tokens"
+        );
     }
 
     #[test]
@@ -330,7 +348,10 @@ mod tests {
             ..Default::default()
         };
         let c = ctx_of(&fresh(&input));
-        assert!(c.contains("CronCreate"), "linear state change emits a cron: {c}");
+        assert!(
+            c.contains("CronCreate"),
+            "linear state change emits a cron: {c}"
+        );
         assert!(c.contains("abc-123"), "issue capture renders: {c}");
         assert!(c.contains("47 * * * *"));
     }
@@ -355,7 +376,10 @@ mod tests {
             ..Default::default()
         };
         let c = ctx_of(&fresh(&input));
-        assert!(c.contains("CronCreate"), "in_progress task arms a stale watch: {c}");
+        assert!(
+            c.contains("CronCreate"),
+            "in_progress task arms a stale watch: {c}"
+        );
         assert!(c.contains("*/30 * * * *"));
     }
 
@@ -373,17 +397,29 @@ mod tests {
         let first = ctx_of(&process(&make()));
         assert!(first.contains("CronCreate"), "first call arms: {first}");
         let second = ctx_of(&process(&make()));
-        assert!(second.is_empty(), "second identical call is deduped: {second}");
+        assert!(
+            second.is_empty(),
+            "second identical call is deduped: {second}"
+        );
         let _ = std::fs::remove_file(ledger_path(&make()));
     }
 
     #[test]
     fn classify_push_branch_handles_shapes() {
-        assert_eq!(classify_push_branch("git push origin feat/x").as_deref(), Some("feat/x"));
-        assert_eq!(classify_push_branch("git push -u origin feat/y").as_deref(), Some("feat/y"));
+        assert_eq!(
+            classify_push_branch("git push origin feat/x").as_deref(),
+            Some("feat/x")
+        );
+        assert_eq!(
+            classify_push_branch("git push -u origin feat/y").as_deref(),
+            Some("feat/y")
+        );
         assert_eq!(classify_push_branch("git push origin main"), None);
         assert_eq!(classify_push_branch("git push origin"), None);
         assert_eq!(classify_push_branch("git push"), None);
-        assert_eq!(classify_push_branch("git push origin HEAD:feat/z").as_deref(), Some("feat/z"));
+        assert_eq!(
+            classify_push_branch("git push origin HEAD:feat/z").as_deref(),
+            Some("feat/z")
+        );
     }
 }

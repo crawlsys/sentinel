@@ -4,26 +4,25 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use std::path::PathBuf;
 
 use sentinel_application::roi::{
     human_baseline_per_day, human_baseline_per_point, scan_roi, RoiWindow,
 };
 
-pub fn run() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let metrics_dir: PathBuf = home.join(".claude").join("sentinel").join("metrics");
+pub async fn run() -> Result<()> {
+    let metrics_dir = sentinel_infrastructure::paths::sentinel_root().join("metrics");
     let tokens_input = metrics_dir.join("tokens-per-ticket.jsonl");
     let cost_per_point_summary = metrics_dir.join("cost-per-point-summary.json");
     let output_jsonl = metrics_dir.join("roi.jsonl");
     let output_summary = metrics_dir.join("roi-summary.json");
+    let graph_runs = output_summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel ROI Scan (SEN-15)".bold());
     println!("Tokens input:        {}", tokens_input.display());
     println!("Cost-per-point in:   {}", cost_per_point_summary.display());
     println!("Output JSONL:        {}", output_jsonl.display());
     println!("Output summary:      {}", output_summary.display());
+    println!("Graph audit:         {}", graph_runs.display());
     println!();
     println!(
         "Human baseline:      ${:.0}/day fully-loaded, ${:.0}/point",
@@ -39,8 +38,21 @@ pub fn run() -> Result<()> {
         &output_summary,
     )
     .context("scan_roi failed")?;
+    let graph_audit = crate::roi_graph::run_roi_graph_audit(&report, &graph_runs)
+        .await
+        .context("roi graph audit failed")?;
 
     let Some(headline) = report.headline.as_ref() else {
+        println!(
+            "Graph decision:      {} ({})",
+            graph_audit.decision.bold(),
+            graph_audit
+                .authorization_checkpoint
+                .as_deref()
+                .expect("roi graph audit requires checkpoint")
+                .dimmed()
+        );
+        println!();
         println!(
             "{}",
             "No SEN-7 input found at tokens-per-ticket.jsonl. Run `sentinel tokens scan` first."
@@ -52,6 +64,15 @@ pub fn run() -> Result<()> {
     // Top-line big number.
     let ratio_str = format!("{:.1}x", headline.roi_ratio);
     println!("{}", "==== HEADLINE ROI ====".bold());
+    println!(
+        "  graph decision {} · {}",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("roi graph audit requires checkpoint")
+            .dimmed()
+    );
     println!(
         "  {}  {}",
         "Claude vs Human team:".bold(),
@@ -72,12 +93,9 @@ pub fn run() -> Result<()> {
     if headline.projected_annual_savings_usd > 0.0 {
         println!(
             "  Projected annual savings: {}",
-            format!(
-                "${:.0}",
-                headline.projected_annual_savings_usd
-            )
-            .green()
-            .bold()
+            format!("${:.0}", headline.projected_annual_savings_usd)
+                .green()
+                .bold()
         );
     } else {
         println!(
@@ -85,12 +103,8 @@ pub fn run() -> Result<()> {
             "(insufficient timeline data)".dimmed()
         );
     }
-    if headline.fallback_used {
-        println!(
-            "  {} {}",
-            "Note:".yellow(),
-            headline.fallback_note.dimmed()
-        );
+    if !headline.estimate_data_available && headline.tickets_shipped_total > 0 {
+        println!("  {} {}", "Note:".yellow(), headline.estimate_note.dimmed());
     }
     println!();
 
@@ -110,11 +124,10 @@ pub fn run() -> Result<()> {
     }
     println!();
 
-    if headline.fallback_used {
+    if !headline.estimate_data_available && headline.tickets_shipped_total > 0 {
         println!(
             "{}",
-            "Tip: SEN-13 has no estimate data — values rely on fallback assumption."
-                .dimmed()
+            "Tip: SEN-13 estimate data is required before ROI can be calculated.".dimmed()
         );
         println!(
             "{}",
@@ -139,8 +152,6 @@ fn print_window_row(w: &RoiWindow) {
     };
     let points_str = if w.points_shipped > 0.0 {
         format!("{:.1}", w.points_shipped)
-    } else if w.fallback_used {
-        "(synth)".to_string()
     } else {
         "—".to_string()
     };

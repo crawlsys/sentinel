@@ -41,14 +41,45 @@ impl TokenUsage {
     }
 }
 
-/// Coarse pricing tier — Opus / Sonnet / Haiku. Unknown models
-/// default to Opus rates so cost estimates never under-report.
+/// Coarse pricing tier — Opus / Sonnet / Haiku. Unknown models are pricing
+/// errors; callers must surface unpriced usage instead of inventing a tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PricingTier {
     Opus,
     Sonnet,
     Haiku,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PricingError {
+    model: String,
+}
+
+impl PricingError {
+    #[must_use]
+    pub fn unknown_model(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+impl std::fmt::Display for PricingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.model.trim().is_empty() {
+            f.write_str("cannot price token usage without a concrete model id")
+        } else {
+            write!(f, "unknown model id for token pricing: {}", self.model)
+        }
+    }
+}
+
+impl std::error::Error for PricingError {}
 
 /// Per-million-token USD rates for one tier.
 #[derive(Debug, Clone, Copy)]
@@ -95,26 +126,24 @@ const fn rates_for(tier: PricingTier) -> Rates {
 /// Classify an Anthropic model id (`claude-opus-4-6`,
 /// `claude-sonnet-4-5`, `claude-haiku-4-5`, …) into a pricing tier.
 ///
-/// Unknown ids fall back to `Opus` — conservative, never
-/// underestimates cost. Matching is case-insensitive and tolerates
+/// Unknown ids are rejected. Matching is case-insensitive and tolerates
 /// `[1m]`-style suffixes.
-#[must_use]
-pub fn tier_for_model(model: &str) -> PricingTier {
+pub fn tier_for_model(model: &str) -> Result<PricingTier, PricingError> {
     let m = model.to_ascii_lowercase();
     if m.contains("haiku") {
-        PricingTier::Haiku
+        Ok(PricingTier::Haiku)
     } else if m.contains("sonnet") {
-        PricingTier::Sonnet
+        Ok(PricingTier::Sonnet)
+    } else if m.contains("opus") {
+        Ok(PricingTier::Opus)
     } else {
-        // opus + anything unrecognised
-        PricingTier::Opus
+        Err(PricingError::unknown_model(model))
     }
 }
 
 /// Compute USD cost for a `usage` block under the given model id.
-#[must_use]
-pub fn cost_for(usage: TokenUsage, model: &str) -> f64 {
-    let r = rates_for(tier_for_model(model));
+pub fn cost_for(usage: TokenUsage, model: &str) -> Result<f64, PricingError> {
+    let r = rates_for(tier_for_model(model)?);
     let per_mtok = 1_000_000.0_f64;
     #[allow(clippy::cast_precision_loss)]
     let input = (usage.input as f64) * r.input / per_mtok;
@@ -126,10 +155,10 @@ pub fn cost_for(usage: TokenUsage, model: &str) -> f64 {
     let short_cache_create = (usage.cache_creation_5m as f64) * r.cache_creation_5m / per_mtok;
     #[allow(clippy::cast_precision_loss)]
     let long_cache_create = (usage.cache_creation_1h as f64) * r.cache_creation_1h / per_mtok;
-    input + output + cache_read + short_cache_create + long_cache_create
+    Ok(input + output + cache_read + short_cache_create + long_cache_create)
 }
 
-/// Short, dashboard-friendly model label (e.g. `opus-4-7`,
+/// Short, operator-friendly model label (e.g. `opus-4-7`,
 /// `sonnet-4-5`) extracted from a full Anthropic model id. Falls
 /// back to the original string if no `claude-` prefix is found.
 #[must_use]
@@ -148,17 +177,32 @@ mod tests {
 
     #[test]
     fn classifies_known_models() {
-        assert_eq!(tier_for_model("claude-opus-4-6"), PricingTier::Opus);
-        assert_eq!(tier_for_model("claude-opus-4-7"), PricingTier::Opus);
-        assert_eq!(tier_for_model("claude-sonnet-4-5"), PricingTier::Sonnet);
-        assert_eq!(tier_for_model("claude-sonnet-4-6"), PricingTier::Sonnet);
-        assert_eq!(tier_for_model("claude-haiku-4-5"), PricingTier::Haiku);
+        assert_eq!(
+            tier_for_model("claude-opus-4-6").unwrap(),
+            PricingTier::Opus
+        );
+        assert_eq!(
+            tier_for_model("claude-opus-4-7").unwrap(),
+            PricingTier::Opus
+        );
+        assert_eq!(
+            tier_for_model("claude-sonnet-4-5").unwrap(),
+            PricingTier::Sonnet
+        );
+        assert_eq!(
+            tier_for_model("claude-sonnet-4-6").unwrap(),
+            PricingTier::Sonnet
+        );
+        assert_eq!(
+            tier_for_model("claude-haiku-4-5").unwrap(),
+            PricingTier::Haiku
+        );
     }
 
     #[test]
-    fn unknown_models_fall_back_to_opus() {
-        assert_eq!(tier_for_model("totally-made-up-model"), PricingTier::Opus);
-        assert_eq!(tier_for_model(""), PricingTier::Opus);
+    fn unknown_models_are_pricing_errors() {
+        assert!(tier_for_model("totally-made-up-model").is_err());
+        assert!(tier_for_model("").is_err());
     }
 
     #[test]
@@ -168,21 +212,21 @@ mod tests {
             input: 1_000_000,
             ..Default::default()
         };
-        assert!((cost_for(usage, "claude-opus-4-7") - 15.0).abs() < 0.001);
+        assert!((cost_for(usage, "claude-opus-4-7").unwrap() - 15.0).abs() < 0.001);
 
         // 1 Mtok output = $75 on opus
         let usage = TokenUsage {
             output: 1_000_000,
             ..Default::default()
         };
-        assert!((cost_for(usage, "claude-opus-4-7") - 75.0).abs() < 0.001);
+        assert!((cost_for(usage, "claude-opus-4-7").unwrap() - 75.0).abs() < 0.001);
 
         // Cache read on opus is $1.50/Mtok
         let usage = TokenUsage {
             cache_read: 1_000_000,
             ..Default::default()
         };
-        assert!((cost_for(usage, "claude-opus-4-7") - 1.50).abs() < 0.001);
+        assert!((cost_for(usage, "claude-opus-4-7").unwrap() - 1.50).abs() < 0.001);
 
         // Mixed example: 124_800 input + 18_420 output + 3_920_000 cache_read
         let usage = TokenUsage {
@@ -193,7 +237,7 @@ mod tests {
         };
         // 124800/1e6*15 + 18420/1e6*75 + 3920000/1e6*1.5
         // = 1.872 + 1.3815 + 5.88 = 9.1335
-        assert!((cost_for(usage, "claude-opus-4-7") - 9.1335).abs() < 0.01);
+        assert!((cost_for(usage, "claude-opus-4-7").unwrap() - 9.1335).abs() < 0.01);
     }
 
     #[test]
@@ -202,7 +246,7 @@ mod tests {
             input: 1_000_000,
             ..Default::default()
         };
-        assert!((cost_for(usage, "claude-sonnet-4-5") - 3.0).abs() < 0.001);
+        assert!((cost_for(usage, "claude-sonnet-4-5").unwrap() - 3.0).abs() < 0.001);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use sentinel_domain::events::{HookInput, HookOutput};
 use std::path::PathBuf;
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CompactSnapshot {
@@ -178,7 +178,10 @@ fn read_session_state(
         })
         .unwrap_or_default();
 
-    let tool_calls = val.get("tool_calls").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let tool_calls = val
+        .get("tool_calls")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
 
     (active_skill, phases_read, tool_calls)
 }
@@ -188,7 +191,10 @@ fn read_session_state(
 // ---------------------------------------------------------------------------
 
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
+    let Some(session_id) = concrete_input_session_id(input) else {
+        tracing::warn!("pre_compact skipped snapshot without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd = input.cwd.as_deref();
 
     // Read session state
@@ -239,6 +245,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
 
     #[test]
     fn test_process_default_input() {
@@ -258,6 +265,65 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn missing_session_does_not_write_unknown_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let snapshot = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join("compact-snapshot.json");
+
+        let output = process(&HookInput::default(), &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!snapshot.exists());
+    }
+
+    #[test]
+    fn synthetic_session_does_not_write_unknown_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let snapshot = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("metrics")
+            .join("compact-snapshot.json");
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!snapshot.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_session_scoped_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let input = HookInput {
+            session_id: Some("compact-real-session".to_string()),
+            ..Default::default()
+        };
+
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        let snapshot = snapshot_file(&fs).expect("snapshot path");
+        let content = std::fs::read_to_string(snapshot).expect("snapshot");
+        assert!(content.contains("\"session_id\": \"compact-real-session\""));
+        assert!(!content.contains("\"session_id\": \"unknown\""));
     }
 
     #[test]

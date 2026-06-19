@@ -33,8 +33,10 @@ fn project_hash(cwd: &str) -> String {
 
 /// Derive project name from cwd (last path component)
 fn project_name(cwd: &str) -> String {
-    std::path::Path::new(cwd)
-        .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string())
+    std::path::Path::new(cwd).file_name().map_or_else(
+        || "unknown".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +364,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // Require vector store to be configured
-    let vector_store = if let Some(vs) = ctx.vector_store { vs } else {
+    let vector_store = if let Some(vs) = ctx.vector_store {
+        vs
+    } else {
         debug!("No Qdrant vector store configured — skipping session index");
         return HookOutput::allow();
     };
@@ -570,16 +574,29 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(PathBuf::from("/mock/home"))
         }
-        fn read_to_string(&self, _path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            _path: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(self.0.clone())
         }
-        fn write(&self, _path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            _path: &Path,
+            _content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn create_dir_all(&self, _path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _path: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _path: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, _path: &Path) -> bool {
@@ -588,10 +605,19 @@ mod tests {
         fn is_dir(&self, _path: &Path) -> bool {
             false
         }
-        fn metadata(&self, _path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::backend("no metadata in stub"))
+        fn metadata(
+            &self,
+            _path: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::backend(
+                "no metadata in stub",
+            ))
         }
-        fn append(&self, _path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _path: &Path,
+            _content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

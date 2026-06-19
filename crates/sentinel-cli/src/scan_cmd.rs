@@ -1,7 +1,7 @@
 //! `sentinel scan` — Marketplace scanner CLI
 //!
 //! Outputs a full marketplace snapshot as JSON to stdout.
-//! Replaces `dashboard/server/scanner.cjs`.
+//! Replaces the old marketplace scanner script.
 
 use std::path::PathBuf;
 
@@ -19,7 +19,7 @@ use sentinel_application::scanner;
 /// - `--dir <path>`: override marketplace root. When omitted, the root is
 ///   auto-detected by walking up from the current directory for a marketplace
 ///   marker (`.claude-plugin/marketplace.json` or a root `marketplace.json`
-///   alongside a `skills/` dir); if none is found, falls back to `~/.claude/`.
+///   alongside a `skills/` dir); if none is found, uses `~/.claude/`.
 pub fn run(
     counts_only: bool,
     validate_only: bool,
@@ -31,9 +31,7 @@ pub fn run(
     let root_dir = match dir {
         Some(d) => PathBuf::from(d),
         None => detect_marketplace_root().unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claude")
+            sentinel_infrastructure::paths::home_root_or_fatal().join(".claude")
         }),
     };
 
@@ -47,8 +45,13 @@ pub fn run(
         eprintln!("{} Filesystem counts:", "▶".blue());
         eprintln!(
             "  skills={}, hooks={}, commands={}, agents={}, mcp_servers={}, mcp_repos={}, cli_repos={}",
-            ext.core.skills, ext.core.hooks, ext.core.commands, ext.core.agents,
-            ext.core.mcp_servers, ext.core.mcp_repos, ext.core.cli_repos,
+            ext.core.skills,
+            ext.core.hooks,
+            ext.core.commands,
+            ext.core.agents,
+            ext.core.mcp_servers,
+            ext.core.mcp_repos,
+            ext.core.cli_repos,
         );
         eprintln!(
             "  scripts={}, docs={}, templates={}, browserbase_tools={}",
@@ -186,7 +189,7 @@ pub fn run(
 /// - a `marketplace.json` alongside a `skills/` directory (the repo layout).
 ///
 /// Returns `None` if no marker is found before reaching the filesystem root, so
-/// the caller can fall back to `~/.claude/`. This makes `sentinel scan` operate
+/// the caller can use `~/.claude/`. This makes `sentinel scan` operate
 /// on the repo it is invoked in rather than always rewriting `~/.claude/`.
 fn detect_marketplace_root() -> Option<PathBuf> {
     let start = std::env::current_dir().ok()?;

@@ -17,7 +17,7 @@ This brief is built from three parallel research passes — ArXiv state-of-the-a
 
 The recommendations split into two lists:
 
-- **Part 1 — Adopt (15 items):** practices the literature, industry, or both endorse and which map cleanly onto Sentinel/Consul's existing primitives.
+- **Part 1 — Adopt (15 items):** practices the literature, industry, or both endorse and which map cleanly onto Sentinel/Legatus AI's existing primitives.
 - **Part 2 — Retire or quarantine (15 items):** practices that look reasonable on the surface but which the recent literature shows are detrimental, with cited reasoning.
 
 **Methodology caveat (load-bearing):** Web search and fetch were blocked during the research passes; all citations are from training-data recall (cutoff January 2026). The directional claims are reliable; specific ArXiv IDs need a verification pass before any of this goes into an external paper or funding doc. A list of IDs to verify is in the appendix.
@@ -28,21 +28,21 @@ The recommendations split into two lists:
 
 ## Part 1 — Practices to adopt
 
-Each entry includes: what it is, evidence and source, how it fits Sentinel/Consul concretely, the strongest counterargument and our response to it, and a recommended next step.
+Each entry includes: what it is, evidence and source, how it fits Sentinel/Legatus AI concretely, the strongest counterargument and our response to it, and a recommended next step.
 
 ### A1. Dual-ledger orchestration (Magentic-One pattern)
 
 - **What it is.** A single Orchestrator maintains two read-mostly ledgers: a **Task Ledger** (facts gathered, guesses being tested, requirements) and a **Progress Ledger** (per-step progress, blockers, retry budget). Specialist workers act on tickets minted from the ledgers. Coordination happens through structured ledger updates, not free-form chat.
 - **Evidence.** Magentic-One, Fourney et al., Microsoft, 2024 — `arXiv:2411.04468`. Currently state-of-the-art on GAIA, WebArena, and AssistantBench among generalist multi-agent systems. The ledger pattern has been the most directly reproduced part of the design across 2025 frameworks.
-- **Sentinel/Consul fit.** Consul today is a fleet supervisor without a defined coordination data structure. Adopting the dual ledger gives Consul its core abstraction. Sentinel's `[Sentinel-Authority]` provenance prefix layers cleanly on top: each ledger update becomes a cryptographically attributable claim, which no published Magentic-One-style system has.
+- **Sentinel/Legatus AI fit.** Legatus AI today is a fleet supervisor without a defined coordination data structure. Adopting the dual ledger gives Legatus AI its core abstraction. Sentinel's `[Sentinel-Authority]` provenance prefix layers cleanly on top: each ledger update becomes a cryptographically attributable claim, which no published Magentic-One-style system has.
 - **Counterargument.** "We can just keep using filesystem state + TaskList." Response: the filesystem is a blackboard with last-writer-wins semantics; under concurrency it produces silent conflicts. The ledger is a typed, audited, single-owner structure that supports concurrent readers and serialized writes. The difference shows up at >3 concurrent agents, which is where we want to operate.
-- **Recommendation.** Adopt as Consul's core data model. Treat the existing TaskList as the public surface, the ledger as the supervisor-internal structure.
+- **Recommendation.** Adopt as Legatus AI's core data model. Treat the existing TaskList as the public surface, the ledger as the supervisor-internal structure.
 
 ### A2. Capability-aware routing, not role personas
 
 - **What it is.** Treat agent selection as a learned routing decision over a capability graph (capability = required tools + required gates + cost class + expected artifact shape). Specialization emerges from routing decisions, not from hardcoded persona prompts.
 - **Evidence.** RouteLLM, Ong et al., 2024 — `arXiv:2406.18665`. Reconciled with the persona-versus-swarm debate in the 2025 multi-agent surveys: persona pipelines (MetaGPT, ChatDev) win when decomposition is known a priori; generalist swarms with sampling (MoA, "More Agents Is All You Need") win when it isn't. Routing is the durable abstraction underneath both.
-- **Sentinel/Consul fit.** Sentinel already has skills, MCPs, and per-skill permissions. Promoting these into a capability registry that Consul routes against is a small step. Per-agent appraisal counters fall out for free.
+- **Sentinel/Legatus AI fit.** Sentinel already has skills, MCPs, and per-skill permissions. Promoting these into a capability registry that Legatus AI routes against is a small step. Per-agent appraisal counters fall out for free.
 - **Counterargument.** "We've seen MetaGPT-style role pipelines produce impressive demos." Response: demo-to-production gap on persona systems is consistently 5–10× (canonical case: the Devin SWE-bench-verified controversy of 2024). Routing-based specialization is more robust and easier to measure.
 - **Recommendation.** Build the capability graph schema first. Roles become a presentation-layer convenience, not a primitive.
 
@@ -50,7 +50,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Every non-trivial mutating action emits a structured dry-run (intended action + reasoning + expected effect). A trusted auditor — ideally with different weights from a different vendor, not just a different prompt — scores the dry-run. High-impact actions sample to humans. Action only commits on auditor pass.
 - **Evidence.** Greenblatt et al., Redwood Research, 2023–24 — `arXiv:2312.06942` ("AI Control: Improving Safety Despite Intentional Subversion"). The only safety protocol in the literature whose results survive the assumption that the audited model is actively trying to subvert oversight. Their finding: protocols help meaningfully, but the safety margin degrades as the capability gap between auditor and audited shrinks — which is why **separate model families matter**, not just separate prompts.
-- **Sentinel/Consul fit.** Sentinel's `PreToolUse` is exactly the right place for this. The dry-run is a new artifact in the proof chain; the auditor is a new hook with cross-vendor MCP access (Anthropic-audits-OpenAI, OpenAI-audits-Anthropic, etc.). No incumbent platform has this — Anthropic's hooks are intra-session and single-model.
+- **Sentinel/Legatus AI fit.** Sentinel's `PreToolUse` is exactly the right place for this. The dry-run is a new artifact in the proof chain; the auditor is a new hook with cross-vendor MCP access (Anthropic-audits-OpenAI, OpenAI-audits-Anthropic, etc.). No incumbent platform has this — Anthropic's hooks are intra-session and single-model.
 - **Counterargument.** "Latency doubles." Response: only for mutating actions above a threshold; read-only and trivial actions are unaffected. The latency cost is the price of the only safety story the literature actually underwrites.
 - **Recommendation.** Highest-leverage single addition. Build the dry-run artifact format first, then the auditor hook.
 
@@ -58,7 +58,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Replace the single monitor with two auditors holding different views of the dry-run, defending opposing positions before a human (or sampled-human) judge. Collusion requires coordination across models with no channel.
 - **Evidence.** Michael et al., 2023 — `arXiv:2311.08702` ("Debate Helps Supervise Unreliable Experts"); Khan et al., 2024 follow-up on persuasive LLM debate. The literature consensus is that debate is strictly stronger than a single auditor when judges are calibrated.
-- **Sentinel/Consul fit.** Extension of A3. The dry-run goes to two auditors with different system prompts and ideally different weights; their disagreements escalate; their agreements pass cheaply.
+- **Sentinel/Legatus AI fit.** Extension of A3. The dry-run goes to two auditors with different system prompts and ideally different weights; their disagreements escalate; their agreements pass cheaply.
 - **Counterargument.** "Judges with shared biases get manipulated by both debaters." Response: real concern (Khan 2024 shows it). Mitigation is randomized judges from a pool and human sampling at calibrated rate. Even imperfect, debate is the literature's actual recommended primitive.
 - **Recommendation.** Adopt after A3 lands. Single-auditor is the literature's *weakest* scalable-oversight primitive; we should not stop at it.
 
@@ -66,7 +66,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Gate each phase on a process reward model trained on human-labeled step quality, not on final-outcome correctness. The mathematical foundation of "proof-of-work at each step."
 - **Evidence.** Lightman et al., OpenAI, 2023 — `arXiv:2305.20050` ("Let's Verify Step by Step"). PRMs beat ORMs (outcome reward models) on math and reasoning by significant margins. The result that justified process-supervision as a research direction.
-- **Sentinel/Consul fit.** Sentinel's phase gates already implement procedural process supervision. Adding PRM-style scoring (or a model-as-judge approximation, which is what most production systems use) makes the gate decisions calibrated rather than rule-based binary. This is also publishable: nobody has combined cryptographic proof chains with PRM-scored phase gates.
+- **Sentinel/Legatus AI fit.** Sentinel's phase gates already implement procedural process supervision. Adding PRM-style scoring (or a model-as-judge approximation, which is what most production systems use) makes the gate decisions calibrated rather than rule-based binary. This is also publishable: nobody has combined cryptographic proof chains with PRM-scored phase gates.
 - **Counterargument.** "PRMs require training data we don't have." Response: model-as-judge with a strong evaluator is a working approximation; we can move to a trained PRM later when we have labeled trajectories.
 - **Recommendation.** Adopt as an upgrade to the existing phase gates.
 
@@ -74,7 +74,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Classify potential actions by reversibility class (trivially undoable / undoable with effort / irreversible / catastrophic) and gate on that axis. Novel-and-reversible passes cheaply; familiar-but-irreversible escalates.
 - **Evidence.** Bostrom 2014 framing; reflected in METR and Apollo evaluation design where actions are scored by their counterfactual impact, not their unfamiliarity.
-- **Sentinel/Consul fit.** Direct replacement for the novelty-axis tripwire pattern in the current plan. Reversibility is a property we can compute from the action class (file write under VCS = recoverable; force-push = effort; production DB drop = catastrophic). Maps cleanly to the existing hook structure.
+- **Sentinel/Legatus AI fit.** Direct replacement for the novelty-axis tripwire pattern in the current plan. Reversibility is a property we can compute from the action class (file write under VCS = recoverable; force-push = effort; production DB drop = catastrophic). Maps cleanly to the existing hook structure.
 - **Counterargument.** "Reversibility is harder to compute than novelty." Response: it's a finite enumeration (we can categorize every tool in our registry once). Novelty requires a baseline; reversibility requires a class.
 - **Recommendation.** Adopt as the primary axis for blast-radius gating. Drop novelty as primary (see R3 in Part 2).
 
@@ -82,7 +82,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Plant defectible opportunities the fleet should refuse (e.g., a fake credential left in a config, a Slack message asking the agent to exfiltrate, a misconfigured tool that would let an agent escape its sandbox). Continuously test that monitors catch them. A single miss pauses the fleet.
 - **Evidence.** Apollo Research's o1 scheming evaluations, December 2024 (Meinke et al., "Frontier Models are Capable of In-Context Scheming"). Honeypot-style evals are how Apollo, METR, and Anthropic measure monitor effectiveness in practice — direct measurement, not assumption.
-- **Sentinel/Consul fit.** New hook class. Canaries are a configuration, not a code change once the framework exists. Provides empirical data on whether the rest of the safety stack is actually working.
+- **Sentinel/Legatus AI fit.** New hook class. Canaries are a configuration, not a code change once the framework exists. Provides empirical data on whether the rest of the safety stack is actually working.
 - **Counterargument.** "Canaries pollute the work environment." Response: they're sparse and labeled internally. The cost of polluting one workspace is low; the cost of unmeasured monitor performance is high.
 - **Recommendation.** Adopt. Required for the safety story to be empirical rather than aspirational.
 
@@ -90,7 +90,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Linear or MLP probes trained on model activations that classify signals like deception, sandbagging, refusal-without-explanation, or goal-drift. Operates on latents, not on artifacts. Imperfect, but the only known primitive that reads inside the agent rather than around it.
 - **Evidence.** Zou et al., 2023 — `arXiv:2310.01405` ("Representation Engineering: A Top-Down Approach to AI Transparency"); Anthropic interpretability team's 2024–25 work on probing for deception; Marks et al. on sparse autoencoder features. The state of the art is improving fast.
-- **Sentinel/Consul fit.** Hook at the model boundary. Requires access to activations, which limits us to open-weights models or vendor-cooperative APIs. Probably starts as a research-grade feature applied to a subset of high-stakes actions, expanding as the tech matures.
+- **Sentinel/Legatus AI fit.** Hook at the model boundary. Requires access to activations, which limits us to open-weights models or vendor-cooperative APIs. Probably starts as a research-grade feature applied to a subset of high-stakes actions, expanding as the tech matures.
 - **Counterargument.** "Probes are noisy and unreliable." Response: yes, and yet they address the one thing artifacts cannot address in principle. Defense in depth with a known-noisy signal beats no signal at all.
 - **Recommendation.** Adopt as research-grade for now, with a roadmap to production as the underlying interpretability tooling matures. This is the only practice on the list that materially addresses the "agent trying to look like it is helping" failure mode.
 
@@ -98,7 +98,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Model Context Protocol for agent↔tool (already in place). Agent2Agent protocol (Google A2A, now under the Linux Foundation as of 2025) for agent↔agent. Extend semantics with our `[Sentinel-Authority]` provenance prefix.
 - **Evidence.** Anthropic MCP spec (2024); Google A2A spec (April 2025); survey: Yang et al., 2025 (commonly cited as `arXiv:2504.16736` — verify).
-- **Sentinel/Consul fit.** Don't reinvent transport. The interesting open problem is semantics — what messages *mean* (intent, commitment, refusal) — and that's where our provenance work has room to contribute originally.
+- **Sentinel/Legatus AI fit.** Don't reinvent transport. The interesting open problem is semantics — what messages *mean* (intent, commitment, refusal) — and that's where our provenance work has room to contribute originally.
 - **Counterargument.** "A2A is immature." Response: it's the candidate that the biggest non-Anthropic vendors are committed to. Betting on it is cheaper than building our own.
 - **Recommendation.** Adopt as the cross-agent transport. Position Sentinel's provenance prefix as the semantic layer on top.
 
@@ -106,7 +106,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Use a meta-agent to propose hook and policy configurations against proof-chain fitness signals. The hook graph is a tractable search space; the meta-agent does not modify itself or modify agent prompts.
 - **Evidence.** Hu et al., 2024 — `arXiv:2408.08435` (ADAS); Zhang et al., 2024 — `arXiv:2410.10762` (AFlow). The only credible self-authoring results in the literature target *workflow topology*, not open-ended self-modification.
-- **Sentinel/Consul fit.** Sentinel's hook graph is well-bounded and observable. Search over hook configurations is genuinely novel — nobody has applied agent-design search to the *governance layer*. This is the safe slice of the self-improvement story.
+- **Sentinel/Legatus AI fit.** Sentinel's hook graph is well-bounded and observable. Search over hook configurations is genuinely novel — nobody has applied agent-design search to the *governance layer*. This is the safe slice of the self-improvement story.
 - **Counterargument (very important).** "This is the replay-mining flywheel you said to quarantine." Response: it is the *narrow* version. ADAS over hook graphs is bounded (finite space, human-ratified diffs, reversible). The dangerous version is open-ended self-modification of agent behavior over a corpus of past traces. We adopt the bounded version; we quarantine the open one (see R5).
 - **Recommendation.** Adopt with three constraints: (a) only hook configurations, never agent prompts; (b) every proposed change requires human ratification; (c) all proposed changes are rollback-tested before promotion.
 
@@ -114,7 +114,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Zettelkasten-style linked memory notes, dynamically updated; graph layer indexes "who knew what, when, against which gate, for which task." Hybrid vector + symbolic + graph rather than pure vector RAG.
 - **Evidence.** Xu et al., 2025 — `arXiv:2502.12110` (verify ID); G-Memory 2025 preprint; consensus across 2025 team-memory papers that pure vector RAG is insufficient for team-scale memory.
-- **Sentinel/Consul fit.** Sentinel's `sentinel/proofs/` and `sentinel/state/` are already a symbolic memory tier. Adding a graph layer indexing proofs by who/when/what/why is a small step from where we are. Publishable on its own.
+- **Sentinel/Legatus AI fit.** Sentinel's `sentinel/proofs/` and `sentinel/state/` are already a symbolic memory tier. Adding a graph layer indexing proofs by who/when/what/why is a small step from where we are. Publishable on its own.
 - **Counterargument.** "Vector RAG works fine in production today." Response: works for single-agent recall. Team coordination requires commitment tracking and provenance — graph-shaped problems by nature.
 - **Recommendation.** Adopt. Build as an addition to existing proof storage, not a replacement.
 
@@ -122,7 +122,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** Run the fleet against a simulated company (Gitea + RocketChat + OwnCloud + NPC coworkers). Measures coordination cost, miscommunication recovery, latency under concurrency. Frontier baseline is ~24–30% full-task completion.
 - **Evidence.** Xu et al., 2024 — `arXiv:2412.14161` ("TheAgentCompany: Benchmarking LLM Agents on Consequential Real-World Tasks").
-- **Sentinel/Consul fit.** External anchor that is hard to game. If Sentinel + Consul gets to 40% on TheAgentCompany, that is a headline result the literature does not currently have.
+- **Sentinel/Legatus AI fit.** External anchor that is hard to game. If Sentinel + Legatus AI gets to 40% on TheAgentCompany, that is a headline result the literature does not currently have.
 - **Counterargument.** "We don't need an external benchmark; our metrics speak for themselves." Response: internal metrics are vulnerable to Goodhart (see Part 2). An external benchmark we don't control is the discipline that prevents drift.
 - **Recommendation.** Adopt. Establish a baseline within the next two sprints; budget for re-running on every major architectural change.
 
@@ -130,7 +130,7 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** A mandatory step in which the agent must argue the spec is wrong, underspecified, ambiguous, or risky — *before* executing. If no challenge is produced, that itself is logged as a signal.
 - **Evidence.** Cemri et al., 2025, "Why Do Multi-Agent LLM Systems Fail?" (verify ID). Their failure-mode taxonomy clusters ~14 distinct failures into three groups: **specification ambiguity, inter-agent misalignment, and verification gaps.** Sentinel already addresses verification gaps. Spec-challenge addresses cluster 1 directly.
-- **Sentinel/Consul fit.** New phase in the existing claim → verify → execute chain. Becomes claim → **challenge** → verify → execute. The challenge produces a proof artifact.
+- **Sentinel/Legatus AI fit.** New phase in the existing claim → verify → execute chain. Becomes claim → **challenge** → verify → execute. The challenge produces a proof artifact.
 - **Counterargument.** "Adds friction to obvious tasks." Response: gated by reversibility (see A6). Trivial reversible actions skip the challenge; high-stakes actions require it. The friction is calibrated.
 - **Recommendation.** Adopt. The literature is consistent that spec failures are the single largest cluster, and we currently do nothing about them.
 
@@ -138,15 +138,15 @@ Each entry includes: what it is, evidence and source, how it fits Sentinel/Consu
 
 - **What it is.** WIP-per-capability, bottleneck identification, drum-buffer-rope scheduling, throughput-vs-token-cost reporting. Treat the fleet as a production line and apply Goldratt-style bottleneck analysis.
 - **Evidence.** Goldratt (1984) frame; queueing-theory math transfers cleanly from LLM-serving work (vLLM — `arXiv:2309.06180`; S-LoRA — `arXiv:2311.03285`). No serious prior art in agent-fleet literature — this is wide open.
-- **Sentinel/Consul fit.** Sentinel's `sentinel/metrics/` already collects the raw data. Building the flow-analytics layer on top is a small step. Also publishable — no incumbent has it.
+- **Sentinel/Legatus AI fit.** Sentinel's `sentinel/metrics/` already collects the raw data. Building the flow-analytics layer on top is a small step. Also publishable — no incumbent has it.
 - **Counterargument.** "Premature optimization." Response: it's not optimization, it's observability. Knowing where the fleet's bottleneck is doesn't commit us to acting on it; not knowing means we can't.
-- **Recommendation.** Adopt. Build as a Consul-side analytics surface against Sentinel's existing metrics emission.
+- **Recommendation.** Adopt. Build as a Legatus AI side analytics surface against Sentinel's existing metrics emission.
 
 ### A15. Causal-impact tracking alongside proof-of-work
 
 - **What it is.** "This proof shows the work happened. Did the work cause the intended outcome?" Counterfactual / A-B / post-deploy attribution for completed tasks. Closes the gap between procedural success (proof chain) and real impact.
 - **Evidence.** Anthropic's outcome-vs-process eval work; broader causal-inference literature adapted to agentic systems. No canonical agentic citation yet; this is closer to a synthesis than an adoption.
-- **Sentinel/Consul fit.** Extension to the proof chain: each completed task gets a follow-up *impact artifact* (commit landed, bug ticket actually closed, test stayed green for N days, user retention moved on the relevant metric). Without this, proof chains are procedurally airtight and outcome-blind.
+- **Sentinel/Legatus AI fit.** Extension to the proof chain: each completed task gets a follow-up *impact artifact* (commit landed, bug ticket actually closed, test stayed green for N days, user retention moved on the relevant metric). Without this, proof chains are procedurally airtight and outcome-blind.
 - **Counterargument.** "Hard to measure causally." Response: hard, but partial measurement is much better than zero. Even noisy impact attribution catches the most expensive failure mode — *building the wrong thing correctly*.
 - **Recommendation.** Adopt as a research-grade addition. Start with simple proxy metrics (PR merged + survived 30 days; ticket closed + not reopened); evolve toward proper attribution.
 
@@ -296,7 +296,7 @@ Five themes run across both lists. Calling them out so they don't get lost in th
 
 ## The Vertical: Best-in-Class Business Analyst
 
-The recommendations above are correct as the *general* AI-factory architecture. But Sentinel + Consul's intended **product** is not generic agentic work; it is **best-in-class Business Analyst output** — surfacing documentation, creating presentations, defending every decision against cited business requirements, with data collected through both automated and interrogated discovery. This section specializes the general architecture to that vertical and adds seven primitives the general list does not cover.
+The recommendations above are correct as the *general* AI-factory architecture. But Sentinel + Legatus AI's intended **product** is not generic agentic work; it is **best-in-class Business Analyst output** — surfacing documentation, creating presentations, defending every decision against cited business requirements, with data collected through both automated and interrogated discovery. This section specializes the general architecture to that vertical and adds seven primitives the general list does not cover.
 
 ### What "best-in-class BA" means as an output spec
 
@@ -353,7 +353,7 @@ Specialization of A15 for BA work. Each delivered recommendation gets follow-up 
 - **A13 (spec-challenge) is the BA's core competency, not an adjunct.** Interrogated discovery (BA2) and spec-challenge are the same primitive at different scopes. Spec-challenge rises to the top of the priority order; in the BA vertical it is the *headline* feature, not a step in a workflow.
 - **A15 (causal impact) becomes BA7.** Outcome attribution is the BA's whole story.
 - **A11 (graph-structured memory) holds the requirements traceability matrix (BA3) and the discovery ledger (BA2).** Not optional in this vertical; foundational.
-- **A12 (TheAgentCompany) is necessary but insufficient as the external anchor for BA.** TheAgentCompany measures generic coordination; it does not measure citation quality, requirements traceability, or stakeholder satisfaction. We'll need a BA-specific evaluation harness — possibly built in-house against a known consulting deliverable corpus, or against historical BA work from a partner org with permission to use it.
+- **A12 (TheAgentCompany) is necessary but insufficient as the external anchor for BA.** TheAgentCompany measures generic coordination; it does not measure citation quality, requirements traceability, or stakeholder satisfaction. We'll need a BA-specific evaluation harness — possibly built in-house against a known advisory deliverable corpus, or against historical BA work from a partner org with permission to use it.
 
 ### How the retirement list applies more sharply for BA
 
@@ -363,30 +363,30 @@ Specialization of A15 for BA work. Each delivered recommendation gets follow-up 
 
 ### Strategic framing
 
-Most agent vendors are shipping substrate looking for a vertical. Sentinel + Consul's bet is the inverse: substrate built around a product spec (best-in-class BA), generalizable later. That ordering is unusual and defensible — it gives us a benchmark (real BA deliverables), a customer profile (any org that pays for BA work today, i.e., every org of meaningful size), and a moat (the connector layer + traceability matrix + interrogation protocol are not weekend builds).
+Most agent vendors are shipping substrate looking for a vertical. Sentinel + Legatus AI's bet is the inverse: substrate built around a product spec (best-in-class BA), generalizable later. That ordering is unusual and defensible — it gives us a benchmark (real BA deliverables), a customer profile (any org that pays for BA work today, i.e., every org of meaningful size), and a moat (the connector layer + traceability matrix + interrogation protocol are not weekend builds).
 
 The general AI-factory adoption list (A1–A15) is correct and necessary. The BA-specific list (BA1–BA7) is what makes the resulting product *not interchangeable with LangGraph, AutoGen, or CrewAI plus prompts*. Either list alone is insufficient.
 
 ---
 
-## Consul integration map — every BA primitive lands somewhere concrete
+## Legatus AI integration map — every BA primitive lands somewhere concrete
 
-A late addition based on a deep-dive of `legatus-consul-agent` (Phase 0.5). **Consul is not contradicting the AI-factory plan; it is waiting for it.** The cryptographic + port-based foundation is solid; the external-management surface is absent but cleanly extensible. Every BA-vertical primitive in the brief maps to a specific *additive* extension on consul — zero breaking changes required.
+A late addition based on a deep-dive of `legatus-ai` (Phase 0.5). **Legatus AI is not contradicting the AI-factory plan; it is waiting for it.** The cryptographic + port-based foundation is solid; the external-management surface is absent but cleanly extensible. Every BA-vertical primitive in the brief maps to a specific *additive* extension on Legatus AI — zero breaking changes required.
 
-### What consul has now (Phase 0.5)
+### What Legatus AI has now (Phase 0.5)
 
-- **Cryptographic envelope** (`consul-protocol/src/envelope.rs`): HMAC-SHA256 over canonical bytes, CBOR inner payload, constant-time MAC compare, replay defense via sequence + nonce + freshness window, max 1 MiB.
-- **Identity primitives** (`consul-domain/src/identity/`): `SessionId` (UUIDv7, routing — not secret), `KeyEpoch`/`ConnectionEpoch` (forward-secrecy boundaries rotated per reconnect), `SessionMasterKey` (32 bytes, never logged, zeroized on drop).
-- **HKDF per-direction key derivation** (`consul-protocol/src/keys.rs`): direction asymmetry prevents reflection attacks.
-- **6 port traits defined** (`consul-domain/src/ports/`): `SessionTransport`, `SessionStore`, `AuditSink`, `Clock`, `LlmProvider`, `NotificationChannel`. ADR-007 dispatch via `#[trait_variant::make]`.
+- **Cryptographic envelope** (`legatus-ai-protocol/src/envelope.rs`): HMAC-SHA256 over canonical bytes, CBOR inner payload, constant-time MAC compare, replay defense via sequence + nonce + freshness window, max 1 MiB.
+- **Identity primitives** (`legatus-ai-domain/src/identity/`): `SessionId` (UUIDv7, routing — not secret), `KeyEpoch`/`ConnectionEpoch` (forward-secrecy boundaries rotated per reconnect), `SessionMasterKey` (32 bytes, never logged, zeroized on drop).
+- **HKDF per-direction key derivation** (`legatus-ai-protocol/src/keys.rs`): direction asymmetry prevents reflection attacks.
+- **6 port traits defined** (`legatus-ai-domain/src/ports/`): `SessionTransport`, `SessionStore`, `AuditSink`, `Clock`, `LlmProvider`, `NotificationChannel`. ADR-007 dispatch via `#[trait_variant::make]`.
 - **17 wire messages** spanning protocol negotiation, registration, heartbeat, instruction relay, subprocess lifecycle, escalation.
 - **WebSocket transport adapter** working; gRPC/stdio/MCP feature-flagged stubs.
 - **AuditSink event taxonomy** with 8 event classes (append-only, query_since interface).
 
-### What consul does *not* have — and why that's our opportunity
+### What Legatus AI does *not* have — and why that's our opportunity
 
-- **No `SupervisorPort`/`FleetPort`/`ExternalDispatcherPort`** for external systems to call into. The current shape is one-way (external → consulate via protocol messages). The AI factory's BA-dispatcher needs an inbound port — we get to design it cleanly.
-- **No MCP server exposed yet.** `consul-transport/mcp-extension` is a feature-flagged stub.
+- **No `SupervisorPort`/`FleetPort`/`ExternalDispatcherPort`** for external systems to call into. The current shape is one-way (external → legatus-ai-daemon via protocol messages). The AI factory's BA-dispatcher needs an inbound port — we get to design it cleanly.
+- **No MCP server exposed yet.** `legatus-ai-transport/mcp-extension` is a feature-flagged stub.
 - **No PASETO v4.local capability tokens** (planned for Phase 2). Until then, external-dispatcher integration runs in a sandboxed channel.
 - **No artifact metadata on `RelayInstruction`.** `content: String` is free-text — biggest single extension point for BA-factory artifact carriage.
 
@@ -394,34 +394,34 @@ A late addition based on a deep-dive of `legatus-consul-agent` (Phase 0.5). **Co
 
 1. **Never change `SessionId` wire format, `SessionMasterKey` structure, or HKDF salt/info labels.** Invalidates all existing connections + derived keys.
 2. **Additive over new.** The existing message types accept `Option<T>` fields cleanly. The protocol is versioned (`Capabilities` flags) — net-new messages slot in via feature flags.
-3. **Honor hexagonal/DDD.** New ports in `consul-domain/src/ports/`, adapters outside the domain, in-memory mocks for tests.
+3. **Honor hexagonal/DDD.** New ports in `legatus-ai-domain/src/ports/`, adapters outside the domain, in-memory mocks for tests.
 
-### Mapping: each AI-factory item → consul extension
+### Mapping: each AI-factory item → Legatus AI extension
 
-| Brief item | Consul gap | Extension shape | Touches |
+| Brief item | Legatus AI gap | Extension shape | Touches |
 |---|---|---|---|
-| **A1** Magentic-One dual-ledger | (new — consul has no ledger yet) | Add `Ledger` aggregate to `consul-domain`; expose via new `LedgerPort` + new wire messages `LedgerUpdate`/`LedgerQuery` | `consul-domain`, `consul-protocol` |
-| **A3** Dry-run-then-commit with separate-family auditor | Gap 1 (briefing) + Gap 6 (capability tokens) | New `RequestBriefing(session_id)` → `BriefingResponse` for the auditor to score the dry-run; PASETO token for separate-family auditor identity | `consul-protocol/src/messages/`, `consul-domain/src/ports/` |
-| **A6** Reversibility-graded tripwires | (consul has no current tripwire layer) | New `ReversibilityClass` value object in `consul-domain`; `RelayInstruction` gains `reversibility: Option<ReversibilityClass>` | `consul-domain`, `consul-protocol` |
-| **A7** Honeypot canaries | Audit extension | New `AuditEvent::HoneypotInteraction` variant; canary configuration in `consul-domain/src/policy/` | `consul-domain/src/ports/audit.rs` |
-| **A13** Spec-challenge before execute | Gap 1 (briefing) + Gap 3 (refinement loop) | `RequestBriefing` for the challenge step; new `SpecChallenge`/`ChallengeResponse` message pair | `consul-protocol/src/messages/` |
-| **BA1** Citation-locked decision artifacts | **Gap 2** | Add `artifacts: Option<Vec<ArtifactReference>>` to `RelayInstruction` and `InstructionResult`; `ArtifactReference` value object in `consul-domain` | `consul-domain`, `consul-protocol` |
-| **BA2** Two-mode discovery (automated + interrogated) | New | New `DiscoveryRequest`/`DiscoveryEvidence` message pair; new `DiscoveryLedger` aggregate (shares ledger machinery from A1) | `consul-domain`, `consul-protocol` |
-| **BA3** Requirements traceability matrix | **Gap 4 + Gap 5** | Add `fulfilled_requirements: Option<Vec<RequirementRef>>` to `InstructionResult`; add `orchestration_id: Option<String>` to `RelayInstruction`; new `RequirementMatrix` aggregate | `consul-domain`, `consul-protocol` |
-| **BA4** Stakeholder interrogation protocol | New | New `InterrogationRound`/`InterrogationResponse` message pair; new `InterrogationPort` for batched stakeholder Q&A | `consul-domain/src/ports/`, `consul-protocol/src/messages/` |
-| **BA5** Adversarial deck critique | **Gap 1 + Gap 3** | `RequestBriefing` + `RequestRefinement(session_id, completed_task_id)` → `RefineInstruction(original_session_id, revised_content, critique_metadata)` | `consul-protocol/src/messages/` |
-| **BA6** Documentation-surface connector layer | (orthogonal — runs outside consul) | No consul change; connectors are MCP servers the BA-dispatcher consumes. Audit hook into consulate via `AuditEvent::ExternalApiCall` | external MCP servers; `consul-domain/src/ports/audit.rs` |
-| **BA7** Outcome attribution | **Gap 4 + Gap 8** | `fulfilled_requirements` (shared with BA3); new `AttestationProvider` port; `RequestAttestation`/`ExecutionAttestation` message pair for signed proof | `consul-domain/src/ports/`, `consul-protocol/src/messages/` |
-| **All BA primitives — auth foundation** | **Gap 6** | New flow `RegisterExternalDispatcher(public_key, capabilities[])` → `DispatcherToken(paseto)`; PASETO v4.local encode/decode in `consul-protocol/src/tokens/` | `consul-protocol`, `consulate` binary |
+| **A1** Magentic-One dual-ledger | (new — Legatus AI has no ledger yet) | Add `Ledger` aggregate to `legatus-ai-domain`; expose via new `LedgerPort` + new wire messages `LedgerUpdate`/`LedgerQuery` | `legatus-ai-domain`, `legatus-ai-protocol` |
+| **A3** Dry-run-then-commit with separate-family auditor | Gap 1 (briefing) + Gap 6 (capability tokens) | New `RequestBriefing(session_id)` → `BriefingResponse` for the auditor to score the dry-run; PASETO token for separate-family auditor identity | `legatus-ai-protocol/src/messages/`, `legatus-ai-domain/src/ports/` |
+| **A6** Reversibility-graded tripwires | (Legatus AI has no current tripwire layer) | New `ReversibilityClass` value object in `legatus-ai-domain`; `RelayInstruction` gains `reversibility: Option<ReversibilityClass>` | `legatus-ai-domain`, `legatus-ai-protocol` |
+| **A7** Honeypot canaries | Audit extension | New `AuditEvent::HoneypotInteraction` variant; canary configuration in `legatus-ai-domain/src/policy/` | `legatus-ai-domain/src/ports/audit.rs` |
+| **A13** Spec-challenge before execute | Gap 1 (briefing) + Gap 3 (refinement loop) | `RequestBriefing` for the challenge step; new `SpecChallenge`/`ChallengeResponse` message pair | `legatus-ai-protocol/src/messages/` |
+| **BA1** Citation-locked decision artifacts | **Gap 2** | Add `artifacts: Option<Vec<ArtifactReference>>` to `RelayInstruction` and `InstructionResult`; `ArtifactReference` value object in `legatus-ai-domain` | `legatus-ai-domain`, `legatus-ai-protocol` |
+| **BA2** Two-mode discovery (automated + interrogated) | New | New `DiscoveryRequest`/`DiscoveryEvidence` message pair; new `DiscoveryLedger` aggregate (shares ledger machinery from A1) | `legatus-ai-domain`, `legatus-ai-protocol` |
+| **BA3** Requirements traceability matrix | **Gap 4 + Gap 5** | Add `fulfilled_requirements: Option<Vec<RequirementRef>>` to `InstructionResult`; add `orchestration_id: Option<String>` to `RelayInstruction`; new `RequirementMatrix` aggregate | `legatus-ai-domain`, `legatus-ai-protocol` |
+| **BA4** Stakeholder interrogation protocol | New | New `InterrogationRound`/`InterrogationResponse` message pair; new `InterrogationPort` for batched stakeholder Q&A | `legatus-ai-domain/src/ports/`, `legatus-ai-protocol/src/messages/` |
+| **BA5** Adversarial deck critique | **Gap 1 + Gap 3** | `RequestBriefing` + `RequestRefinement(session_id, completed_task_id)` → `RefineInstruction(original_session_id, revised_content, critique_metadata)` | `legatus-ai-protocol/src/messages/` |
+| **BA6** Documentation-surface connector layer | (orthogonal — runs outside Legatus AI) | No Legatus AI change; connectors are MCP servers the BA-dispatcher consumes. Audit hook into legatus-ai-daemon via `AuditEvent::ExternalApiCall` | external MCP servers; `legatus-ai-domain/src/ports/audit.rs` |
+| **BA7** Outcome attribution | **Gap 4 + Gap 8** | `fulfilled_requirements` (shared with BA3); new `AttestationProvider` port; `RequestAttestation`/`ExecutionAttestation` message pair for signed proof | `legatus-ai-domain/src/ports/`, `legatus-ai-protocol/src/messages/` |
+| **All BA primitives — auth foundation** | **Gap 6** | New flow `RegisterExternalDispatcher(public_key, capabilities[])` → `DispatcherToken(paseto)`; PASETO v4.local encode/decode in `legatus-ai-protocol/src/tokens/` | `legatus-ai-protocol`, `legatus-ai-daemon` binary |
 
 ### The cleanest single-PR extension that unlocks the most
 
-If we had to pick *one* PR to land first against consul to unlock the AI-factory work, it would be:
+If we had to pick *one* PR to land first against Legatus AI to unlock the AI-factory work, it would be:
 
-1. Define `ExternalDispatcherPort` in `consul-domain/src/ports/external_dispatcher.rs` — pure trait with `relay_from_dispatcher(identity, EnhancedInstruction) → Result<...>` and `get_briefing(session_id) → BriefingData`.
+1. Define `ExternalDispatcherPort` in `legatus-ai-domain/src/ports/external_dispatcher.rs` — pure trait with `relay_from_dispatcher(identity, EnhancedInstruction) → Result<...>` and `get_briefing(session_id) → BriefingData`.
 2. Extend `RelayInstruction` with three optional fields: `artifacts`, `orchestration_id`, `preferred_channel`. All `Option<T>` for backward compat.
 3. Add `AuditEvent::ExternalDispatcherAction` variant.
-4. Add `EnhancedInstruction` value object in `consul-domain` (wraps `RelayInstruction` plus dispatcher-identity context).
+4. Add `EnhancedInstruction` value object in `legatus-ai-domain` (wraps `RelayInstruction` plus dispatcher-identity context).
 
 This is **~300 lines of pure-domain Rust + Option fields**, no breaking changes. Test with in-memory adapters. Once landed, every BA-primitive has a concrete landing site.
 
@@ -432,10 +432,10 @@ Production deployment of this extension needs at least:
 - `SessionStore` adapter (SQLite or PostgreSQL — neither implemented yet).
 - One `LlmProvider` adapter filled in (anthropic/openai/google/xai/ollama — all stubbed).
 - PASETO encode/decode logic (currently a stub newtype).
-- `consul-app` binary actually runnable (currently exits with "Phase 0.5 scaffold").
-- `consulate` binary protocol dispatch wired (TCP accept loop exists; message routing not connected).
+- `legatus-ai-app` binary actually runnable (currently exits with "Phase 0.5 scaffold").
+- `legatus-ai-daemon` binary protocol dispatch wired (TCP accept loop exists; message routing not connected).
 
-The brief's earlier "what's blocking shipping" framing under-counted these. Worth being explicit with Gary that the AI factory's consul-side critical path runs through Phase 0.5 → Phase 1 of consul itself.
+The brief's earlier "what's blocking shipping" framing under-counted these. Worth being explicit with Gary that the AI factory's Legatus AI side critical path runs through Phase 0.5 → Phase 1 of Legatus AI itself.
 
 ---
 
@@ -477,7 +477,7 @@ Methodology note: rankings are *opinionated and defensible*, not derived from a 
 | **BA4** | Stakeholder interrogation protocol | Operationalizes BA2's interrogation half. Defensible primitive on its own. | Medium | BA2, BA3 |
 | **A13** | Spec-challenge before execute | Addresses Cemri et al.'s largest failure cluster (specification ambiguity). In BA context, it IS the headline feature. | Low-Medium | BA2 |
 | **A6 + R3** | Reversibility-graded tripwires (replacing novelty-primary) | Reframes the entire blast-radius story onto an axis that survives Goodhart. | Medium | — |
-| **A1** | Magentic-One dual-ledger in Consul | Required before fleet scale exceeds ~5 concurrent agents. State-of-the-art coordination substrate. | Medium-High | — |
+| **A1** | Magentic-One dual-ledger in Legatus AI | Required before fleet scale exceeds ~5 concurrent agents. State-of-the-art coordination substrate. | Medium-High | — |
 | **A12** | TheAgentCompany baseline + BA-specific eval corpus | External anchor that prevents internal-metric Goodhart. Run before any architecture changes. | Low (run); Medium (BA corpus curate) | — |
 | **BA7** | Outcome attribution for recommendations | Closes the loop from artifact to business metric. The BA's actual value claim. | Medium | BA3 |
 
@@ -616,7 +616,7 @@ If we get directional agreement on this brief, the proposed order — **speciali
 5. **Draft-then-defend (BA-specialization of A3, separate-model-family auditor) + adversarial deck critique (BA5).** The two quality gates that catch the worst BA failure modes.
 6. **Stakeholder interrogation protocol (BA4) + spec-challenge (A13).** Interrogated discovery as a structured workflow.
 7. **Reversibility-graded tripwires (A6) + retirement of novelty-primary (R3).** General safety.
-8. **Magentic-One dual-ledger in Consul (A1).** Coordination substrate; required before fleet scale exceeds ~5 concurrent agents.
+8. **Magentic-One dual-ledger in Legatus AI (A1).** Coordination substrate; required before fleet scale exceeds ~5 concurrent agents.
 9. **Outcome attribution (BA7).** Closing the loop from artifact to business metric. Needs BA3 in place first.
 10. **Honeypot canaries (A7), runtime interpretability probes (A8).** General safety stack.
 
@@ -626,6 +626,6 @@ Items not enumerated (A4, A5, A9, A10, A11, A12, A14; capability tokens migratio
 
 ## Closing note
 
-The honest framing for Gary: Sentinel as it stands is the most rigorous proof-of-work hook engine for agentic sessions that exists in the wild. The recommendations above don't replace it — they extend it from a unit-of-work enforcement plane into a fleet-scale control plane with safety primitives the literature actually underwrites. The retirements aren't criticisms of what's built; they're things we shouldn't *add* (or should remove if creeping in) because the field has learned, in the last 18 months, that they don't work or actively cause harm.
+The honest framing for Gary: Sentinel as it stands is the most rigorous proof-of-work hook engine for agentic sessions that exists in the wild. The recommendations above don't replace it — they extend it from a unit-of-work enforcement engine toward a future fleet-scale coordination plane with safety primitives the literature actually underwrites. The retirements aren't criticisms of what's built; they're things we shouldn't *add* (or should remove if creeping in) because the field has learned, in the last 18 months, that they don't work or actively cause harm.
 
 The single most important sentence in the brief: **the architecture today is excellent scaffolding against an agent trying to help, and almost no defense against an agent trying to look like it is helping.** The adoption list closes that gap as honestly as the current literature allows; the retirement list keeps us from widening it.

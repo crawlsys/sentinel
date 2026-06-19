@@ -3,8 +3,8 @@
 //!
 //! Exercises the SAME code path `hook_cmd.rs` runs on `PostToolUse`: a
 //! completed step-tool call -> `step_judge::process` -> the real
-//! `MultiModelJudge` adapter -> `OpenRouter` -> a `Judged` verdict -> the
-//! `judge_enforcement::Mode` gate that `submit_step_complete` consults.
+//! `MultiModelJudge` adapter -> `OpenRouter` -> a `Judged` verdict. The
+//! proof engine always refuses to seal a non-sufficient independent verdict.
 //!
 //! Run:
 //!   `OPENROUTER_API_KEY`=... cargo test -p sentinel --test `e2e_judge_integration` \
@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 
 use sentinel_application::hooks::step_judge::{self, StepJudgeOutcome};
-use sentinel_application::judge_enforcement::Mode;
 use sentinel_domain::events::HookInput;
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{PhaseSteps, SkillSteps, WorkflowStep};
@@ -75,18 +74,13 @@ fn sufficient_step_input() -> HookInput {
 #[tokio::test]
 #[ignore = "live network + OPENROUTER_API_KEY; opt-in via --ignored"]
 async fn step_judge_produces_verdict_end_to_end() {
-    let judge = MultiModelJudge::from_env();
-    assert!(
-        judge.has_any_provider(),
-        "set OPENROUTER_API_KEY for the E2E judge test"
-    );
+    let judge = MultiModelJudge::from_env().expect("set OPENROUTER_API_KEY for the E2E judge test");
 
     let input = sufficient_step_input();
     let mut state = SessionState::new("e2e-judge-session");
     let configs = demo_step_configs();
 
-    let (output, outcome) =
-        step_judge::process(&input, &mut state, &configs, &judge).await;
+    let (output, outcome) = step_judge::process(&input, &mut state, &configs, &judge).await;
 
     assert!(
         output.blocked.is_none(),
@@ -121,16 +115,14 @@ async fn step_judge_produces_verdict_end_to_end() {
                 verdict.reasoning
             );
         }
-        other => panic!(
-            "expected Judged outcome for a step tool with a live judge; got {other:?}"
-        ),
+        other => panic!("expected Judged outcome for a step tool with a live judge; got {other:?}"),
     }
 }
 
 #[tokio::test]
 #[ignore = "live network + OPENROUTER_API_KEY; opt-in via --ignored"]
 async fn non_step_tool_is_noop_end_to_end() {
-    let judge = MultiModelJudge::from_env();
+    let judge = MultiModelJudge::from_env().expect("set OPENROUTER_API_KEY for the E2E judge test");
     let input = HookInput {
         tool_name: Some("Bash".to_string()),
         session_id: Some("e2e-judge-session".to_string()),
@@ -139,19 +131,10 @@ async fn non_step_tool_is_noop_end_to_end() {
     let mut state = SessionState::new("e2e-judge-session");
     let configs = demo_step_configs();
 
-    let (output, outcome) =
-        step_judge::process(&input, &mut state, &configs, &judge).await;
+    let (output, outcome) = step_judge::process(&input, &mut state, &configs, &judge).await;
     assert!(output.blocked.is_none());
     assert!(
         matches!(outcome, StepJudgeOutcome::NotAStepTool),
         "non-step tools must be a no-op for step_judge; got {outcome:?}"
     );
-}
-
-#[test]
-fn enforcement_mode_gate_logic() {
-    assert!(!Mode::Shadow.blocks_seal());
-    assert!(!Mode::Warn.blocks_seal());
-    assert!(Mode::Enforce.blocks_seal());
-    assert_eq!(Mode::from_env_with(|_| None), Mode::Shadow);
 }

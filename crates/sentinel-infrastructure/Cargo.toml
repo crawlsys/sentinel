@@ -1,12 +1,17 @@
 [package]
 name = "sentinel-infrastructure"
-description = "IO adapters — stdin, git, Anthropic API, crypto, state store, MCP transport, IPC"
+description = "IO adapters — stdin, git, OpenRouter LLM, crypto, state store, MCP transport, IPC"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[features]
+default = ["sqlite"]
+sqlite = ["langgraph-core/sqlite"]
+postgres = ["langgraph-core/postgres"]
 
 [dependencies]
 sentinel-domain = { workspace = true }
@@ -18,7 +23,7 @@ rustls = { workspace = true }
 # LangGraph Rust port — powers the Tier B enforcement escalation graph
 # (enforcement_graph.rs): a checkpointed StateGraph encoding the
 # classify→judge→act decision with a durable, replayable audit trail.
-langgraph-core = { path = "../../../langgraph-python-to-rust/langgraph-core", default-features = false, features = ["sqlite"] }
+langgraph-core = { path = "../../../langgraph-python-to-rust/langgraph-core", default-features = false }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -39,6 +44,7 @@ futures = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 hmac = { workspace = true }
 chacha20poly1305 = { workspace = true }
 uuid = { workspace = true }
@@ -46,9 +52,9 @@ glob = { workspace = true }
 regex = { workspace = true }
 fs2 = { workspace = true }
 getrandom = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

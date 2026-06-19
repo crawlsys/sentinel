@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Browserbase Skill — Step Definitions
 # Federated skill subgraph for cloud browser automation (sentinel #72)
 #

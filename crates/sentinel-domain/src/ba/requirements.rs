@@ -112,10 +112,20 @@ pub enum RequirementFinding {
     /// the structural violation BA3 exists to prevent.
     Coverage { recommendation_summary: String },
 
-    /// Matrix endpoint unreachable; gate is running against the
-    /// `last_known_good` snapshot. Warn — not a content failure but
-    /// a freshness concern the operator should see.
-    MatrixStaleness { snapshot_age_seconds: u64 },
+    /// Matrix could not be read, so the cited requirement cannot be
+    /// validated. **Block-class** — recommendations cannot pass on
+    /// unvalidated requirement citations.
+    MatrixUnavailable {
+        orchestration_id: String,
+        reason: String,
+    },
+
+    /// Matrix payload is corrupt or schema-incompatible, so the
+    /// cited requirement cannot be validated. **Block-class**.
+    MatrixMalformed {
+        orchestration_id: String,
+        reason: String,
+    },
 }
 
 impl RequirementFinding {
@@ -123,7 +133,13 @@ impl RequirementFinding {
     /// output.
     #[must_use]
     pub const fn is_block(&self) -> bool {
-        matches!(self, Self::Existence { .. } | Self::Coverage { .. })
+        matches!(
+            self,
+            Self::Existence { .. }
+                | Self::Coverage { .. }
+                | Self::MatrixUnavailable { .. }
+                | Self::MatrixMalformed { .. }
+        )
     }
 }
 
@@ -183,11 +199,21 @@ mod tests {
     }
 
     #[test]
-    fn matrix_staleness_is_warn() {
-        let f = RequirementFinding::MatrixStaleness {
-            snapshot_age_seconds: 3600,
+    fn matrix_unavailable_is_block() {
+        let f = RequirementFinding::MatrixUnavailable {
+            orchestration_id: "case".into(),
+            reason: "timeout".into(),
         };
-        assert!(!f.is_block());
+        assert!(f.is_block());
+    }
+
+    #[test]
+    fn matrix_malformed_is_block() {
+        let f = RequirementFinding::MatrixMalformed {
+            orchestration_id: "case".into(),
+            reason: "schema mismatch".into(),
+        };
+        assert!(f.is_block());
     }
 
     #[test]

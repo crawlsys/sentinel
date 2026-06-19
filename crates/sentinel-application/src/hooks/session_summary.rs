@@ -19,15 +19,15 @@
 //! `[Last Session]` prose block right after the structured task list, so the
 //! next session resumes with both the task graph AND the human context.
 //!
-//! **Fail-open everywhere.** `SessionEnd` has a ~1.5s budget (see
+//! **Fail-visible, non-blocking.** `SessionEnd` has a ~1.5s budget (see
 //! [`super::session_end`]) so this does exactly one `git log` and one file
-//! write — no network, no heavy I/O. Any error (not a repo, no home dir, no
-//! tasks) results in `allow()` with nothing written; it never blocks teardown.
+//! write — no network, no heavy I/O. Absence of prior tasks/summary is quiet;
+//! corrupt or unwritable Sentinel state injects `[Sentinel-Authority]` context.
 
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use std::path::PathBuf;
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// On-disk shape of the session summary. Kept deliberately small and stable —
 /// `task_rehydrate` deserializes the same struct.
@@ -73,23 +73,35 @@ fn project_hash(cwd: &str) -> String {
 
 /// Directory `persistent-tasks/{project_hash}` (no legacy migration here —
 /// `task_rehydrate`/`task_persist` already trigger it on the same run).
-fn summary_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    let home = fs.home_dir()?;
-    Some(super::persistent_tasks_root(&home).join(project_hash))
+fn summary_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Result<PathBuf, String> {
+    let home = fs
+        .home_dir()
+        .ok_or_else(|| "cannot determine home directory for session summary".to_string())?;
+    Ok(super::persistent_tasks_root(&home).join(project_hash))
 }
 
 /// Path to the summary file for a project.
-pub fn summary_path(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
-    Some(summary_dir(fs, project_hash)?.join("session-summary.json"))
+pub fn summary_path(fs: &dyn FileSystemPort, project_hash: &str) -> Result<PathBuf, String> {
+    Ok(summary_dir(fs, project_hash)?.join("session-summary.json"))
 }
 
 /// Read the persisted session summary for a project, if one exists and parses.
-/// Returns `None` on absence or any parse error (fail-quiet — a corrupt summary
-/// must never block `SessionStart`). Used by [`super::task_rehydrate`].
-pub fn read_summary(fs: &dyn FileSystemPort, project_hash: &str) -> Option<SessionSummary> {
+/// Absence is `Ok(None)`; read/parse failures are errors so `SessionStart` can
+/// surface corrupt orientation state instead of treating it as empty.
+pub fn read_summary(
+    fs: &dyn FileSystemPort,
+    project_hash: &str,
+) -> Result<Option<SessionSummary>, String> {
     let path = summary_path(fs, project_hash)?;
-    let content = fs.read_to_string(&path).ok()?;
-    serde_json::from_str::<SessionSummary>(&content).ok()
+    if !fs.exists(&path) {
+        return Ok(None);
+    }
+    let content = fs
+        .read_to_string(&path)
+        .map_err(|err| format!("failed to read session summary {}: {err}", path.display()))?;
+    serde_json::from_str::<SessionSummary>(&content)
+        .map(Some)
+        .map_err(|err| format!("failed to parse session summary {}: {err}", path.display()))
 }
 
 /// Cap on commit subjects we record. 10 is plenty to convey "what shipped"
@@ -99,18 +111,26 @@ const MAX_COMMITS: usize = 10;
 /// commit message blowing up the note).
 const MAX_SUBJECT_LEN: usize = 160;
 
-/// Read recent commit subjects via `git log --oneline`. Returns an empty Vec
-/// on any failure (not a repo, git missing, unborn HEAD) — never errors.
-fn recent_commits(ctx: &HookContext<'_>, repo: &str) -> Vec<String> {
+/// Read recent commit subjects via `git log --oneline`.
+fn recent_commits(ctx: &HookContext<'_>, repo: &str) -> Result<Vec<String>, String> {
     let n = MAX_COMMITS.to_string();
-    let args = ["log", "--oneline", "--no-color", "-n", n.as_str(), "--format=%s"];
-    let Ok(out) = ctx.process.run("git", &args, Some(repo)) else {
-        return Vec::new();
-    };
+    let args = [
+        "log",
+        "--oneline",
+        "--no-color",
+        "-n",
+        n.as_str(),
+        "--format=%s",
+    ];
+    let out = ctx
+        .process
+        .run("git", &args, Some(repo))
+        .map_err(|err| format!("failed to read recent commits for session summary: {err}"))?;
     if !out.success {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    out.stdout
+    Ok(out
+        .stdout
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -122,23 +142,25 @@ fn recent_commits(ctx: &HookContext<'_>, repo: &str) -> Vec<String> {
             }
         })
         .take(MAX_COMMITS)
-        .collect()
+        .collect())
 }
 
-/// Count tasks by status from the persisted `tasks.json`. Returns
-/// `(completed, in_progress, pending)`; all-zero if the file is absent or
-/// unparseable (we never want a corrupt task file to block teardown).
-fn task_counts(fs: &dyn FileSystemPort, project_hash: &str) -> (usize, usize, usize) {
-    let Some(dir) = summary_dir(fs, project_hash) else {
-        return (0, 0, 0);
-    };
+/// Count tasks by status from the persisted `tasks.json`. Absence means no
+/// persisted tasks; read/parse failure is returned so it can be surfaced.
+fn task_counts(
+    fs: &dyn FileSystemPort,
+    project_hash: &str,
+) -> Result<Option<(usize, usize, usize)>, String> {
+    let dir = summary_dir(fs, project_hash)?;
     let path = dir.join("tasks.json");
-    let Ok(content) = fs.read_to_string(&path) else {
-        return (0, 0, 0);
-    };
-    let Ok(tasks) = serde_json::from_str::<Vec<TaskStatusOnly>>(&content) else {
-        return (0, 0, 0);
-    };
+    if !fs.exists(&path) {
+        return Ok(None);
+    }
+    let content = fs
+        .read_to_string(&path)
+        .map_err(|err| format!("failed to read persisted tasks {}: {err}", path.display()))?;
+    let tasks = serde_json::from_str::<Vec<TaskStatusOnly>>(&content)
+        .map_err(|err| format!("failed to parse persisted tasks {}: {err}", path.display()))?;
     let mut completed = 0;
     let mut in_progress = 0;
     let mut pending = 0;
@@ -150,29 +172,64 @@ fn task_counts(fs: &dyn FileSystemPort, project_hash: &str) -> (usize, usize, us
             _ => pending += 1,
         }
     }
-    (completed, in_progress, pending)
+    Ok(Some((completed, in_progress, pending)))
 }
 
 /// Build a `SessionSummary` from the current context. Pure-ish: all IO goes
 /// through the injected ports so it can be unit-tested with stubs.
-fn build_summary(input: &HookInput, ctx: &HookContext<'_>, proj_hash: &str) -> SessionSummary {
-    let session_id = input.session_id.as_deref().unwrap_or("unknown").to_string();
+fn build_summary(
+    input: &HookInput,
+    ctx: &HookContext<'_>,
+    proj_hash: &str,
+    session_id: &str,
+) -> Result<SessionSummary, String> {
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    // Resolve repo root once; git ops scope to it. Fall back to cwd.
-    let repo = ctx.git.repo_root(cwd).unwrap_or_else(|| cwd.to_string());
+    let (completed, in_progress, pending) = task_counts(ctx.fs, proj_hash)?.unwrap_or((0, 0, 0));
+    let Some(repo) = ctx.git.repo_root(cwd) else {
+        if completed == 0 && in_progress == 0 && pending == 0 {
+            return Ok(SessionSummary {
+                session_id: session_id.to_string(),
+                written_at: chrono::Utc::now().to_rfc3339(),
+                branch: String::new(),
+                head_sha: String::new(),
+                recent_commits: Vec::new(),
+                completed,
+                in_progress,
+                pending,
+            });
+        }
+        return Err("failed to resolve repo root for session summary".to_string());
+    };
 
-    let branch = ctx.git.current_branch(&repo).unwrap_or_default();
+    let recent_commits = recent_commits(ctx, &repo)?;
+    if recent_commits.is_empty() && completed == 0 && in_progress == 0 && pending == 0 {
+        return Ok(SessionSummary {
+            session_id: session_id.to_string(),
+            written_at: chrono::Utc::now().to_rfc3339(),
+            branch: String::new(),
+            head_sha: String::new(),
+            recent_commits,
+            completed,
+            in_progress,
+            pending,
+        });
+    }
+
+    let branch = ctx
+        .git
+        .current_branch(&repo)
+        .map_err(|err| format!("failed to resolve current branch for session summary: {err}"))?;
     let head_sha = ctx
         .git
         .head_sha(&repo)
-        .map(|s| s.chars().take(12).collect::<String>())
-        .unwrap_or_default();
-    let recent_commits = recent_commits(ctx, &repo);
-    let (completed, in_progress, pending) = task_counts(ctx.fs, proj_hash);
+        .ok_or_else(|| "failed to resolve HEAD sha for session summary".to_string())?
+        .chars()
+        .take(12)
+        .collect::<String>();
 
-    SessionSummary {
-        session_id,
+    Ok(SessionSummary {
+        session_id: session_id.to_string(),
         written_at: chrono::Utc::now().to_rfc3339(),
         branch,
         head_sha,
@@ -180,7 +237,7 @@ fn build_summary(input: &HookInput, ctx: &HookContext<'_>, proj_hash: &str) -> S
         completed,
         in_progress,
         pending,
-    }
+    })
 }
 
 /// True when the summary carries no signal worth persisting — no commits AND
@@ -191,44 +248,143 @@ fn is_empty_summary(s: &SessionSummary) -> bool {
 
 /// Process `SessionEnd` — write the prose session summary. Always `allow()`.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let Some(session_id) = concrete_input_session_id(input) else {
+        tracing::warn!("session_summary skipped durable write without concrete session id");
+        return HookOutput::allow();
+    };
     let cwd = input.cwd.as_deref().unwrap_or(".");
     let proj_hash = project_hash(cwd);
 
-    let summary = build_summary(input, ctx, &proj_hash);
+    let summary = match build_summary(input, ctx, &proj_hash, session_id) {
+        Ok(summary) => summary,
+        Err(err) => return authority_context(HookEvent::SessionEnd, err),
+    };
 
     if is_empty_summary(&summary) {
         // Nothing to say — don't write an empty note.
         return HookOutput::allow();
     }
 
-    // Resolve path + write. Fail-open on any IO error.
-    if let Some(path) = summary_path(ctx.fs, &proj_hash) {
-        if let Some(parent) = path.parent() {
-            let _ = ctx.fs.create_dir_all(parent);
+    let path = match summary_path(ctx.fs, &proj_hash) {
+        Ok(path) => path,
+        Err(err) => return authority_context(HookEvent::SessionEnd, err),
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(err) = ctx.fs.create_dir_all(parent) {
+            return authority_context(
+                HookEvent::SessionEnd,
+                format!(
+                    "failed to create session summary dir {}: {err}",
+                    parent.display()
+                ),
+            );
         }
-        match serde_json::to_vec_pretty(&summary) {
-            Ok(bytes) => {
-                if let Err(e) = ctx.fs.write(&path, &bytes) {
-                    tracing::debug!(error = %e, "session_summary: write failed (fail-open)");
-                } else {
-                    tracing::info!(
-                        path = %path.display(),
-                        commits = summary.recent_commits.len(),
-                        completed = summary.completed,
-                        "session_summary: wrote prose summary"
-                    );
-                }
+    }
+    match serde_json::to_vec_pretty(&summary) {
+        Ok(bytes) => {
+            if let Err(err) = ctx.fs.write(&path, &bytes) {
+                return authority_context(
+                    HookEvent::SessionEnd,
+                    format!("failed to write session summary {}: {err}", path.display()),
+                );
             }
-            Err(e) => tracing::debug!(error = %e, "session_summary: serialize failed (fail-open)"),
+            tracing::info!(
+                path = %path.display(),
+                commits = summary.recent_commits.len(),
+                completed = summary.completed,
+                "session_summary: wrote prose summary"
+            );
+        }
+        Err(err) => {
+            return authority_context(
+                HookEvent::SessionEnd,
+                format!("failed to serialize session summary: {err}"),
+            );
         }
     }
 
     HookOutput::allow()
 }
 
+pub fn authority_context(event: HookEvent, message: impl Into<String>) -> HookOutput {
+    HookOutput::inject_context(
+        event,
+        format!(
+            "{}[Session Summary] {}",
+            HookOutput::SENTINEL_AUTHORITY_PREFIX,
+            message.into()
+        ),
+    )
+}
+
+pub fn summary_read_error_context(message: impl Into<String>) -> HookOutput {
+    authority_context(HookEvent::SessionStart, message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
+    use std::path::{Path, PathBuf};
+
+    struct TestFs {
+        home: PathBuf,
+    }
+
+    impl FileSystemPort for TestFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn empty_summary_detected() {
@@ -295,6 +451,56 @@ mod tests {
     }
 
     #[test]
+    fn missing_session_does_not_read_or_write_summary_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+        let task_dir = summary_dir(&fs, &project).unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("tasks.json"), "not-json").unwrap();
+
+        let input = HookInput {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+        let context = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|h| h.additional_context.as_deref());
+
+        assert!(output.blocked.is_none());
+        assert!(
+            context.is_none(),
+            "missing session must not read corrupt task state or inject authority context"
+        );
+        assert!(!summary_path(&fs, &project).unwrap().exists());
+    }
+
+    #[test]
+    fn synthetic_session_does_not_write_unknown_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_hash(cwd.to_str().unwrap());
+
+        let input = HookInput {
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(!summary_path(&fs, &project).unwrap().exists());
+    }
+
+    #[test]
     fn summary_roundtrips_through_json() {
         let s = SessionSummary {
             session_id: "sess-1".into(),
@@ -315,8 +521,38 @@ mod tests {
     fn task_counts_zero_when_absent() {
         let ctx = crate::hooks::test_support::stub_ctx();
         // A hash unlikely to have a real tasks.json on disk.
-        let (c, i, p) = task_counts(ctx.fs, "zzzzzzzz");
-        assert_eq!((c, i, p), (0, 0, 0));
+        let counts = task_counts(ctx.fs, "zzzzzzzz").unwrap();
+        assert_eq!(counts, None);
+    }
+
+    #[test]
+    fn task_counts_errors_on_corrupt_tasks_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let project = "deadbeef";
+        let dir = summary_dir(&fs, project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tasks.json"), "not-json").unwrap();
+
+        let err = task_counts(&fs, project).unwrap_err();
+        assert!(err.contains("failed to parse persisted tasks"), "{err}");
+    }
+
+    #[test]
+    fn read_summary_errors_on_corrupt_summary_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let project = "deadbeef";
+        let path = summary_path(&fs, project).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not-json").unwrap();
+
+        let err = read_summary(&fs, project).unwrap_err();
+        assert!(err.contains("failed to parse session summary"), "{err}");
     }
 
     #[test]

@@ -8,25 +8,22 @@
 //!
 //! ## Shipped defaults
 //!
-//! Both hooks default to `ObserveOnly` — the safe rollout posture
-//! per spec §3. The hook still runs all four checks per citation and
-//! logs would-be blocks via `tracing::warn`, but never returns
-//! `deny()`. Operators flip modes to `DefaultBlocking` once
-//! telemetry shows the connector + matrix layers reliably emit
-//! audit + matrix data; flip to `StrictBlocking` for
-//! catastrophic-class output tools.
+//! Both hooks default to `DefaultBlocking`: structural BA violations
+//! block by default instead of being logged as telemetry-only findings.
+//! Operators can explicitly choose `ObserveOnly` for local diagnostics
+//! or `StrictBlocking` for catastrophic-class output tools.
 //!
 //! ## TOML shape
 //!
 //! ```toml
 //! [provenance_validate]
-//! mode = "ObserveOnly"  # ObserveOnly | DefaultBlocking | StrictBlocking
+//! mode = "DefaultBlocking"  # ObserveOnly | DefaultBlocking | StrictBlocking
 //!
 //! [requirements_traceability_gate]
-//! mode = "ObserveOnly"
+//! mode = "DefaultBlocking"
 //! ```
 //!
-//! Both keys are optional; missing keys fall back to `ObserveOnly`.
+//! Both keys are optional; missing keys fall back to `DefaultBlocking`.
 //! Unknown mode strings surface as a load error — operators see
 //! the typo at startup rather than discovering silent
 //! mis-enforcement at production time.
@@ -37,10 +34,9 @@ use anyhow::{anyhow, Context, Result};
 use sentinel_application::hooks::{provenance_validate, requirements_traceability_gate};
 use serde::Deserialize;
 
-/// Shipped baseline. Both hooks default to `ObserveOnly`.
-pub const SHIPPED_BA_ENFORCEMENT_DEFAULTS: &str = include_str!(
-    "../../../config/ba-enforcement-defaults.toml"
-);
+/// Shipped baseline. Both hooks default to `DefaultBlocking`.
+pub const SHIPPED_BA_ENFORCEMENT_DEFAULTS: &str =
+    include_str!("../../../config/ba-enforcement-defaults.toml");
 
 /// Operator-facing mode wrapper for both BA1+3 hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +46,17 @@ pub struct BaEnforcementConfig {
 }
 
 impl BaEnforcementConfig {
-    /// Safe default: both hooks in `ObserveOnly` (no blocking;
-    /// telemetry only).
+    /// Production default: both hooks block structural violations.
+    #[must_use]
+    pub const fn default_blocking() -> Self {
+        Self {
+            provenance_validate_mode: provenance_validate::ValidationMode::DefaultBlocking,
+            requirements_traceability_mode:
+                requirements_traceability_gate::ValidationMode::DefaultBlocking,
+        }
+    }
+
+    /// Explicit diagnostics-only mode. Not used as a production fallback.
     #[must_use]
     pub const fn observe_only() -> Self {
         Self {
@@ -62,21 +67,17 @@ impl BaEnforcementConfig {
     }
 
     /// Parse from a TOML string. Missing keys fall back to
-    /// `ObserveOnly`; unknown mode strings surface as `Err`.
+    /// `DefaultBlocking`; unknown mode strings surface as `Err`.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let toml_doc: BaEnforcementToml =
             toml::from_str(s).context("failed to parse ba-enforcement TOML")?;
-        let provenance_validate_mode = toml_doc
-            .provenance_validate
-            .as_ref()
-            .map_or(Ok(provenance_validate::ValidationMode::ObserveOnly), |s| {
-                parse_provenance_mode(&s.mode)
-            })?;
-        let requirements_traceability_mode = toml_doc
-            .requirements_traceability_gate
-            .as_ref()
-            .map_or(
-                Ok(requirements_traceability_gate::ValidationMode::ObserveOnly),
+        let provenance_validate_mode = toml_doc.provenance_validate.as_ref().map_or(
+            Ok(provenance_validate::ValidationMode::DefaultBlocking),
+            |s| parse_provenance_mode(&s.mode),
+        )?;
+        let requirements_traceability_mode =
+            toml_doc.requirements_traceability_gate.as_ref().map_or(
+                Ok(requirements_traceability_gate::ValidationMode::DefaultBlocking),
                 |s| parse_requirements_mode(&s.mode),
             )?;
         Ok(Self {
@@ -112,12 +113,9 @@ impl BaEnforcementConfig {
                     path.display()
                 )
             })?;
-            // Override: each key set in the operator file wins; the
-            // shipped value stays otherwise. Since both modes are
-            // always present after `from_toml_str` (defaulting to
-            // ObserveOnly), this collapses to: operator file
-            // completely replaces shipped. Future enhancement: parse
-            // overrides separately so missing-key passes through.
+            // Override: each key set in the operator file wins. Missing keys
+            // are parsed as the production blocking default, so an override
+            // file cannot accidentally make a gate observe-only by omission.
             config = overrides;
         }
         Ok(config)
@@ -176,19 +174,39 @@ mod tests {
         let config = BaEnforcementConfig::shipped().unwrap();
         assert_eq!(
             config.provenance_validate_mode,
+            provenance_validate::ValidationMode::DefaultBlocking
+        );
+        assert_eq!(
+            config.requirements_traceability_mode,
+            requirements_traceability_gate::ValidationMode::DefaultBlocking
+        );
+    }
+
+    #[test]
+    fn default_blocking_constant_matches_shipped() {
+        let default_blocking = BaEnforcementConfig::default_blocking();
+        let shipped = BaEnforcementConfig::shipped().unwrap();
+        assert_eq!(default_blocking, shipped);
+    }
+
+    #[test]
+    fn explicit_observe_only_parses() {
+        let toml = r#"
+[provenance_validate]
+mode = "ObserveOnly"
+
+[requirements_traceability_gate]
+mode = "ObserveOnly"
+"#;
+        let config = BaEnforcementConfig::from_toml_str(toml).unwrap();
+        assert_eq!(
+            config.provenance_validate_mode,
             provenance_validate::ValidationMode::ObserveOnly
         );
         assert_eq!(
             config.requirements_traceability_mode,
             requirements_traceability_gate::ValidationMode::ObserveOnly
         );
-    }
-
-    #[test]
-    fn observe_only_constant_matches_shipped() {
-        let observe = BaEnforcementConfig::observe_only();
-        let shipped = BaEnforcementConfig::shipped().unwrap();
-        assert_eq!(observe, shipped);
     }
 
     #[test]
@@ -232,23 +250,24 @@ mode = "StrictBlocking"
     }
 
     #[test]
-    fn missing_keys_fall_back_to_observe_only() {
+    fn missing_keys_fall_back_to_default_blocking() {
         let toml = "";
         let config = BaEnforcementConfig::from_toml_str(toml).unwrap();
         assert_eq!(
             config.provenance_validate_mode,
-            provenance_validate::ValidationMode::ObserveOnly
+            provenance_validate::ValidationMode::DefaultBlocking
         );
         assert_eq!(
             config.requirements_traceability_mode,
-            requirements_traceability_gate::ValidationMode::ObserveOnly
+            requirements_traceability_gate::ValidationMode::DefaultBlocking
         );
     }
 
     #[test]
     fn missing_one_section_defaults_only_that_one() {
         // Operator sets provenance_validate to Strict but doesn't
-        // mention requirements_traceability_gate → that one defaults.
+        // mention requirements_traceability_gate → that one defaults to the
+        // production blocking baseline.
         let toml = r#"
 [provenance_validate]
 mode = "StrictBlocking"
@@ -260,7 +279,7 @@ mode = "StrictBlocking"
         );
         assert_eq!(
             config.requirements_traceability_mode,
-            requirements_traceability_gate::ValidationMode::ObserveOnly
+            requirements_traceability_gate::ValidationMode::DefaultBlocking
         );
     }
 
@@ -289,10 +308,10 @@ mode = "TotallyMadeUp"
             "/tmp/nonexistent-ba-enforcement-12345.toml",
         )))
         .unwrap();
-        // Missing file → shipped (ObserveOnly).
+        // Missing file → shipped (DefaultBlocking).
         assert_eq!(
             config.provenance_validate_mode,
-            provenance_validate::ValidationMode::ObserveOnly
+            provenance_validate::ValidationMode::DefaultBlocking
         );
     }
 
@@ -301,7 +320,7 @@ mode = "TotallyMadeUp"
         let config = BaEnforcementConfig::with_shipped_and_overrides(None).unwrap();
         assert_eq!(
             config.provenance_validate_mode,
-            provenance_validate::ValidationMode::ObserveOnly
+            provenance_validate::ValidationMode::DefaultBlocking
         );
     }
 

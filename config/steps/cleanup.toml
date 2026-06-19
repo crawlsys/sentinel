@@ -1,3 +1,5 @@
+federation_version = "1"
+
 # Cleanup Skill — Step Definitions
 # 20 individually trackable steps across 4 phases
 #

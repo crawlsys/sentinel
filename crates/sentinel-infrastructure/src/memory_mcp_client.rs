@@ -64,17 +64,55 @@ impl Default for MemoryMcpConfig {
 }
 
 impl MemoryMcpConfig {
-    /// Build from environment variables. Missing vars fall back to defaults.
-    pub fn from_env() -> Self {
-        let argv = std::env::var("MEMORY_MCP_CMD")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map_or_else(|| shell_split(DEFAULT_CMD), |s| shell_split(&s));
-        let timeout = std::env::var("MEMORY_MCP_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(DEFAULT_TIMEOUT, Duration::from_secs);
-        Self { argv, timeout }
+    /// Build from environment variables.
+    ///
+    /// Unset vars use shipped defaults. Set-but-empty or malformed values are
+    /// configuration errors, not silent fallbacks.
+    pub fn from_env() -> Result<Self> {
+        Self::from_env_values(
+            read_optional_env("MEMORY_MCP_CMD")?,
+            read_optional_env("MEMORY_MCP_TIMEOUT_SECS")?,
+        )
+    }
+
+    fn from_env_values(cmd: Option<String>, timeout_secs: Option<String>) -> Result<Self> {
+        let argv = match cmd {
+            Some(cmd) => {
+                if cmd.trim().is_empty() {
+                    return Err(anyhow!("MEMORY_MCP_CMD is set but empty"));
+                }
+                let argv = shell_split(&cmd);
+                if argv.is_empty() {
+                    return Err(anyhow!("MEMORY_MCP_CMD produced no argv tokens"));
+                }
+                argv
+            }
+            None => shell_split(DEFAULT_CMD),
+        };
+        let timeout = match timeout_secs {
+            Some(raw) => {
+                if raw.trim().is_empty() {
+                    return Err(anyhow!("MEMORY_MCP_TIMEOUT_SECS is set but empty"));
+                }
+                let secs = raw.trim().parse::<u64>().with_context(|| {
+                    format!("MEMORY_MCP_TIMEOUT_SECS must be a positive integer, got {raw:?}")
+                })?;
+                if secs == 0 {
+                    return Err(anyhow!("MEMORY_MCP_TIMEOUT_SECS must be greater than zero"));
+                }
+                Duration::from_secs(secs)
+            }
+            None => DEFAULT_TIMEOUT,
+        };
+        Ok(Self { argv, timeout })
+    }
+}
+
+fn read_optional_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("{name} must be valid Unicode")),
     }
 }
 
@@ -101,8 +139,8 @@ impl MemoryMcpClient {
         Self { cfg }
     }
 
-    pub fn from_env() -> Self {
-        Self::new(MemoryMcpConfig::from_env())
+    pub fn from_env() -> Result<Self> {
+        Ok(Self::new(MemoryMcpConfig::from_env()?))
     }
 
     /// Search the Memory engine for atoms relevant to `query`. Writes one
@@ -132,9 +170,9 @@ impl MemoryMcpClient {
         Ok(parsed.hits)
     }
 
-    /// Invoke an arbitrary MCP tool. Returns the decoded `content[0].text`
-    /// payload parsed as JSON (the memory-mcp server always emits a single
-    /// `text` content item containing JSON, per its `json_result` helper).
+    /// Invoke an arbitrary MCP tool. Returns the typed `structuredContent`
+    /// payload. Text-only MCP responses are rejected so sentinel does not
+    /// silently accept a lower-authority compatibility shape.
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -229,7 +267,7 @@ impl MemoryMcpClient {
 
 /// Hit shape emitted by memory-mcp's `memory_search` tool. Matches the
 /// JSON `hits[i]` entries; extra fields are ignored on deserialisation
-/// so server additions stay backwards-compatible.
+/// because this client only needs the fields below.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpSearchHit {
     pub atom_id: String,
@@ -309,46 +347,9 @@ fn extract_tool_payload(resp: &serde_json::Value) -> Result<serde_json::Value> {
     if let Some(err) = resp.get("error") {
         return Err(anyhow!("memory-mcp error: {err}"));
     }
-    // memory-mcp emits both `structuredContent` (preferred — typed JSON) and
-    // `content[0].text` (fallback — JSON string inside a text block). Match
-    // the order the inlined transports used so behaviour is unchanged.
-    if let Some(sc) = resp.pointer("/result/structuredContent") {
-        return Ok(sc.clone());
-    }
-    let text = resp
-        .pointer("/result/content/0/text")
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| {
-            anyhow!("memory-mcp response missing structuredContent and content[0].text: {resp}")
-        })?;
-
-    // **Bug fix (2026-05-06)**: Previously parsed `content[0].text` directly as
-    // JSON and surfaced a noisy `parse memory-mcp tool text payload: <error>`
-    // warning when the upstream returned a plain-text error. The most common
-    // case: mcp-router emits `Error: Server '<name>' not found` as
-    // `content[0].text` when the wrapped server isn't registered in
-    // ~/.claude.json. That string isn't JSON, so every hook invocation logs a
-    // confusing parse failure even though the *real* error is "memory-mcp not
-    // registered" or "wrong --single arg".
-    //
-    // New behaviour:
-    //   1. Try parsing as JSON (the common, healthy path).
-    //   2. If parse fails AND the text starts with "Error:" / "error:" /
-    //      "ERROR:", treat the whole text as the error message and return a
-    //      clean Err(anyhow!) — caller logs surface the real cause.
-    //   3. Otherwise, return the raw text wrapped in a `{"text": "..."}` JSON
-    //      object so callers that just want the string still work.
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
-        return Ok(parsed);
-    }
-    let trimmed = text.trim_start();
-    if trimmed.starts_with("Error:")
-        || trimmed.starts_with("error:")
-        || trimmed.starts_with("ERROR:")
-    {
-        return Err(anyhow!("memory-mcp upstream error: {trimmed}"));
-    }
-    Ok(serde_json::json!({ "text": text }))
+    resp.pointer("/result/structuredContent")
+        .cloned()
+        .ok_or_else(|| anyhow!("memory-mcp response missing structuredContent: {resp}"))
 }
 
 /// Implement `MemoryMcpPort` so hooks can call any memory-mcp tool through
@@ -383,18 +384,53 @@ mod tests {
 
     #[test]
     fn config_from_env_defaults() {
-        // Deliberately NOT setting env vars — defaults should apply.
-        // We use a sub-scope without touching global env so parallel tests
-        // stay isolated.
-        std::env::remove_var("MEMORY_MCP_CMD");
-        std::env::remove_var("MEMORY_MCP_TIMEOUT_SECS");
-        let cfg = MemoryMcpConfig::from_env();
+        let cfg = MemoryMcpConfig::from_env_values(None, None).unwrap();
         assert_eq!(cfg.argv, vec!["mcp-router", "--single", "memory-mcp"]);
         assert_eq!(cfg.timeout, DEFAULT_TIMEOUT);
     }
 
     #[test]
-    fn extract_tool_payload_returns_parsed_json() {
+    fn config_rejects_malformed_timeout() {
+        let err = MemoryMcpConfig::from_env_values(None, Some("ten".to_string())).unwrap_err();
+        assert!(
+            err.to_string().contains("MEMORY_MCP_TIMEOUT_SECS"),
+            "{err:#}"
+        );
+
+        let err = MemoryMcpConfig::from_env_values(None, Some("0".to_string())).unwrap_err();
+        assert!(err.to_string().contains("greater than zero"), "{err:#}");
+    }
+
+    #[test]
+    fn config_rejects_empty_command() {
+        let err = MemoryMcpConfig::from_env_values(Some("  ".to_string()), None).unwrap_err();
+        assert!(err.to_string().contains("MEMORY_MCP_CMD"), "{err:#}");
+    }
+
+    #[test]
+    fn extract_tool_payload_returns_structured_content() {
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "structuredContent": {
+                    "status": "ok",
+                    "count": 0,
+                    "hits": []
+                },
+                "content": [{
+                    "type": "text",
+                    "text": "{\"status\":\"ok\",\"count\":0,\"hits\":[]}"
+                }]
+            }
+        });
+        let payload = extract_tool_payload(&resp).unwrap();
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["count"], 0);
+    }
+
+    #[test]
+    fn extract_tool_payload_rejects_text_only_compatibility_payload() {
         let resp = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -405,9 +441,11 @@ mod tests {
                 }]
             }
         });
-        let payload = extract_tool_payload(&resp).unwrap();
-        assert_eq!(payload["status"], "ok");
-        assert_eq!(payload["count"], 0);
+        let err = extract_tool_payload(&resp).unwrap_err();
+        assert!(
+            err.to_string().contains("missing structuredContent"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

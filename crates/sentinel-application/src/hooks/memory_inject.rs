@@ -63,7 +63,9 @@ fn min_inject_score() -> f64 {
 /// no I/O) so the floor behaviour is unit-testable; the caller resolves the
 /// floor via [`min_inject_score`].
 fn apply_relevance_floor(hits: Vec<UnifiedHit>, floor: f64) -> Vec<UnifiedHit> {
-    hits.into_iter().filter(|h| h.final_score >= floor).collect()
+    hits.into_iter()
+        .filter(|h| h.final_score >= floor)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -385,12 +387,12 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         // Human-only channel.
         out.system_message = Some(human_msg);
         // Model channel: append to any recall context already being injected.
-        let hso = out
-            .hook_specific_output
-            .get_or_insert_with(|| sentinel_domain::events::HookSpecificOutput {
+        let hso = out.hook_specific_output.get_or_insert_with(|| {
+            sentinel_domain::events::HookSpecificOutput {
                 hook_event_name: HookEvent::UserPromptSubmit.to_string(),
                 ..Default::default()
-            });
+            }
+        });
         hso.additional_context = Some(match hso.additional_context.take() {
             Some(existing) => format!("{model_msg}\n\n{existing}"),
             None => model_msg,
@@ -474,19 +476,6 @@ fn format_capture_notice(n: &CaptureNotice) -> Option<(String, String)> {
         n.project, quar
     );
     Some((human, model))
-}
-
-/// Process Stop — no-op.
-///
-/// The legacy implementation precomputed Qdrant search results into a
-/// sidecar JSON file so the next `UserPromptSubmit` could read them without
-/// a live search. Under memory-mcp, the live search is fast enough (single
-/// subprocess, cold start ~2.7s) that the precompute cache is both
-/// redundant and a maintenance burden. Kept as a no-op stub so the hook
-/// dispatcher wiring can stay unchanged; delete the dispatch branch in a
-/// follow-up pass.
-pub fn process_stop(_input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
-    HookOutput::allow()
 }
 
 #[cfg(test)]
@@ -633,15 +622,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_stop_is_noop() {
-        let input = HookInput::default();
-        let ctx = crate::hooks::test_support::stub_ctx();
-        let output = process_stop(&input, &ctx);
-        assert!(output.blocked.is_none());
-        assert!(output.hook_specific_output.is_none());
-    }
-
-    #[test]
     fn test_injected_state_roundtrip() {
         let state = InjectedState {
             memories: vec![InjectedMemoryEntry {
@@ -672,12 +652,12 @@ mod tests {
         let (human, model) = format_capture_notice(&n).expect("3 landed → Some");
         // Human channel: friendly, names + counts + quarantine note.
         assert!(human.contains("💾"));
-        assert!(human.contains("3 atom"));        // 2 written + 1 superseded
-        assert!(human.contains("memory"));         // project
-        assert!(human.contains("3011"));           // a name
+        assert!(human.contains("3 atom")); // 2 written + 1 superseded
+        assert!(human.contains("memory")); // project
+        assert!(human.contains("3011")); // a name
         assert!(human.contains("1 quarantined"));
-        assert!(human.contains("(+1 more)"));      // names_total 3 > 2 shown
-        // Model channel: same substance, [Memory] prefix.
+        assert!(human.contains("(+1 more)")); // names_total 3 > 2 shown
+                                              // Model channel: same substance, [Memory] prefix.
         assert!(model.starts_with("[Memory]"));
         assert!(model.contains("3 durable atom"));
     }

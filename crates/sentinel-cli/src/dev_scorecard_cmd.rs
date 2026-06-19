@@ -9,22 +9,26 @@ use std::path::PathBuf;
 
 use sentinel_application::dev_scorecard::scan_dev_scorecard;
 
-pub fn run() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+pub async fn run() -> Result<()> {
+    let sentinel_dir: PathBuf = sentinel_infrastructure::paths::sentinel_root();
     let git_stats = sentinel_dir.join("dev-git-stats.json");
     let linear_cache = sentinel_dir.join("linear-assigned.json");
     let output_summary = sentinel_dir.join("metrics").join("dev-scorecard.json");
+    let graph_runs = output_summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Dev Scorecard".bold());
     println!("Git stats:      {}", git_stats.display());
     println!("Linear cache:   {}", linear_cache.display());
     println!("Output summary: {}", output_summary.display());
+    println!("Graph audit:    {}", graph_runs.display());
     println!();
 
     let summary = scan_dev_scorecard(&git_stats, &linear_cache, &output_summary)
         .context("scan_dev_scorecard failed")?;
+    let graph_audit =
+        crate::dev_scorecard_graph::run_dev_scorecard_graph_audit(&summary.devs, &graph_runs)
+            .await
+            .context("dev scorecard graph audit failed")?;
 
     if summary.devs_total == 0 {
         println!(
@@ -41,6 +45,14 @@ pub fn run() -> Result<()> {
     println!(
         "  {} devs · {} commits · {} merged PRs",
         summary.devs_total, summary.commits_total, summary.merged_prs_total
+    );
+    println!(
+        "  {} scorecard graph run(s) · {} attribution · {} excellent · {} healthy · {} attention",
+        graph_audit.devs_audited,
+        graph_audit.attribution_divergences,
+        graph_audit.excellent,
+        graph_audit.healthy,
+        graph_audit.needs_attention
     );
     println!();
 
@@ -74,12 +86,12 @@ pub fn run() -> Result<()> {
     }
     println!();
 
-    if summary.attribution_divergences > 0 {
+    if graph_audit.attribution_divergences > 0 {
         println!(
             "{}",
             format!(
                 "⚠ {} dev(s) with attribution divergence — credit landed on the wrong assignee.",
-                summary.attribution_divergences
+                graph_audit.attribution_divergences
             )
             .red()
             .bold()

@@ -40,6 +40,7 @@ use std::path::PathBuf;
 
 use sentinel_domain::dry_run::{AuditorDecision, AuditorError, AuditorVerdict, DryRunRequest};
 use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::port_errors::FileSystemError;
 use sentinel_domain::ports::{AuditorPort, ReversibilityClassifierPort};
 use sentinel_domain::ReversibilityClass;
 
@@ -118,9 +119,65 @@ pub fn has_dry_run_approval(fs: &dyn FileSystemPort, session_id: &str, action_ha
 
 /// Record that the auditor approved this action; subsequent identical
 /// calls in the same session will short-circuit at step 2 above.
-pub fn mark_dry_run_approved(fs: &dyn FileSystemPort, session_id: &str, action_hash: &str) {
+pub fn mark_dry_run_approved(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+    action_hash: &str,
+) -> Result<(), FileSystemError> {
     let path = approval_marker_path(session_id, action_hash);
-    let _ = fs.write(&path, b"1");
+    fs.write(&path, b"1")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DryRunGateDecision {
+    Allow,
+    AllowAndRecordApproval,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct DryRunGateEvaluation {
+    pub tool: Option<String>,
+    pub class: Option<ReversibilityClass>,
+    pub a3_scope: bool,
+    pub readonly_mcp_allow: bool,
+    pub bash_schema_allow: bool,
+    pub catastrophic_shell_block: bool,
+    pub session_id: Option<String>,
+    pub missing_session: bool,
+    pub action_hash: Option<String>,
+    pub approval_present: bool,
+    pub dry_run_complete: bool,
+    pub auditor_attempted: bool,
+    pub auditor_error: Option<AuditorError>,
+    pub auditor_verdict: Option<AuditorVerdict>,
+    pub low_confidence: bool,
+    pub human_review_required: bool,
+    pub should_block: bool,
+    pub approval_marker_should_be_recorded: bool,
+    pub decision: DryRunGateDecision,
+    pub block_reason: Option<String>,
+}
+
+impl DryRunGateEvaluation {
+    #[must_use]
+    pub fn graph_authority_required(&self) -> bool {
+        self.a3_scope
+    }
+
+    #[must_use]
+    pub fn auditor_passed(&self) -> bool {
+        self.auditor_verdict
+            .as_ref()
+            .is_some_and(|verdict| matches!(verdict.decision, AuditorDecision::Pass))
+    }
+
+    #[must_use]
+    pub fn auditor_blocked(&self) -> bool {
+        self.auditor_verdict
+            .as_ref()
+            .is_some_and(|verdict| matches!(verdict.decision, AuditorDecision::Block { .. }))
+    }
 }
 
 /// Returns `true` when the MCP method name (the last `__`-separated segment of
@@ -245,9 +302,19 @@ pub fn process(
     classifier: &dyn ReversibilityClassifierPort,
     auditor: &dyn AuditorPort,
 ) -> HookOutput {
+    let evaluation = evaluate(input, fs, classifier, auditor);
+    output_from_evaluation(fs, &evaluation)
+}
+
+pub fn evaluate(
+    input: &HookInput,
+    fs: &dyn FileSystemPort,
+    classifier: &dyn ReversibilityClassifierPort,
+    auditor: &dyn AuditorPort,
+) -> DryRunGateEvaluation {
     let tool = match &input.tool_name {
         Some(t) => t.as_str(),
-        None => return HookOutput::allow(),
+        None => return base_evaluation(None, None),
     };
 
     // Step 1 — reversibility scope. Only Irreversible / Catastrophic
@@ -256,9 +323,11 @@ pub fn process(
     let null_input = serde_json::Value::Null;
     let tool_input_ref = input.tool_input.as_ref().unwrap_or(&null_input);
     let class = classifier.classify(tool, tool_input_ref);
+    let mut evaluation = base_evaluation(Some(tool.to_string()), Some(class));
     if !class.at_least(ReversibilityClass::Irreversible) {
-        return HookOutput::allow();
+        return evaluation;
     }
+    evaluation.a3_scope = true;
 
     // Step 1b — read-only MCP method short-circuit.
     //
@@ -277,7 +346,8 @@ pub fn process(
     if tool.starts_with("mcp__") || tool == "mcp_call_tool" {
         let method = effective_mcp_method(tool, tool_input_ref);
         if is_readonly_mcp_method(method) {
-            return HookOutput::allow();
+            evaluation.readonly_mcp_allow = true;
+            return evaluation;
         }
     }
 
@@ -303,64 +373,180 @@ pub fn process(
     // Bash (normal git push / commit / merge) is allowed through here.
     if tool == "Bash" {
         if matches!(class, ReversibilityClass::Catastrophic) {
-            return HookOutput::deny(format!(
-                "🔴 [Dry-Run Auditor] BLOCKED: Catastrophic-class shell command \
+            block_evaluation(
+                &mut evaluation,
+                format!(
+                    "🔴 [Dry-Run Auditor] BLOCKED: Catastrophic-class shell command \
                  refused. This command poses unrecoverable risk (e.g. destructive \
                  filesystem removal, git history rewrite, force-push to a shared \
                  branch). If this is intentional and you have explicit human \
                  approval, invoke `hygiene_override` to proceed. (class: {class:?})"
-            ));
+                ),
+            );
+            evaluation.catastrophic_shell_block = true;
+            return evaluation;
         }
         // Irreversible-class Bash (git push, git commit, git merge, etc.) — allow.
         // The Bash schema cannot carry A3 dry-run prose fields; demanding them
         // is an unbreakable block. Shell git ops are covered by other sentinel
         // gates; A3 does not apply here.
-        return HookOutput::allow();
+        evaluation.bash_schema_allow = true;
+        return evaluation;
     }
 
     // Need a session id to scope the approval marker. Without one we
     // can't track approval state — block defensively for irreversible+.
     let session_id = match &input.session_id {
-        Some(id) if !id.is_empty() => id.as_str(),
+        Some(id) if !id.is_empty() => {
+            evaluation.session_id = Some(id.clone());
+            id.as_str()
+        }
         _ => {
-            return HookOutput::deny(format!(
-                "🟠 [Dry-Run Auditor] BLOCKED: {class:?}-class action requires a \
+            evaluation.missing_session = true;
+            block_evaluation(
+                &mut evaluation,
+                format!(
+                    "🟠 [Dry-Run Auditor] BLOCKED: {class:?}-class action requires a \
                  session id for approval tracking; none provided."
-            ));
+                ),
+            );
+            return evaluation;
         }
     };
 
     // Step 2 — approval-marker short-circuit. Same exact action already
     // approved this session? Skip the auditor call.
     let action_hash = action_hash_for(tool, tool_input_ref);
+    evaluation.action_hash = Some(action_hash.clone());
     if has_dry_run_approval(fs, session_id, &action_hash) {
-        return HookOutput::allow();
+        evaluation.approval_present = true;
+        return evaluation;
     }
 
     // Step 3 — construct the dry-run artifact.
     let constructed_at = chrono::Utc::now();
     let dry_run = build_dry_run(session_id, tool, tool_input_ref, class, constructed_at);
-    if !dry_run.is_complete() {
-        return HookOutput::deny(format!(
-            "🟠 [Dry-Run Auditor] BLOCKED: {class:?}-class action requires a dry-run \
+    evaluation.dry_run_complete = dry_run.is_complete();
+    if !evaluation.dry_run_complete {
+        block_evaluation(
+            &mut evaluation,
+            format!(
+                "🟠 [Dry-Run Auditor] BLOCKED: {class:?}-class action requires a dry-run \
              with `_intent`, `_reasoning`, and `_expected_effect` populated in tool_input. \
              Re-issue the tool call with those fields, or invoke `hygiene_override` to \
              bypass for legitimate edge cases."
-        ));
+            ),
+        );
+        return evaluation;
     }
 
     // Step 4 — auditor scoring. This hook only reaches here for Irreversible
     // / Catastrophic actions, so use the cross-vendor DUAL audit (Opus 4.8 +
     // GPT-5.5, block if either dissents) — a wrong "safe" here is the most
-    // expensive error sentinel can make. Auditors without a real second model
-    // fall back to single-model via the trait default.
+    // expensive error sentinel can make.
+    evaluation.auditor_attempted = true;
     let verdict = match auditor.score_dual(&dry_run) {
         Ok(v) => v,
-        Err(err) => return handle_auditor_error(class, &err),
+        Err(err) => {
+            let reason = auditor_error_reason(class, &err);
+            evaluation.auditor_error = Some(err);
+            block_evaluation(&mut evaluation, reason);
+            return evaluation;
+        }
     };
 
     // Step 5 — decision.
-    decide(fs, session_id, &action_hash, class, &verdict)
+    match &verdict.decision {
+        AuditorDecision::Block { reason } => {
+            let block_reason = format!(
+                "🟠 [Dry-Run Auditor] BLOCKED: {reason} (auditor: {}, confidence: {:.2})",
+                verdict.auditor_model, verdict.confidence
+            );
+            evaluation.auditor_verdict = Some(verdict);
+            block_evaluation(&mut evaluation, block_reason);
+        }
+        AuditorDecision::Pass => {
+            evaluation.low_confidence = verdict.confidence < HUMAN_SAMPLE_CONFIDENCE_THRESHOLD;
+            let catastrophic = matches!(class, ReversibilityClass::Catastrophic);
+            if evaluation.low_confidence || catastrophic {
+                evaluation.human_review_required = true;
+                let review_reason = human_review_reason(class, &verdict);
+                evaluation.auditor_verdict = Some(verdict);
+                block_evaluation(&mut evaluation, review_reason);
+            } else {
+                evaluation.auditor_verdict = Some(verdict);
+                evaluation.approval_marker_should_be_recorded = true;
+                evaluation.decision = DryRunGateDecision::AllowAndRecordApproval;
+            }
+        }
+    }
+    evaluation
+}
+
+fn base_evaluation(
+    tool: Option<String>,
+    class: Option<ReversibilityClass>,
+) -> DryRunGateEvaluation {
+    DryRunGateEvaluation {
+        tool,
+        class,
+        a3_scope: false,
+        readonly_mcp_allow: false,
+        bash_schema_allow: false,
+        catastrophic_shell_block: false,
+        session_id: None,
+        missing_session: false,
+        action_hash: None,
+        approval_present: false,
+        dry_run_complete: false,
+        auditor_attempted: false,
+        auditor_error: None,
+        auditor_verdict: None,
+        low_confidence: false,
+        human_review_required: false,
+        should_block: false,
+        approval_marker_should_be_recorded: false,
+        decision: DryRunGateDecision::Allow,
+        block_reason: None,
+    }
+}
+
+fn block_evaluation(evaluation: &mut DryRunGateEvaluation, reason: String) {
+    evaluation.should_block = true;
+    evaluation.decision = DryRunGateDecision::Block;
+    evaluation.block_reason = Some(reason);
+}
+
+pub fn output_from_evaluation(
+    fs: &dyn FileSystemPort,
+    evaluation: &DryRunGateEvaluation,
+) -> HookOutput {
+    if evaluation.should_block {
+        return HookOutput::deny(
+            evaluation
+                .block_reason
+                .clone()
+                .unwrap_or_else(|| "A3 dry-run gate blocked without a reason".to_string()),
+        );
+    }
+
+    if evaluation.approval_marker_should_be_recorded {
+        let (Some(session_id), Some(action_hash)) = (
+            evaluation.session_id.as_deref(),
+            evaluation.action_hash.as_deref(),
+        ) else {
+            return HookOutput::deny(
+                "A3 dry-run approval marker cannot be recorded without session/action identity",
+            );
+        };
+        if let Err(e) = mark_dry_run_approved(fs, session_id, action_hash) {
+            return HookOutput::deny(format!(
+                "A3 dry-run approval marker write failed; refusing unaudited commit: {e}"
+            ));
+        }
+    }
+
+    HookOutput::allow()
 }
 
 /// Construct the dry-run request, pulling prose fields out of `tool_input`
@@ -399,56 +585,38 @@ fn extract_field(value: &serde_json::Value, field: &str) -> String {
         .to_string()
 }
 
-fn handle_auditor_error(class: ReversibilityClass, err: &AuditorError) -> HookOutput {
+fn auditor_error_reason(class: ReversibilityClass, err: &AuditorError) -> String {
     let escalate = matches!(class, ReversibilityClass::Catastrophic);
     let escalate_suffix = if escalate {
         " Catastrophic-class action with unavailable auditor — escalate to human review via `hygiene_override` only if the action is truly time-critical."
     } else {
         " Retry when the auditor returns."
     };
-    HookOutput::deny(format!(
+    format!(
         "🟠 [Dry-Run Auditor] BLOCKED: auditor error on {class:?}-class action: {err}.{escalate_suffix}"
-    ))
+    )
 }
 
-fn decide(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-    action_hash: &str,
-    class: ReversibilityClass,
-    verdict: &AuditorVerdict,
-) -> HookOutput {
-    match &verdict.decision {
-        AuditorDecision::Block { reason } => HookOutput::deny(format!(
-            "🟠 [Dry-Run Auditor] BLOCKED: {reason} (auditor: {}, confidence: {:.2})",
-            verdict.auditor_model, verdict.confidence
-        )),
-        AuditorDecision::Pass => {
-            let low_confidence = verdict.confidence < HUMAN_SAMPLE_CONFIDENCE_THRESHOLD;
-            let catastrophic = matches!(class, ReversibilityClass::Catastrophic);
-            if low_confidence || catastrophic {
-                let why = if catastrophic && low_confidence {
-                    "Catastrophic class + auditor confidence below threshold"
-                } else if catastrophic {
-                    "Catastrophic class — human spot-check always required regardless of auditor pass"
-                } else {
-                    "auditor confidence below threshold"
-                };
-                let (weakest_axis, weakest_score) = verdict.axes.weakest_axis();
-                return HookOutput::deny(format!(
-                    "🟠 [Dry-Run Auditor] HUMAN REVIEW REQUIRED: {why} \
-                     (auditor: {}, confidence: {:.2}, weakest axis: {weakest_axis} @ {weakest_score:.2}). \
-                     Auditor reasoning: {reasoning}. Invoke `hygiene_override` to proceed once you \
-                     have read the dry-run and accept the trade-offs.",
-                    verdict.auditor_model,
-                    verdict.confidence,
-                    reasoning = verdict.reasoning,
-                ));
-            }
-            mark_dry_run_approved(fs, session_id, action_hash);
-            HookOutput::allow()
-        }
-    }
+fn human_review_reason(class: ReversibilityClass, verdict: &AuditorVerdict) -> String {
+    let low_confidence = verdict.confidence < HUMAN_SAMPLE_CONFIDENCE_THRESHOLD;
+    let catastrophic = matches!(class, ReversibilityClass::Catastrophic);
+    let why = if catastrophic && low_confidence {
+        "Catastrophic class + auditor confidence below threshold"
+    } else if catastrophic {
+        "Catastrophic class — human spot-check always required regardless of auditor pass"
+    } else {
+        "auditor confidence below threshold"
+    };
+    let (weakest_axis, weakest_score) = verdict.axes.weakest_axis();
+    format!(
+        "🟠 [Dry-Run Auditor] HUMAN REVIEW REQUIRED: {why} \
+         (auditor: {}, confidence: {:.2}, weakest axis: {weakest_axis} @ {weakest_score:.2}). \
+         Auditor reasoning: {reasoning}. Invoke `hygiene_override` to proceed once you \
+         have read the dry-run and accept the trade-offs.",
+        verdict.auditor_model,
+        verdict.confidence,
+        reasoning = verdict.reasoning,
+    )
 }
 
 #[cfg(test)]
@@ -483,20 +651,37 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(std::env::temp_dir())
         }
-        fn read_to_string(&self, _path: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            _path: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(String::new())
         }
-        fn write(&self, path: &Path, _content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            path: &Path,
+            _content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.written.lock().unwrap().insert(path.to_path_buf());
             Ok(())
         }
-        fn append(&self, path: &Path, content: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            path: &Path,
+            content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             self.write(path, content)
         }
-        fn create_dir_all(&self, _path: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            _path: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
-        fn read_dir(&self, _path: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _path: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, path: &Path) -> bool {
@@ -505,8 +690,13 @@ mod tests {
         fn is_dir(&self, _path: &Path) -> bool {
             false
         }
-        fn metadata(&self, _path: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-            Err(sentinel_domain::port_errors::FileSystemError::Backend("not implemented".into()))
+        fn metadata(
+            &self,
+            _path: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                "not implemented".into(),
+            ))
         }
     }
 
@@ -542,7 +732,7 @@ mod tests {
     fn trivially_classified_actions_bypass_audit() {
         let fs = MockFs::new();
         let classifier = classifier_with("Edit", ReversibilityClass::TriviallyReversible);
-        let auditor = StaticAuditor::pass(0.99); // shouldn't be consulted
+        let auditor = StaticAuditor::pass(0.99); // shouldn't be queried
         let output = process(&irreversible_input(), &fs, &classifier, &auditor);
         assert!(
             output.blocked.is_none(),
@@ -623,12 +813,12 @@ mod tests {
         let input = irreversible_input();
         let _ = process(&input, &fs, &classifier, &pass_auditor);
         // Second call uses an erroring auditor — but the marker should
-        // short-circuit before the auditor is consulted.
+        // short-circuit before the auditor is queried.
         let err_auditor = StaticAuditor::err(AuditorError::Unavailable("down".into()));
         let output = process(&input, &fs, &classifier, &err_auditor);
         assert!(
             output.blocked.is_none(),
-            "marker should short-circuit before auditor is consulted"
+            "marker should short-circuit before auditor is queried"
         );
     }
 
@@ -948,10 +1138,7 @@ mod tests {
         let fs = MockFs::new();
         let classifier = irreversible_classifier();
         let auditor = StaticAuditor::block("should never be called");
-        let input = make_mcp_input(
-            "mcp__memory__mcp_health_check",
-            serde_json::json!({}),
-        );
+        let input = make_mcp_input("mcp__memory__mcp_health_check", serde_json::json!({}));
         let output = process(&input, &fs, &classifier, &auditor);
         assert!(
             output.blocked.is_none(),
@@ -981,10 +1168,7 @@ mod tests {
         let fs = MockFs::new();
         let classifier = irreversible_classifier();
         let auditor = StaticAuditor::block("should never be called");
-        let input = make_mcp_input(
-            "mcp__memory__memory_search",
-            serde_json::json!({}),
-        );
+        let input = make_mcp_input("mcp__memory__memory_search", serde_json::json!({}));
         let output = process(&input, &fs, &classifier, &auditor);
         assert!(
             output.blocked.is_none(),
@@ -1054,7 +1238,10 @@ mod tests {
         let fs = MockFs::new();
         // Use a classifier that marks the gateway tool as Irreversible to ensure
         // we actually reach the dry-run field extraction step.
-        let classifier = classifier_with("mcp__gateway__mcp_call_tool", ReversibilityClass::Irreversible);
+        let classifier = classifier_with(
+            "mcp__gateway__mcp_call_tool",
+            ReversibilityClass::Irreversible,
+        );
         let auditor = StaticAuditor::pass(0.95);
         let input = HookInput {
             tool_name: Some("mcp__gateway__mcp_call_tool".to_string()),
@@ -1089,7 +1276,10 @@ mod tests {
         // effective_args returns the nested object and the fields are NOT found
         // at the top level.
         let fs = MockFs::new();
-        let classifier = classifier_with("mcp__gateway__mcp_call_tool", ReversibilityClass::Irreversible);
+        let classifier = classifier_with(
+            "mcp__gateway__mcp_call_tool",
+            ReversibilityClass::Irreversible,
+        );
         let auditor = StaticAuditor::pass(0.99); // would pass if reached
         let input = HookInput {
             tool_name: Some("mcp__gateway__mcp_call_tool".to_string()),
@@ -1276,7 +1466,10 @@ mod tests {
         });
         let args = effective_args(&input);
         assert_eq!(args.get("_intent").and_then(|v| v.as_str()), Some("test"));
-        assert!(args.get("tool").is_none(), "tool key should not be in effective args");
+        assert!(
+            args.get("tool").is_none(),
+            "tool key should not be in effective args"
+        );
     }
 
     #[test]

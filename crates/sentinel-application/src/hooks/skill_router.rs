@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 
-use super::FileSystemPort;
+use super::{concrete_input_session_id, FileSystemPort};
 
 /// Extract the activation banner from a skill's SKILL.md file.
 /// Returns the content between `## Activation Banner` and the next `##` heading,
@@ -131,8 +131,8 @@ pub(crate) fn clear_pending_skill_state(fs: &dyn FileSystemPort, session_id: &st
 }
 
 /// Path to the session-scoped "satisfied skills" file. This is a JSON array
-/// of skill names that have been fully invoked (via `Skill` tool or SKILL.md
-/// `Read`) at least once this session. Once a skill is satisfied, the router
+/// of skill names that have been fully invoked via the `Skill` tool at least
+/// once this session. Once a skill is satisfied, the router
 /// MUST NOT re-arm the gate on subsequent detections of the same skill, so
 /// re-occurring cron prompts and multi-turn conversations don't repeatedly
 /// force skill re-invocation.
@@ -161,11 +161,7 @@ pub(crate) fn skill_satisfied_state_path(
 /// Return true when `skill` has already been invoked and recorded as satisfied
 /// for this session. This is the key guard that prevents re-detection of a
 /// previously-invoked skill from re-arming the gate on every subsequent turn.
-pub(crate) fn is_skill_satisfied(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-    skill: &str,
-) -> bool {
+pub(crate) fn is_skill_satisfied(fs: &dyn FileSystemPort, session_id: &str, skill: &str) -> bool {
     let path = match skill_satisfied_state_path(fs, session_id) {
         Some(p) => p,
         None => return false,
@@ -201,11 +197,7 @@ pub(crate) fn write_pending_skill_state_if_not_satisfied(
 /// will not write a pending-skill marker for this skill again in the same
 /// session, so the gate won't re-block on re-detection. Idempotent — calling
 /// it twice for the same skill is a no-op.
-pub(crate) fn mark_skill_satisfied(
-    fs: &dyn FileSystemPort,
-    session_id: &str,
-    skill: &str,
-) {
+pub(crate) fn mark_skill_satisfied(fs: &dyn FileSystemPort, session_id: &str, skill: &str) {
     let path = match skill_satisfied_state_path(fs, session_id) {
         Some(p) => p,
         None => return,
@@ -255,7 +247,8 @@ fn write_routing_entry(
     skill: &str,
     run_id: &str,
     source: &str,
-    input: &HookInput,
+    session_id: &str,
+    cwd: &str,
     prompt: &str,
 ) {
     let metrics_dir = match fs.home_dir() {
@@ -264,8 +257,6 @@ fn write_routing_entry(
     };
     let _ = fs.create_dir_all(&metrics_dir);
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
-    let cwd = input.cwd.as_deref().unwrap_or(".");
     let ts = chrono::Utc::now().to_rfc3339();
 
     // Truncate prompt for logging (first 100 chars)
@@ -399,10 +390,8 @@ pub async fn process(
     // This message routed to no skill. Clear any pending-skill marker left by
     // an earlier message so the invocation gate stops blocking on a skill the
     // user has already moved past, rather than waiting out the 5-minute TTL.
-    if let Some(session_id) = input.session_id.as_deref() {
-        if !session_id.is_empty() {
-            clear_pending_skill_state(fs, session_id);
-        }
+    if let Some(session_id) = concrete_input_session_id(input) {
+        clear_pending_skill_state(fs, session_id);
     }
 
     build_no_match_output(fs)
@@ -428,9 +417,25 @@ fn build_match_output(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let pid = std::process::id();
     let run_id = format!("{}-{}", now_ms, pid % 100_000);
+    let session_id = concrete_input_session_id(input);
 
-    write_telemetry_state(fs, skill, &run_id);
-    write_routing_entry(fs, skill, &run_id, source, input, prompt);
+    if let Some(session_id) = session_id {
+        write_telemetry_state(fs, skill, &run_id);
+        write_routing_entry(
+            fs,
+            skill,
+            &run_id,
+            source,
+            session_id,
+            input.cwd.as_deref().unwrap_or("."),
+            prompt,
+        );
+    } else {
+        tracing::warn!(
+            skill,
+            "Skill routed without concrete session id; skipping durable routing state"
+        );
+    }
 
     // Persist pending-skill state for `skill_invocation_gate` to enforce.
     // Without this, the MANDATORY message below is just a polite request
@@ -441,7 +446,7 @@ fn build_match_output(
     // happens routinely on cron-injected prompts and multi-turn conversations
     // that mention a skill keyword; re-arming on every re-detection is the
     // root cause of the per-turn re-blocking loop (SEN-skill-gate-refire).
-    if let Some(session_id) = input.session_id.as_deref() {
+    if let Some(session_id) = session_id {
         let skill_path_str = format!("~/.claude/skills/{skill}/SKILL.md");
         write_pending_skill_state_if_not_satisfied(fs, skill, &skill_path_str, session_id);
     }
@@ -458,7 +463,8 @@ fn build_match_output(
 
     let context = format!(
         "{banner}\n\n[Skill Router] Detected skill: {skill}. \
-         MANDATORY: You MUST Read(\"{skill_path}\") BEFORE responding. \
+         MANDATORY: You MUST call Skill(skill: \"{skill}\") BEFORE responding. \
+         Skill source: {skill_path}. \
          This is a non-negotiable requirement."
     );
 
@@ -532,7 +538,18 @@ pub fn build_no_match_output(fs: &dyn FileSystemPort) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::test_support::StubFs;
+    use crate::hooks::test_support::{StubFs, TestHomeFs};
+
+    fn routing_file(home: &std::path::Path) -> std::path::PathBuf {
+        super::super::metrics_dir(home).join("routing.jsonl")
+    }
+
+    fn telemetry_file(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+        home.join(".claude")
+            .join("sentinel")
+            .join("telemetry")
+            .join(name)
+    }
 
     #[test]
     fn test_no_match_output_has_context() {
@@ -542,6 +559,67 @@ mod tests {
             .as_ref()
             .and_then(|h| h.additional_context.as_deref());
         assert!(ctx.unwrap().contains("No skill matched"));
+    }
+
+    #[test]
+    fn match_without_session_does_not_write_durable_routing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let input = HookInput {
+            prompt: Some("use linear".to_string()),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let output = build_match_output(&fs, "linear", &input, "use linear", "ai");
+
+        assert!(output.hook_specific_output.is_some());
+        assert!(!routing_file(tmp.path()).exists());
+        assert!(!telemetry_file(tmp.path(), "claude-current-skill").exists());
+        assert!(!telemetry_file(tmp.path(), "claude-skill-run-id").exists());
+    }
+
+    #[test]
+    fn match_with_synthetic_unknown_session_does_not_write_durable_routing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let input = HookInput {
+            prompt: Some("use linear".to_string()),
+            session_id: Some(" unknown ".to_string()),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let output = build_match_output(&fs, "linear", &input, "use linear", "ai");
+
+        assert!(output.hook_specific_output.is_some());
+        assert!(!routing_file(tmp.path()).exists());
+        assert!(!telemetry_file(tmp.path(), "claude-current-skill").exists());
+        assert!(!telemetry_file(tmp.path(), "claude-skill-run-id").exists());
+    }
+
+    #[test]
+    fn match_with_concrete_session_writes_routing_and_telemetry_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let input = HookInput {
+            prompt: Some("use linear".to_string()),
+            session_id: Some("skill-router-session".to_string()),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let output = build_match_output(&fs, "linear", &input, "use linear", "ai");
+
+        assert!(output.hook_specific_output.is_some());
+        let routing = std::fs::read_to_string(routing_file(tmp.path())).unwrap();
+        assert!(routing.contains("\"session_id\":\"skill-router-session\""));
+        assert!(!routing.contains("\"session_id\":\"unknown\""));
+        assert_eq!(
+            std::fs::read_to_string(telemetry_file(tmp.path(), "claude-current-skill")).unwrap(),
+            "linear"
+        );
+        assert!(telemetry_file(tmp.path(), "claude-skill-run-id").exists());
     }
 
     #[test]
@@ -602,19 +680,33 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 Some(std::path::PathBuf::from("/mock/home"))
             }
-            fn read_to_string(&self, _: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            fn read_to_string(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 let long_desc = "x".repeat(500);
                 Ok(format!(
                     "---\nname: foo\ndescription: {long_desc}\n---\n# Body\n"
                 ))
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+            {
                 Ok(vec![])
             }
             fn exists(&self, _: &std::path::Path) -> bool {
@@ -623,10 +715,20 @@ mod tests {
             fn is_dir(&self, _: &std::path::Path) -> bool {
                 false
             }
-            fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Err(sentinel_domain::port_errors::FileSystemError::backend("nope"))
+            fn metadata(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
+                Err(sentinel_domain::port_errors::FileSystemError::backend(
+                    "nope",
+                ))
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -644,16 +746,30 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 Some(std::path::PathBuf::from("/mock/home"))
             }
-            fn read_to_string(&self, _: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            fn read_to_string(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 Ok("---\nname: foo\ndescription: \"hello world\"\n---\n# Body\n".to_string())
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+            {
                 Ok(vec![])
             }
             fn exists(&self, _: &std::path::Path) -> bool {
@@ -662,10 +778,20 @@ mod tests {
             fn is_dir(&self, _: &std::path::Path) -> bool {
                 false
             }
-            fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Err(sentinel_domain::port_errors::FileSystemError::backend("nope"))
+            fn metadata(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
+                Err(sentinel_domain::port_errors::FileSystemError::backend(
+                    "nope",
+                ))
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -682,16 +808,30 @@ mod tests {
             fn home_dir(&self) -> Option<std::path::PathBuf> {
                 Some(std::path::PathBuf::from("/mock/home"))
             }
-            fn read_to_string(&self, _: &std::path::Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            fn read_to_string(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
                 Ok("# Just a heading\nNo frontmatter here.\n".to_string())
             }
-            fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn create_dir_all(&self, _: &std::path::Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn create_dir_all(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
-            fn read_dir(&self, _: &std::path::Path) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, sentinel_domain::port_errors::FileSystemError>
+            {
                 Ok(vec![])
             }
             fn exists(&self, _: &std::path::Path) -> bool {
@@ -700,10 +840,20 @@ mod tests {
             fn is_dir(&self, _: &std::path::Path) -> bool {
                 false
             }
-            fn metadata(&self, _: &std::path::Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
-                Err(sentinel_domain::port_errors::FileSystemError::backend("nope"))
+            fn metadata(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
+                Err(sentinel_domain::port_errors::FileSystemError::backend(
+                    "nope",
+                ))
             }
-            fn append(&self, _: &std::path::Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }

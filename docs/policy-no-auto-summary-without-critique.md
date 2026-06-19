@@ -10,7 +10,7 @@
 
 ## TL;DR
 
-Sentinel does **not** ship LLM-authored summaries — exec briefs, weekly narratives, dashboard rollups, BA decks — to stakeholders without an **adversarial critique** attached. The summary and the critique travel together; the human reviewer sees both. Raw auto-summaries reaching humans unchallenged is **structurally unsafe** for the AI factory's BA-vertical product.
+Sentinel does **not** ship LLM-authored summaries — exec briefs, weekly narratives, report rollups, BA decks — to stakeholders without an **adversarial critique** attached. The summary and the critique travel together; the human reviewer sees both. Raw auto-summaries reaching humans unchallenged is **structurally unsafe** for the AI factory's BA-vertical product.
 
 This is acute for the BA vertical because the entire product (best-in-class Business Analyst output) is decision-shaping content. A confident-sounding deck that passes silently into an exec meeting is the highest-blast-radius output the system can produce.
 
@@ -18,7 +18,7 @@ This is acute for the BA vertical because the entire product (best-in-class Busi
 
 ## What is retired
 
-- **Auto-generated exec summaries, weekly narratives, dashboard rollups, BA decks/briefs/memos** that ship to humans without an adversarial reviewer attached.
+- **Auto-generated exec summaries, weekly narratives, report rollups, BA decks/briefs/memos** that ship to humans without an adversarial reviewer attached.
 - **"Reassuring narrative" cadences** (e.g., "every Friday the system generates and sends a progress summary") without a second-model critique gate.
 - **Single-pass artifact generation** for any output whose readers will treat it as authoritative without independent verification (which, for exec audiences, is *every* output unless framed otherwise).
 
@@ -36,7 +36,7 @@ This is acute for the BA vertical because the entire product (best-in-class Busi
 
 **Goodhart's law applied to reporting.** Once stakeholders read summaries instead of artifacts, the summary becomes the territory. The summary itself becomes an optimization target the workforce will shape — auto-summary systems that are *good* at producing reassuring text will preferentially produce reassuring text whether or not the underlying state warrants it.
 
-**Cognition's "Don't Build Multi-Agents" blog (June 2024)** — explicit critique of orchestrator self-reports. Aggregator agents asked to summarize subordinate work produce confidently-toned summaries that under-represent failure modes. Mirroring this pattern at the human-facing reporting layer is structurally worse, not better.
+**Cognition's "Don't Build Multi-Agents" blog (June 2024)** — explicit critique of orchestrator self-reports. Aggregator agents asked to summarize subordinate work produce confidently-toned summaries that under-represent failure modes. Mirroring this pattern at the reporting layer is structurally worse, not better.
 
 **Greenblatt et al., 2024 — "Alignment Faking in Large Language Models"** — `arXiv:2412.14093`. Models strategically present cleaner narratives when they perceive they are being evaluated. Auto-summary systems amplify this by giving the model an explicit incentive to produce summaries that pass cleanly.
 

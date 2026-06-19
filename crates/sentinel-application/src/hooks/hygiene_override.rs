@@ -42,11 +42,7 @@ const HMAC_KEY: &[u8] = b"sentinel-override-sig-v2";
 
 /// Override files directory — under sentinel's protected path
 fn override_dir(fs: &dyn FileSystemPort) -> PathBuf {
-    fs.home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude")
-        .join("sentinel")
-        .join("overrides")
+    fs.claude_dir().join("sentinel").join("overrides")
 }
 
 /// Override file paths — session-scoped with SHA-256 hash of session ID.
@@ -98,8 +94,7 @@ fn sha256_hash(input: &str) -> String {
 ///
 /// On-disk token format is unchanged: `{timestamp}:{sig}`.
 fn compute_override_sig(override_type: &str, session_id: &str, timestamp: u64) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
     mac.update(override_type.as_bytes());
     mac.update(b":");
     mac.update(session_id.as_bytes());
@@ -129,8 +124,7 @@ fn verify_override_content(content: &str, override_type: &str, session_id: &str)
     // Decode the on-disk hex signature into raw bytes for constant-time comparison.
     let sig_bytes = hex::decode(parts[1]).ok()?;
     // Re-derive the expected MAC and compare in constant time.
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(HMAC_KEY).expect("HMAC accepts any key length");
     mac.update(override_type.as_bytes());
     mac.update(b":");
     mac.update(session_id.as_bytes());
@@ -174,6 +168,14 @@ pub const PHASE_GATE_OVERRIDE_TTL_SECS: u64 = 3600;
 use sentinel_domain::override_phrase::{
     is_doppler_override, is_hygiene_override, is_phase_gate_override, is_verification_override,
 };
+
+fn concrete_session_id(input: &HookInput) -> Option<&str> {
+    input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty() && *session_id != "unknown")
+}
 
 /// Write a signed override file.
 /// Content format: `{timestamp}:{signature}` — a simple `touch` won't produce valid content.
@@ -251,12 +253,20 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         None => return HookOutput::allow(),
     };
 
-    let session_id = input.session_id.as_deref().unwrap_or("unknown");
-
     let hygiene = is_hygiene_override(&prompt);
     let verification = is_verification_override(&prompt);
     let doppler = is_doppler_override(&prompt);
     let phase_gate = is_phase_gate_override(&prompt);
+
+    let override_requested = hygiene || verification || doppler || phase_gate;
+    let Some(session_id) = concrete_session_id(input) else {
+        if override_requested {
+            eprintln!(
+                "[sentinel] override request ignored: concrete session_id is required for signed override authority"
+            );
+        }
+        return HookOutput::allow();
+    };
 
     if hygiene {
         if let Err(e) = write_signed_override(
@@ -372,6 +382,88 @@ pub fn write_signed_override_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    struct ScopedHomeFs {
+        home: PathBuf,
+    }
+
+    impl FileSystemPort for ScopedHomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect())
+        }
+
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
+            file.write_all(c)?;
+            Ok(())
+        }
+    }
+
+    fn scoped_ctx(fs: &'static dyn FileSystemPort) -> HookContext<'static> {
+        let base = crate::hooks::test_support::stub_ctx();
+        HookContext { fs, ..base }
+    }
 
     #[test]
     fn test_hygiene_override_patterns() {
@@ -453,6 +545,52 @@ mod tests {
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
         assert!(output.blocked.is_none());
+    }
+
+    #[test]
+    fn test_process_override_requires_concrete_session_id() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        }));
+        let ctx = scoped_ctx(fs);
+        let unknown_path = verification_override_path(fs, "unknown");
+
+        let input = HookInput {
+            prompt: Some("skip tests".to_string()),
+            session_id: None,
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !unknown_path.exists(),
+            "override prompt without session id must not write unknown override"
+        );
+    }
+
+    #[test]
+    fn test_process_override_rejects_unknown_session_id() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmpdir.path().to_path_buf(),
+        }));
+        let ctx = scoped_ctx(fs);
+        let unknown_path = hygiene_override_path(fs, "unknown");
+
+        let input = HookInput {
+            prompt: Some("override hygiene".to_string()),
+            session_id: Some(" unknown ".to_string()),
+            ..Default::default()
+        };
+        let output = process(&input, &ctx);
+
+        assert!(output.blocked.is_none());
+        assert!(
+            !unknown_path.exists(),
+            "override prompt with synthetic session id must not write unknown override"
+        );
     }
 
     #[test]

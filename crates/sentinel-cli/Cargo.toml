@@ -16,13 +16,19 @@ path = "src/main.rs"
 name = "sentinel"
 path = "src/launcher.rs"
 
+[features]
+default = ["sqlite", "postgres"]
+sqlite = ["sentinel-graph/sqlite", "sentinel-infrastructure/sqlite"]
+postgres = ["sentinel-graph/postgres", "sentinel-infrastructure/postgres"]
+
 [dependencies]
 sentinel-domain = { workspace = true }
 sentinel-application = { workspace = true }
-sentinel-infrastructure = { workspace = true }
-sentinel-graph = { path = "../sentinel-graph" }
+sentinel-infrastructure = { workspace = true, default-features = false }
+sentinel-graph = { path = "../sentinel-graph", default-features = false }
 uuid = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,7 +51,6 @@ ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-async-trait = { workspace = true }
 
 [lints]
 workspace = true

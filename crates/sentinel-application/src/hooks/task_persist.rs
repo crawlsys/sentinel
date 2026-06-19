@@ -13,9 +13,8 @@
 //! 2. **`~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json`** (rehydration)
 //!    Machine-readable snapshot consumed by `task_rehydrate` on `SessionStart`.
 //!    `meta.json` next to it tracks last update + content hash for skip-if-unchanged.
-//!    Previously lived at `~/.claude/persistent-tasks/` — moved under `sentinel/`
-//!    to colocate with the rest of sentinel-owned state. Old data is migrated
-//!    automatically on first read (see [`super::migrate_persistent_tasks_dir`]).
+//!    This is the only persistent task snapshot location; old non-sentinel paths
+//!    are not read or migrated.
 //!
 //! Project scoping:
 //!   - Repo root resolution via `GitStatusPort::repo_root(cwd)`. If the cwd is
@@ -113,18 +112,16 @@ fn sha256_hex(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     let result = hasher.finalize();
-    result.iter().fold(String::new(), |mut s, b| { write!(s, "{b:02x}").unwrap(); s })
+    result.iter().fold(String::new(), |mut s, b| {
+        write!(s, "{b:02x}").unwrap();
+        s
+    })
 }
 
 /// Get the persistent tasks directory for a project (under
 /// `~/.claude/sentinel/persistent-tasks/`).
-///
-/// Triggers a one-time migration from the legacy `~/.claude/persistent-tasks/`
-/// location on the first call after upgrade. Migration is idempotent — once
-/// the new dir exists, the legacy path is never touched again.
 fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<PathBuf> {
     let home = fs.home_dir()?;
-    super::migrate_persistent_tasks_dir(fs, &home);
     Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
@@ -149,19 +146,18 @@ fn find_active_task_dir(fs: &dyn FileSystemPort, session_id: &str) -> Option<Pat
 
 /// Check if a directory contains at least one .json task file (not .lock, not .highwatermark)
 fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
-    fs.read_dir(dir)
-        .is_ok_and(|entries| {
-            entries.iter().any(|p| {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                std::path::Path::new(&name)
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                    && !name.starts_with('.')
-            })
+    fs.read_dir(dir).is_ok_and(|entries| {
+        entries.iter().any(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                && !name.starts_with('.')
         })
+    })
 }
 
 /// Read all tasks from a task list directory
@@ -293,7 +289,8 @@ fn render_linear_section(issues: &[LinearIssue]) -> String {
             linear_priority_label(&i.priority),
             linear_status_label(&i.status_type),
             i.title.replace('|', "\\|"),
-        ).unwrap();
+        )
+        .unwrap();
     }
     if sorted.len() > 50 {
         writeln!(md, "\n…and {} more (truncated).", sorted.len() - 50).unwrap();
@@ -330,7 +327,8 @@ fn render_auto_block_body(
         pending = incomplete.len().saturating_sub(in_progress),
         in_prog = in_progress,
         done = completed.len(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let linear_section = render_linear_section(linear_issues);
 
@@ -462,25 +460,16 @@ fn encode_project_key(path: &str) -> String {
 
 /// Pull the project name (last segment of repo root path) for the rendered header.
 fn project_name(repo_root: &Path) -> String {
-    repo_root
-        .file_name().map_or_else(|| "project".to_string(), |n| n.to_string_lossy().to_string())
+    repo_root.file_name().map_or_else(
+        || "project".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    )
 }
 
-/// Atomic file write: write to `<path>.tmp` then rename. Falls back to direct
-/// write if rename isn't supported (rare).
+/// Atomic file replacement for Sentinel task authority snapshots.
 fn atomic_write(fs: &dyn FileSystemPort, path: &Path, content: &str) -> anyhow::Result<()> {
-    let tmp = path.with_extension(format!(
-        "{}.sentinel-tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("md")
-    ));
-    fs.write(&tmp, content.as_bytes())?;
-    // FileSystemPort doesn't expose rename, so do a direct write fallback.
-    // On Windows std::fs::rename across same dir is atomic; we replicate that
-    // by doing a direct write (the temp write was the safety net) and removing
-    // the temp.
-    fs.write(path, content.as_bytes())?;
-    let _ = std::fs::remove_file(&tmp);
-    Ok(())
+    fs.replace_file_atomic(path, content.as_bytes())
+        .map_err(anyhow::Error::from)
 }
 
 /// Minimum task count in an existing block before the shrink guard engages.
@@ -555,8 +544,7 @@ fn write_project_tasks_md(
         if let Some(existing_block) = extract_existing_block(prev) {
             let existing_count = count_block_tasks(existing_block);
             let new_count = count_block_tasks(body);
-            let force = std::env::var(SHRINK_GUARD_FORCE_ENV)
-                .is_ok_and(|v| !v.is_empty());
+            let force = std::env::var(SHRINK_GUARD_FORCE_ENV).is_ok_and(|v| !v.is_empty());
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
@@ -739,11 +727,9 @@ fn write_persistent_tasks(
     // session even though all 70 tasks "existed" five minutes ago. This is
     // the worst-case data-loss path in the whole system.
     //
-    // Now: serialize first, then atomic_write (write-temp + rename). The
-    // rename is atomic on POSIX and on Windows for same-filesystem moves;
-    // worst case is the rename fails AFTER the temp is written, leaving the
-    // *prior* tasks.json intact and a stale tmp file beside it (cleanup is
-    // tolerated by atomic_write).
+    // Now: serialize first, then replace through the filesystem port's
+    // first-class atomic replacement operation. The existing good tasks.json is
+    // preserved if serialization or replacement fails.
     //
     // **Refuse to write empty/invalid JSON**: if serialization somehow yields
     // an empty string, refuse to clobber the prior good snapshot. Better to
@@ -824,8 +810,8 @@ fn write_persistent_tasks(
 ///
 /// Reads the active session's task files, then writes:
 /// - `<repo_root>/tasks.md` (project-scoped, with marker block)
-/// - `~/.claude/persistent-tasks/{project_hash}/tasks.json` (rehydration source)
-/// - `~/.claude/persistent-tasks/{project_hash}/meta.json` (skip-if-unchanged)
+/// - `~/.claude/sentinel/persistent-tasks/{project_hash}/tasks.json` (rehydration source)
+/// - `~/.claude/sentinel/persistent-tasks/{project_hash}/meta.json` (skip-if-unchanged)
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // **Bug fix (2026-05-06)**: Previously fell back to "unknown" silently
     // when input.session_id was absent. Then find_active_task_dir() would
@@ -858,7 +844,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id: &str = &session_id;
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let task_dir = if let Some(dir) = find_active_task_dir(ctx.fs, session_id) { dir } else {
+    let task_dir = if let Some(dir) = find_active_task_dir(ctx.fs, session_id) {
+        dir
+    } else {
         tracing::debug!("No active task directory found — skipping persist");
         return HookOutput::allow();
     };
@@ -887,19 +875,39 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             dirs::home_dir()
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn replace_file_atomic(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            self.write(p, c)
+        }
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -910,10 +918,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -1201,19 +1216,39 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn replace_file_atomic(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            self.write(p, c)
+        }
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -1224,10 +1259,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }

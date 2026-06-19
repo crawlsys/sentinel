@@ -7,7 +7,7 @@
 //! All three adapters need identical infrastructure:
 //! - A type-erased `PromptFn` seam for rig-core async calls.
 //! - `real_env` — the production `std::env::var` resolver.
-//! - `read_timeout` — parse `<NAMESPACE>_TIMEOUT_SECS` with a fallback.
+//! - `read_timeout` — parse `<NAMESPACE>_TIMEOUT_SECS` with an explicit default.
 //! - `sidecar` — the per-scorer lazily-built tokio sidecar runtime
 //!   (each scorer passes its own `thread_name` so logs are distinct).
 //! - `run_blocking` — the `std::thread::scope` + `Handle::block_on`
@@ -65,11 +65,8 @@ const OPENROUTER_SCORER_MAX_TOKENS: u32 = 2048;
 ///
 /// Every scorer adapter stores one of these behind its struct and calls
 /// it from the sync `score()` method via [`run_blocking`].
-pub type PromptFn = Arc<
-    dyn Fn(String, String, String) -> BoxFuture<'static, anyhow::Result<String>>
-        + Send
-        + Sync,
->;
+pub type PromptFn =
+    Arc<dyn Fn(String, String, String) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Environment helpers
@@ -84,8 +81,10 @@ pub fn real_env(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
-/// Read a `<namespace>_TIMEOUT_SECS` variable from the supplied env
-/// resolver, falling back to `default` on absent or unparseable values.
+/// Read a `<namespace>_TIMEOUT_SECS` variable from the supplied env resolver.
+///
+/// Absence uses `default`. Set-but-empty, zero, or malformed values are config
+/// errors so scorer constructors cannot silently retime production judging.
 ///
 /// Each scorer passes its own env-var name:
 ///
@@ -94,13 +93,23 @@ pub fn real_env(key: &str) -> Option<String> {
 /// | `dry_run_auditor`       | `"SENTINEL_AUDITOR_TIMEOUT_SECS"`         |
 /// | `eval_scorer`           | `"SENTINEL_EVAL_SCORER_TIMEOUT_SECS"`     |
 /// | `spec_challenge_scorer` | `"SENTINEL_SPEC_CHALLENGE_SCORER_TIMEOUT_SECS"` |
-pub fn read_timeout<F>(env: &F, var_name: &str, default: Duration) -> Duration
+pub fn read_timeout<F>(env: &F, var_name: &str, default: Duration) -> Result<Duration>
 where
     F: Fn(&str) -> Option<String>,
 {
-    env(var_name)
-        .and_then(|s| s.parse::<u64>().ok())
-        .map_or(default, Duration::from_secs)
+    let Some(raw) = env(var_name) else {
+        return Ok(default);
+    };
+    if raw.trim().is_empty() {
+        return Err(anyhow::anyhow!("{var_name} is set but empty"));
+    }
+    let secs = raw.trim().parse::<u64>().map_err(|err| {
+        anyhow::anyhow!("{var_name} must be a positive integer, got {raw:?}: {err}")
+    })?;
+    if secs == 0 {
+        return Err(anyhow::anyhow!("{var_name} must be greater than zero"));
+    }
+    Ok(Duration::from_secs(secs))
 }
 
 // ---------------------------------------------------------------------------
@@ -276,196 +285,6 @@ pub fn build_openrouter_prompt_fn(
     Ok((prompt_fn, "openrouter".to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Subscription-backed CLI prompt-fns (claude -p / codex exec)
-// ---------------------------------------------------------------------------
-//
-// When the operator has a subscription-backed CLI installed + authed, prefer
-// it over the metered OpenRouter path: `claude -p` (Anthropic, subscription)
-// and `codex exec` (OpenAI, subscription) both produce a one-shot completion
-// for $0 per-token. Detection is presence-on-PATH only (DETECT-AND-USE; we
-// never auto-install). Callers fall back to OpenRouter when these return None.
-
-/// Resolve a CLI binary on `PATH` to its absolute path, or `None` if absent.
-/// Cached per binary name for the engine's lifetime — a `which` per audit
-/// would be wasteful, and PATH does not change mid-process.
-#[must_use]
-pub fn resolve_cli(bin: &str) -> Option<std::path::PathBuf> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<std::path::PathBuf>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(bin).cloned()) {
-        return hit;
-    }
-    let found = which_on_path(bin);
-    if let Ok(mut c) = cache.lock() {
-        c.insert(bin.to_string(), found.clone());
-    }
-    found
-}
-
-/// Minimal cross-platform `which`: probe each `PATH` entry for `bin` (plus the
-/// Windows executable extensions). Avoids a `which`-crate dependency.
-fn which_on_path(bin: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    // On Windows the OS can only `CreateProcess` a real executable — `.exe`,
-    // or `.cmd`/`.bat` (resolved through the loader). A bare extensionless file
-    // is typically a POSIX `#!/bin/sh` shim (npm installs one next to the
-    // `.cmd`), which fails with "os error 193: %1 is not a valid Win32
-    // application". So on Windows try the executable extensions FIRST and DROP
-    // the extensionless candidate entirely. On unix the bare name is the
-    // executable.
-    let exts: &[&str] = if cfg!(windows) {
-        &[".exe", ".cmd", ".bat"]
-    } else {
-        &[""]
-    };
-    for dir in std::env::split_paths(&path) {
-        for ext in exts {
-            let candidate = dir.join(format!("{bin}{ext}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Build a `PromptFn` backed by the **`claude -p`** subscription CLI (the
-/// Anthropic leg). Returns `None` when `claude` is not on `PATH` — the caller
-/// then falls back to OpenRouter. The `model_id` argument is accepted for
-/// signature-compatibility but ignored: `claude -p` uses the CLI's configured
-/// subscription model. System prompt is passed via `--append-system-prompt`;
-/// the user message is the positional `-p` prompt. Output is the assistant's
-/// reply text (clean — `claude -p` prints only the answer).
-#[must_use]
-pub fn build_claude_cli_prompt_fn(scorer_label: &'static str) -> Option<(PromptFn, String)> {
-    let bin = resolve_cli("claude")?;
-    let prompt_fn: PromptFn = Arc::new(move |_model_id, system, user_msg| {
-        let bin = bin.clone();
-        Box::pin(async move {
-            let out = tokio::process::Command::new(&bin)
-                .arg("-p")
-                .arg("--append-system-prompt")
-                .arg(&system)
-                .arg(&user_msg)
-                .output()
-                .await
-                .map_err(|e| anyhow::anyhow!("claude {scorer_label}: spawn failed: {e}"))?;
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(anyhow::anyhow!(
-                    "claude {scorer_label}: exit {:?}: {}",
-                    out.status.code(),
-                    err.trim()
-                ));
-            }
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        })
-    });
-    Some((prompt_fn, "claude-cli".to_string()))
-}
-
-/// Build a `PromptFn` backed by the **`codex exec`** subscription CLI (the
-/// OpenAI leg). Returns `None` when `codex` is not on `PATH`.
-///
-/// The prompt (system + user, concatenated — `codex exec` has no system flag)
-/// is fed on **stdin**, not as a positional argument: codex switches to
-/// "Reading additional input from stdin" whenever certain flags (notably
-/// `--output-schema`) are present, so a positional prompt is silently ignored
-/// and the call hangs. Stdin is also more robust for large prompts (no
-/// arg-length / shell-quoting limits). `--output-last-message <tmpfile>` reads
-/// ONLY the model's final answer (plain `codex exec` prints a full transcript).
-///
-/// When `schema_json` is `Some(..)`, it is written to a temp file and passed via
-/// `--output-schema`, constraining codex's final message to that JSON Schema —
-/// so the OpenAI leg returns guaranteed-valid JSON (no parse-failure path). The
-/// auditor passes `None` (its verdict shape is a nested enum); the completion
-/// judge passes the flat `JudgeVerdict` schema. `model_id` is accepted but
-/// ignored — `codex` uses its configured subscription model.
-#[must_use]
-pub fn build_codex_cli_prompt_fn(
-    scorer_label: &'static str,
-    schema_json: Option<&'static str>,
-) -> Option<(PromptFn, String)> {
-    let bin = resolve_cli("codex")?;
-    let prompt_fn: PromptFn = Arc::new(move |_model_id, system, user_msg| {
-        let bin = bin.clone();
-        Box::pin(async move {
-            use tokio::io::AsyncWriteExt;
-            // `codex exec` has no system-prompt flag; prepend it to the prompt.
-            let prompt = if system.is_empty() {
-                user_msg
-            } else {
-                format!("{system}\n\n{user_msg}")
-            };
-            // Unique temp paths (no Date/rand in this crate's sandbox → pid +
-            // atomic). One for the captured final message, one for the schema.
-            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let pid = std::process::id();
-            let out_file = std::env::temp_dir().join(format!("sentinel-codex-{pid}-{seq}.txt"));
-            let schema_file = schema_json
-                .map(|_| std::env::temp_dir().join(format!("sentinel-codex-schema-{pid}-{seq}.json")));
-            if let (Some(path), Some(body)) = (schema_file.as_ref(), schema_json) {
-                if let Err(e) = tokio::fs::write(path, body).await {
-                    return Err(anyhow::anyhow!(
-                        "codex {scorer_label}: failed to write schema file: {e}"
-                    ));
-                }
-            }
-
-            let mut cmd = tokio::process::Command::new(&bin);
-            cmd.arg("exec").arg("--output-last-message").arg(&out_file);
-            if let Some(path) = schema_file.as_ref() {
-                cmd.arg("--output-schema").arg(path);
-            }
-            cmd.stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("codex {scorer_label}: spawn failed: {e}"))?;
-            // Feed the prompt on stdin and close it so codex stops waiting.
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(prompt.as_bytes())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("codex {scorer_label}: stdin write: {e}"))?;
-                drop(stdin); // EOF
-            }
-            let status = child
-                .wait_with_output()
-                .await
-                .map_err(|e| anyhow::anyhow!("codex {scorer_label}: wait failed: {e}"))?;
-
-            let answer = tokio::fs::read_to_string(&out_file).await.ok();
-            // Best-effort cleanup of both temp files.
-            let _ = tokio::fs::remove_file(&out_file).await;
-            if let Some(path) = schema_file.as_ref() {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-            if !status.status.success() {
-                let err = String::from_utf8_lossy(&status.stderr);
-                return Err(anyhow::anyhow!(
-                    "codex {scorer_label}: exit {:?}: {}",
-                    status.status.code(),
-                    err.trim()
-                ));
-            }
-            match answer {
-                Some(a) if !a.trim().is_empty() => Ok(a.trim().to_string()),
-                _ => Err(anyhow::anyhow!(
-                    "codex {scorer_label}: no final message captured"
-                )),
-            }
-        })
-    });
-    Some((prompt_fn, "codex-cli".to_string()))
-}
-
 /// Build a `PromptFn` that routes to Ollama (local or cloud), auto-
 /// detecting which mode to use from the env resolver.
 ///
@@ -483,10 +302,7 @@ pub fn build_codex_cli_prompt_fn(
 ///
 /// - `env` — the env resolver (same seam used everywhere in the scorers).
 /// - `scorer_label` — short label for error messages.
-pub fn build_ollama_prompt_fn<F>(
-    env: &F,
-    scorer_label: &'static str,
-) -> Result<(PromptFn, String)>
+pub fn build_ollama_prompt_fn<F>(env: &F, scorer_label: &'static str) -> Result<(PromptFn, String)>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -538,92 +354,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -----------------------------------------------------------------------
-    // subscription CLI detection + prompt-fn builders
-    // -----------------------------------------------------------------------
-
-    #[cfg(windows)]
-    #[test]
-    fn which_on_path_prefers_executable_extension_over_bare_shim() {
-        // Regression: npm installs a bare POSIX `#!/bin/sh` shim next to the
-        // real `.cmd` on Windows. which_on_path must resolve the `.cmd`/`.exe`
-        // (CreateProcess-able), never the extensionless shim — picking the bare
-        // file caused "os error 193: %1 is not a valid Win32 application" on the
-        // codex leg (caught by the live integration test). Build a temp dir with
-        // both `tool` (bare) and `tool.cmd`, put it on PATH, and assert the
-        // resolved path ends in `.cmd`.
-        let dir = std::env::temp_dir().join(format!(
-            "sentinel-which-test-{}-{}",
-            std::process::id(),
-            // distinct per run without rand/Date
-            std::time::SystemTime::UNIX_EPOCH.elapsed().map(|d| d.subsec_nanos()).unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bare = dir.join("zzqtool");
-        let cmd = dir.join("zzqtool.cmd");
-        std::fs::write(&bare, "#!/bin/sh\necho hi\n").unwrap();
-        std::fs::write(&cmd, "@echo hi\n").unwrap();
-        let orig = std::env::var_os("PATH");
-        let new_path = match &orig {
-            Some(p) => {
-                let mut v = vec![dir.clone()];
-                v.extend(std::env::split_paths(p));
-                std::env::join_paths(v).unwrap()
-            }
-            None => dir.clone().into_os_string(),
-        };
-        std::env::set_var("PATH", &new_path);
-        let found = which_on_path("zzqtool");
-        if let Some(p) = orig {
-            std::env::set_var("PATH", p);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        let found = found.expect("should resolve zzqtool via the .cmd");
-        assert_eq!(
-            found.extension().and_then(|e| e.to_str()),
-            Some("cmd"),
-            "must resolve the .cmd, not the bare POSIX shim: {found:?}"
-        );
-    }
-
-    #[test]
-    fn resolve_cli_returns_none_for_absent_binary() {
-        // A binary name that cannot exist on PATH → None (and the caller then
-        // falls back to OpenRouter — the zero-regression guarantee).
-        assert!(resolve_cli("sentinel-no-such-binary-xyzzy-9999").is_none());
-    }
-
-    #[test]
-    fn cli_prompt_fn_builders_are_none_when_binary_absent() {
-        // We can't assume claude/codex are installed in CI, but we CAN assert
-        // the builders return None for a guaranteed-absent name by routing
-        // through the same which_on_path logic. Directly: a bogus binary.
-        assert!(which_on_path("sentinel-no-such-binary-xyzzy-9999").is_none());
-    }
-
-    #[test]
-    fn resolve_cli_is_cached() {
-        // Two lookups of the same absent binary return the same (None) result;
-        // the cache must not panic or diverge on repeat calls.
-        let a = resolve_cli("sentinel-absent-cache-probe-0001");
-        let b = resolve_cli("sentinel-absent-cache-probe-0001");
-        assert_eq!(a, b);
-        assert!(a.is_none());
-    }
-
-    #[test]
-    fn which_on_path_finds_a_real_binary_when_present() {
-        // Whatever this test runner is, SOME ubiquitous binary exists. On
-        // Windows `cmd` is always on PATH; on unix `sh`. This exercises the
-        // positive branch of which_on_path without depending on claude/codex.
-        let ubiquitous = if cfg!(windows) { "cmd" } else { "sh" };
-        // Not asserting Some unconditionally (PATH can be exotic in sandboxes),
-        // but if found it must be an existing file.
-        if let Some(p) = which_on_path(ubiquitous) {
-            assert!(p.is_file(), "resolved path must be a real file: {p:?}");
-        }
-    }
 
     // -----------------------------------------------------------------------
     // strip_code_fence — existing coverage
@@ -757,7 +487,7 @@ mod tests {
 
     #[test]
     fn read_timeout_returns_default_when_absent() {
-        let t = read_timeout(&|_: &str| None, "NO_SUCH_VAR", Duration::from_secs(30));
+        let t = read_timeout(&|_: &str| None, "NO_SUCH_VAR", Duration::from_secs(30)).unwrap();
         assert_eq!(t, Duration::from_secs(30));
     }
 
@@ -773,50 +503,52 @@ mod tests {
             },
             "MY_TIMEOUT",
             Duration::from_secs(30),
-        );
+        )
+        .unwrap();
         assert_eq!(t, Duration::from_secs(42));
     }
 
     #[test]
-    fn read_timeout_falls_back_on_non_numeric() {
-        let t = read_timeout(
+    fn read_timeout_rejects_non_numeric() {
+        let err = read_timeout(
             &|_| Some("not-a-number".to_string()),
             "VAR",
             Duration::from_secs(30),
-        );
-        assert_eq!(t, Duration::from_secs(30));
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("VAR"), "{err:#}");
     }
 
     // -----------------------------------------------------------------------
     // read_timeout — additional edge cases
     // -----------------------------------------------------------------------
 
-    /// A value of "0" is valid — results in Duration::ZERO (not the default).
     #[test]
-    fn read_timeout_zero_value_is_valid() {
-        let t = read_timeout(&|_| Some("0".to_string()), "VAR", Duration::from_secs(30));
-        assert_eq!(t, Duration::ZERO);
+    fn read_timeout_zero_value_is_invalid() {
+        let err =
+            read_timeout(&|_| Some("0".to_string()), "VAR", Duration::from_secs(30)).unwrap_err();
+        assert!(err.to_string().contains("greater than zero"), "{err:#}");
     }
 
-    /// A float string like "3.5" cannot be parsed as u64 → falls back to default.
     #[test]
-    fn read_timeout_float_string_falls_back() {
-        let t = read_timeout(&|_| Some("3.5".to_string()), "VAR", Duration::from_secs(10));
-        assert_eq!(t, Duration::from_secs(10));
+    fn read_timeout_float_string_is_invalid() {
+        let err =
+            read_timeout(&|_| Some("3.5".to_string()), "VAR", Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("VAR"), "{err:#}");
     }
 
-    /// Negative number string cannot be parsed as u64 → falls back to default.
     #[test]
-    fn read_timeout_negative_string_falls_back() {
-        let t = read_timeout(&|_| Some("-5".to_string()), "VAR", Duration::from_secs(10));
-        assert_eq!(t, Duration::from_secs(10));
+    fn read_timeout_negative_string_is_invalid() {
+        let err =
+            read_timeout(&|_| Some("-5".to_string()), "VAR", Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("VAR"), "{err:#}");
     }
 
-    /// An empty string cannot be parsed → falls back to default.
     #[test]
-    fn read_timeout_empty_string_falls_back() {
-        let t = read_timeout(&|_| Some(String::new()), "VAR", Duration::from_secs(10));
-        assert_eq!(t, Duration::from_secs(10));
+    fn read_timeout_empty_string_is_invalid() {
+        let err =
+            read_timeout(&|_| Some(String::new()), "VAR", Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err:#}");
     }
 
     /// Only the named variable is read; other keys do not influence the result.
@@ -830,7 +562,8 @@ mod tests {
             },
             "RIGHT_VAR",
             Duration::from_secs(30),
-        );
+        )
+        .unwrap();
         assert_eq!(t, Duration::from_secs(99));
     }
 
@@ -886,8 +619,14 @@ mod tests {
             || "panic".to_string(),
         );
         let err = result.unwrap_err();
-        assert!(err.contains("network:"), "expected network prefix, got: {err}");
-        assert!(err.contains("connection refused"), "expected cause, got: {err}");
+        assert!(
+            err.contains("network:"),
+            "expected network prefix, got: {err}"
+        );
+        assert!(
+            err.contains("connection refused"),
+            "expected cause, got: {err}"
+        );
     }
 
     /// A future that never resolves hits the timeout and `map_timeout` is
@@ -912,7 +651,10 @@ mod tests {
             || "panic".to_string(),
         );
         let err = result.unwrap_err();
-        assert!(err.contains("timed out after"), "expected timeout message, got: {err}");
+        assert!(
+            err.contains("timed out after"),
+            "expected timeout message, got: {err}"
+        );
     }
 
     /// Regression (SEN-18): `run_blocking` MUST NOT panic when called from

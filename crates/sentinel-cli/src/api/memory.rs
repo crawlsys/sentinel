@@ -1,22 +1,21 @@
 //! Memory Daemon Proxy API (Phase 8.e)
 //!
 //! Thin proxy to the `memory daemon` HTTP server (default `127.0.0.1:3011`).
-//! The sentinel dashboard Memory pane hits these endpoints instead of
-//! spawning its own Qdrant client, so auth + config live in one place.
+//! Local Sentinel clients hit these endpoints instead of spawning their own
+//! Qdrant clients, so auth + config live in one place.
 //!
 //! Endpoints:
 //!   * `GET /api/memory/stats[?project=X]` — proxies the daemon's `/stats`.
 //!   * `GET /api/memory/health`             — proxies the daemon's `/health`.
 //!
 //! If the daemon is unreachable (not running, firewalled, slow), we return a
-//! 503 with a JSON error body so the dashboard can render a "daemon down"
-//! pane without crashing. Timeout is 3 s per request.
+//! 503 with a JSON error body so callers can render a "daemon down" state
+//! without crashing. Timeout is 3 s per request.
 //!
 //! NOTE: a separate `memories.rs` module already exposes `/api/memories/*`
-//! for the *legacy* memory injection state files (precomputed search,
-//! last-injected list). This module is the new atom-store oriented proxy —
-//! the `/api/memories` prefix stays for backcompat, `/api/memory` is the
-//! single-entity form for the daemon.
+//! for existing memory injection state files (precomputed search,
+//! last-injected list). This module is the atom-store oriented proxy; the
+//! `/api/memory` prefix is the single-entity form for the daemon.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -28,12 +27,13 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use sentinel_infrastructure::operational_api_read_graph::OperationalApiReadSurface;
 use serde::Deserialize;
 
-use super::AppState;
+use super::{operational_read_audit, AppState};
 
 /// The memory daemon base URL. Overridable via `SENTINEL_MEMORY_DAEMON_URL`
-/// so the sentinel dashboard can point at a non-default daemon (alt port,
+/// so local Sentinel clients can point at a non-default daemon (alt port,
 /// remote tailscale box, etc.) without rebuilding.
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:3011";
 const DAEMON_URL_ENV: &str = "SENTINEL_MEMORY_DAEMON_URL";
@@ -81,8 +81,15 @@ async fn stats_proxy(Query(q): Query<StatsQuery>) -> Response {
     }
 
     match req.send().await {
-        Ok(resp) => forward_json(resp, &base).await,
-        Err(e) => daemon_unavailable(&base, &e.to_string()),
+        Ok(resp) => forward_json(resp, &base, OperationalApiReadSurface::MemoryDaemonStats).await,
+        Err(e) => {
+            daemon_unavailable(
+                &base,
+                &e.to_string(),
+                OperationalApiReadSurface::MemoryDaemonStats,
+            )
+            .await
+        }
     }
 }
 
@@ -91,66 +98,120 @@ async fn health_proxy() -> Response {
     let base = daemon_url();
     let url = format!("{}/health", base.trim_end_matches('/'));
     match client().get(&url).send().await {
-        Ok(resp) => forward_json(resp, &base).await,
-        Err(e) => daemon_unavailable(&base, &e.to_string()),
+        Ok(resp) => forward_json(resp, &base, OperationalApiReadSurface::MemoryDaemonHealth).await,
+        Err(e) => {
+            daemon_unavailable(
+                &base,
+                &e.to_string(),
+                OperationalApiReadSurface::MemoryDaemonHealth,
+            )
+            .await
+        }
     }
 }
 
-/// Forward a daemon response to the dashboard client. Preserves status code
+/// Forward a daemon response to the local API client. Preserves status code
 /// when possible; on upstream error status, wraps in a structured envelope.
-async fn forward_json(resp: reqwest::Response, base: &str) -> Response {
+async fn forward_json(
+    resp: reqwest::Response,
+    base: &str,
+    surface: OperationalApiReadSurface,
+) -> Response {
     let status = resp.status();
     // Map upstream status to axum. If parsing the body fails, surface that
     // as a 502 — the daemon gave us something, just not JSON we understand.
     let body_text = match resp.text().await {
         Ok(t) => t,
         Err(e) => {
-            return (
+            return audited_proxy_response(
+                surface,
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": format!("failed to read memory daemon response body: {e}"),
                     "daemon_url": base,
-                })),
+                    "reason": e.to_string(),
+                }),
             )
-                .into_response();
+            .await;
         }
     };
 
     // Try to parse as JSON first so we can surface it cleanly in the
-    // dashboard; if the daemon emitted non-JSON (unlikely for Phase 8.e but
+    // local API client; if the daemon emitted non-JSON (unlikely for Phase 8.e but
     // Prometheus metrics are text, and this module proxies only JSON
-    // endpoints), fall back to a 502 envelope.
+    // endpoints), return a 502 envelope.
     let parsed: serde_json::Value = match serde_json::from_str(&body_text) {
         Ok(v) => v,
         Err(e) => {
-            return (
+            return audited_proxy_response(
+                surface,
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": format!("memory daemon returned non-JSON body: {e}"),
                     "daemon_url": base,
-                })),
+                    "reason": e.to_string(),
+                }),
             )
-                .into_response();
+            .await;
         }
     };
 
     let out_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    (out_status, Json(parsed)).into_response()
+    audited_proxy_response(
+        surface,
+        out_status,
+        serde_json::json!({
+            "daemon_url": base,
+            "upstream_status": status.as_u16(),
+            "body": parsed,
+        }),
+    )
+    .await
 }
 
 /// Return a structured 503 when the daemon is unreachable (refused, timed
-/// out, DNS). Phase 8.e spec: the dashboard should see a typed error, not a
+/// out, DNS). Phase 8.e spec: callers should see a typed error, not a
 /// stack trace.
-fn daemon_unavailable(base: &str, reason: &str) -> Response {
-    (
+async fn daemon_unavailable(
+    base: &str,
+    reason: &str,
+    surface: OperationalApiReadSurface,
+) -> Response {
+    audited_proxy_response(
+        surface,
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
+        serde_json::json!({
             "error": format!("memory daemon unavailable at {base}"),
+            "daemon_url": base,
             "reason": reason,
             "hint": "Start the daemon with: memory daemon",
-        })),
+        }),
     )
-        .into_response()
+    .await
+}
+
+async fn audited_proxy_response(
+    surface: OperationalApiReadSurface,
+    status: StatusCode,
+    response: serde_json::Value,
+) -> Response {
+    match operational_read_audit::attach_operational_api_read_graph_audit(surface, response).await {
+        Ok(audited) => (status, Json(audited)).into_response(),
+        Err(error) => {
+            tracing::error!(
+                surface = sentinel_infrastructure::operational_api_read_graph::operational_api_read_surface_label(surface),
+                error = %error,
+                "memory daemon API read graph audit failed; refusing unaudited response"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "memory daemon API read graph audit failed"
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +235,9 @@ mod tests {
     /// test holding the lock leaves it poisoned, but the env state itself
     /// is still recoverable from the saved `prev`).
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

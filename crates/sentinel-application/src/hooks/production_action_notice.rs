@@ -43,16 +43,41 @@ const READ_VERBS: &[&str] = &[
     "current", "count", "test", "verify", "is", "find", "show", "poll", "whoami",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionActionNoticeDecision {
+    AllowSilent,
+    Notice,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionActionNoticeEvaluation {
+    pub production_override_armed: bool,
+    pub tool: Option<String>,
+    pub tool_present: bool,
+    pub pure_read: bool,
+    pub mutating_tool: bool,
+    pub tool_input_present: bool,
+    pub file_path_present: bool,
+    pub haystack_present: bool,
+    pub haystack: String,
+    pub mentions_prod: bool,
+    pub should_notice: bool,
+    pub decision: ProductionActionNoticeDecision,
+}
+
+impl ProductionActionNoticeEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.production_override_armed && self.tool_present && self.mutating_tool && !self.pure_read
+    }
+}
+
 /// Extract the action verb of a tool name: the leading word of its final
 /// `__`-separated segment, lowercased. `mcp__vercel__list_deployments` → `list`;
 /// `set_secret` → `set`; `Bash` → `bash`.
 fn action_verb(tool_name: &str) -> String {
     let segment = tool_name.rsplit("__").next().unwrap_or(tool_name);
-    segment
-        .split('_')
-        .next()
-        .unwrap_or(segment)
-        .to_lowercase()
+    segment.split('_').next().unwrap_or(segment).to_lowercase()
 }
 
 /// Does the tool name denote a mutating action? `Bash` always qualifies (it can
@@ -93,8 +118,7 @@ pub fn mentions_prod(text_lower: &str) -> bool {
         while let Some(rel) = text_lower[from..].find(token) {
             let start = from + rel;
             let end = start + token.len();
-            let before_ok = start == 0
-                || !bytes[start - 1].is_ascii_alphanumeric();
+            let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
             let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 return true;
@@ -127,15 +151,47 @@ pub fn format_action_notice(tool_name: &str) -> (String, String) {
 /// mutating action. Silent otherwise.
 #[must_use]
 pub fn process(input: &HookInput, state: &SessionState) -> HookOutput {
+    let evaluation = evaluate(input, state.production_override_armed());
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(
+    input: &HookInput,
+    production_override_armed: bool,
+) -> ProductionActionNoticeEvaluation {
+    let mut evaluation = ProductionActionNoticeEvaluation {
+        production_override_armed,
+        tool: input.tool_name.clone(),
+        tool_present: input
+            .tool_name
+            .as_deref()
+            .is_some_and(|tool| !tool.is_empty()),
+        pure_read: false,
+        mutating_tool: false,
+        tool_input_present: input.tool_input.is_some(),
+        file_path_present: input
+            .file_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty()),
+        haystack_present: false,
+        haystack: String::new(),
+        mentions_prod: false,
+        should_notice: false,
+        decision: ProductionActionNoticeDecision::AllowSilent,
+    };
+
     // Cheapest guard first: do nothing unless prod work is armed.
-    if !state.production_override_armed() {
-        return HookOutput::allow();
+    if !production_override_armed {
+        return evaluation;
     }
     let Some(tool_name) = input.tool_name.as_deref() else {
-        return HookOutput::allow();
+        return evaluation;
     };
+    evaluation.pure_read = is_pure_read(tool_name);
+    evaluation.mutating_tool = is_mutating_tool(tool_name);
     if is_pure_read(tool_name) || !is_mutating_tool(tool_name) {
-        return HookOutput::allow();
+        return evaluation;
     }
     // Scan the tool input (and file_path, for Write/Edit) for a prod marker.
     let mut haystack = input
@@ -147,19 +203,42 @@ pub fn process(input: &HookInput, state: &SessionState) -> HookOutput {
         haystack.push(' ');
         haystack.push_str(fp);
     }
-    if !mentions_prod(&haystack.to_lowercase()) {
-        return HookOutput::allow();
+    evaluation.haystack_present = !haystack.is_empty();
+    evaluation.mentions_prod = mentions_prod(&haystack.to_lowercase());
+    evaluation.haystack = haystack;
+    evaluation.should_notice = evaluation.mentions_prod;
+    if evaluation.should_notice {
+        evaluation.decision = ProductionActionNoticeDecision::Notice;
     }
+    evaluation
+}
 
-    let (human, model) = format_action_notice(tool_name);
-    let mut out = HookOutput::allow();
-    out.system_message = Some(human);
-    out.hook_specific_output = Some(HookSpecificOutput {
-        hook_event_name: HookEvent::PreToolUse.to_string(),
-        additional_context: Some(model),
-        ..Default::default()
-    });
-    out
+#[must_use]
+pub fn output_from_evaluation(evaluation: &ProductionActionNoticeEvaluation) -> HookOutput {
+    match evaluation.decision {
+        ProductionActionNoticeDecision::AllowSilent => HookOutput::allow(),
+        ProductionActionNoticeDecision::Notice => {
+            let Some(tool_name) = evaluation
+                .tool
+                .as_deref()
+                .filter(|tool_name| !tool_name.trim().is_empty())
+            else {
+                return HookOutput::deny(
+                    "[Sentinel-Authority] production_action_notice: refusing unaudited \
+                     production action notice — missing concrete tool identity.",
+                );
+            };
+            let (human, model) = format_action_notice(tool_name);
+            let mut out = HookOutput::allow();
+            out.system_message = Some(human);
+            out.hook_specific_output = Some(HookSpecificOutput {
+                hook_event_name: HookEvent::PreToolUse.to_string(),
+                additional_context: Some(model),
+                ..Default::default()
+            });
+            out
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,7 +263,10 @@ mod tests {
     fn silent_when_not_armed() {
         let state = SessionState::new("s");
         let out = process(
-            &pre_input("Bash", serde_json::json!({"command": "deploy to production"})),
+            &pre_input(
+                "Bash",
+                serde_json::json!({"command": "deploy to production"}),
+            ),
             &state,
         );
         assert!(out.system_message.is_none());
@@ -213,7 +295,10 @@ mod tests {
     fn silent_on_non_prod_bash_when_armed() {
         let state = armed();
         let out = process(
-            &pre_input("Bash", serde_json::json!({"command": "cargo test --workspace"})),
+            &pre_input(
+                "Bash",
+                serde_json::json!({"command": "cargo test --workspace"}),
+            ),
             &state,
         );
         assert!(out.system_message.is_none());
@@ -274,5 +359,40 @@ mod tests {
         input.file_path = Some("/etc/production/secrets.env".to_string());
         let out = process(&input, &state);
         assert!(out.system_message.is_some());
+    }
+
+    #[test]
+    fn notice_output_requires_concrete_tool_identity() {
+        let evaluation = ProductionActionNoticeEvaluation {
+            production_override_armed: true,
+            tool: None,
+            tool_present: false,
+            pure_read: false,
+            mutating_tool: true,
+            tool_input_present: true,
+            file_path_present: false,
+            haystack_present: true,
+            haystack: "deploy production".to_string(),
+            mentions_prod: true,
+            should_notice: true,
+            decision: ProductionActionNoticeDecision::Notice,
+        };
+
+        let out = output_from_evaluation(&evaluation);
+        let decision = out
+            .hook_specific_output
+            .as_ref()
+            .and_then(|hook| hook.permission_decision);
+        assert!(matches!(
+            decision,
+            Some(sentinel_domain::events::PermissionDecision::Deny)
+        ));
+        let reason = out
+            .hook_specific_output
+            .as_ref()
+            .and_then(|hook| hook.permission_decision_reason.as_deref())
+            .expect("deny reason");
+        assert!(reason.contains("missing concrete tool identity"));
+        assert!(!reason.contains("unknown"));
     }
 }

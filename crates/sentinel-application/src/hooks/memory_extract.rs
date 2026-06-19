@@ -77,8 +77,10 @@ fn content_to_uuid(session_id: &str, chunk_index: usize) -> String {
 
 /// Derive project name from cwd (last path component).
 fn project_name(cwd: &str) -> String {
-    std::path::Path::new(cwd)
-        .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string())
+    std::path::Path::new(cwd).file_name().map_or_else(
+        || "unknown".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    )
 }
 
 /// Compute project hash from cwd. Delegates to the shared canonical
@@ -405,5 +407,4 @@ mod tests {
         let val = serde_json::json!({"other": "field"});
         assert_eq!(extract_text_content(&val), "");
     }
-
 }

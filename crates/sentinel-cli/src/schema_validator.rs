@@ -139,8 +139,8 @@ pub fn validate_all(steps_dir: &Path) -> Result<Vec<SkillReport>> {
 pub fn validate_one(path: &Path, skill: &str) -> Result<SkillReport> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read_to_string({})", path.display()))?;
-    let parsed: ValidatedSkill = toml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let parsed: ValidatedSkill =
+        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
 
     // Step universe: every `(phase_id, step_id)` pair in this file.
     let mut universe: std::collections::HashSet<(String, String)> =
@@ -177,11 +177,7 @@ pub fn validate_one(path: &Path, skill: &str) -> Result<SkillReport> {
             // Suggested-tool shape check.
             for tool in &step.suggested_tools {
                 if !is_well_formed_tool(tool) {
-                    suspicious_tools.push((
-                        phase.id.clone(),
-                        step.id.clone(),
-                        tool.clone(),
-                    ));
+                    suspicious_tools.push((phase.id.clone(), step.id.clone(), tool.clone()));
                 }
             }
         }
@@ -273,8 +269,7 @@ fn is_well_formed_tool(tool: &str) -> bool {
     matches!(
         tool,
         "EnterPlanMode" | "ExitPlanMode" | "EnterWorktree" | "ExitWorktree"
-    )
-        || tool.starts_with("Bash:")
+    ) || tool.starts_with("Bash:")
         || is_mcp_tool_name(tool)
 }
 
@@ -359,7 +354,9 @@ mod tests {
         assert!(is_mcp_tool_name("mcp__github__pr_create"));
         // Server with hyphen (e.g. claude-accounts).
         assert!(is_mcp_tool_name("mcp__claude-accounts__account_list"));
-        assert!(is_mcp_tool_name("mcp__sequential-thinking__sequentialthinking"));
+        assert!(is_mcp_tool_name(
+            "mcp__sequential-thinking__sequentialthinking"
+        ));
     }
 
     #[test]
@@ -383,6 +380,8 @@ mod tests {
     fn validator_catches_dangling_forward_ref() {
         // Synthetic TOML: one step references a phase/step that doesn't exist.
         let toml_src = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -405,6 +404,8 @@ artifact_schema = { issue_id = "string (from fetch/9.9)" }
     #[test]
     fn validator_accepts_valid_forward_ref_within_skill() {
         let toml_src = r#"
+federation_version = "1"
+
 [[phases]]
 id = "fetch"
 
@@ -424,13 +425,19 @@ artifact_schema = { issue_id = "string (from fetch/1.1)" }
         let path = tmp.path().join("synthetic.toml");
         std::fs::write(&path, toml_src).unwrap();
         let report = validate_one(&path, "synthetic").unwrap();
-        assert!(report.dangling_refs.is_empty(), "got: {:?}", report.dangling_refs);
+        assert!(
+            report.dangling_refs.is_empty(),
+            "got: {:?}",
+            report.dangling_refs
+        );
         assert_eq!(report.step_count, 2);
     }
 
     #[test]
     fn validator_catches_suspicious_tool_name() {
         let toml_src = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -449,6 +456,8 @@ suggested_tools = ["mcp__linear__GetIssue", "mcp_linear_old_style"]
     #[test]
     fn validator_accepts_well_formed_tools() {
         let toml_src = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -478,6 +487,8 @@ suggested_tools = [
     fn validator_handles_negative_step_id_in_forward_ref() {
         // claim/-0.1 is real in linear.toml. Validator must resolve it.
         let toml_src = r#"
+federation_version = "1"
+
 [[phases]]
 id = "claim"
 
@@ -535,7 +546,11 @@ artifact_schema = { issue_id = "string (from claim/-0.1)" }
             steps_dir.display()
         );
         let reports = validate_all(&steps_dir).unwrap();
-        assert!(!reports.is_empty(), "no skills found in {}", steps_dir.display());
+        assert!(
+            !reports.is_empty(),
+            "no skills found in {}",
+            steps_dir.display()
+        );
 
         let mut dirty: Vec<&SkillReport> = reports.iter().filter(|r| !r.is_clean()).collect();
         if !dirty.is_empty() {

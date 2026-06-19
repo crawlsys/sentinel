@@ -4,7 +4,7 @@
 //! `~/.claude/sentinel/metrics/cycle-time.jsonl`. The downstream consumers are:
 //!   * SENTINEL-2 — percentile-based stale-ticket thresholds
 //!   * SENTINEL-3 — cycle-time prediction at Phase 1 fetch
-//!   * SENTINEL-5 — throughput dashboard panels
+//!   * SENTINEL-5 — throughput operational summaries
 //!   * SENTINEL-17 — per-stage cycle time breakdown
 //!
 //! The capture happens as a side effect inside the Hookdeck webhook pipeline

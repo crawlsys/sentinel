@@ -100,6 +100,12 @@ impl AuditorPort for StaticAuditor {
             Err(e) => Err(e.clone()),
         }
     }
+
+    fn score_dual(&self, dry_run: &DryRunRequest) -> Result<AuditorVerdict, AuditorError> {
+        let mut verdict = self.score(dry_run)?;
+        verdict.auditor_model = format!("test-dual:{}", verdict.auditor_model);
+        Ok(verdict)
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput, HookSpecificOutput};
 use sentinel_domain::state::SessionState;
+use sha2::{Digest as _, Sha256};
 
 /// Phrase that arms session-wide prod work.
 const ARM_PHRASE: &str = "production override";
@@ -54,6 +55,48 @@ pub fn is_arm(prompt_lower: &str) -> bool {
 #[must_use]
 pub fn is_lock(prompt_lower: &str) -> bool {
     prompt_lower.contains(LOCK_PHRASE)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionOverrideTransition {
+    Noop,
+    Arm,
+    Lock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionOverrideDecision {
+    AllowNoop,
+    Arm,
+    Lock,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionOverrideEvaluation {
+    pub session_id: Option<String>,
+    pub prompt_present: bool,
+    pub prompt_sha256: Option<String>,
+    pub prior_armed: bool,
+    pub arm_signal: bool,
+    pub lock_signal: bool,
+    pub lock_precedence: bool,
+    pub note: Option<String>,
+    pub transition: ProductionOverrideTransition,
+    pub target_armed: bool,
+    pub notice_required: bool,
+    pub decision: ProductionOverrideDecision,
+}
+
+impl ProductionOverrideEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.arm_signal || self.lock_signal
+    }
+}
+
+#[must_use]
+pub fn prompt_sha256(prompt: &str) -> String {
+    hex::encode(Sha256::digest(prompt.as_bytes()))
 }
 
 /// Build the dual-display notice `(human, model)` for an arm/lock transition.
@@ -93,42 +136,87 @@ pub fn format_transition_notice(armed: bool) -> (String, String) {
 /// refusal). No phrase → allow unchanged.
 #[must_use]
 pub fn process(input: &HookInput, state: &mut SessionState) -> HookOutput {
+    let evaluation = evaluate(input, state.production_override_armed());
+    apply_authorized_evaluation(state, &evaluation)
+}
+
+#[must_use]
+pub fn evaluate(input: &HookInput, prior_armed: bool) -> ProductionOverrideEvaluation {
     let Some(prompt) = input.prompt.as_deref() else {
-        return HookOutput::allow();
+        return ProductionOverrideEvaluation {
+            session_id: input.session_id.clone(),
+            prompt_present: false,
+            prompt_sha256: None,
+            prior_armed,
+            arm_signal: false,
+            lock_signal: false,
+            lock_precedence: false,
+            note: None,
+            transition: ProductionOverrideTransition::Noop,
+            target_armed: prior_armed,
+            notice_required: false,
+            decision: ProductionOverrideDecision::AllowNoop,
+        };
     };
     let lower = prompt.to_lowercase();
 
-    let lock = is_lock(&lower);
-    let arm = is_arm(&lower);
+    let lock_signal = is_lock(&lower);
+    let arm_signal = is_arm(&lower);
 
     // Lock takes precedence — biasing toward the safe (refusal) state.
-    let armed = if lock {
-        if !state.production_override_armed() {
-            // Locking when already locked is a no-op; don't emit noise.
-            return HookOutput::allow();
-        }
-        state.revoke_production_override();
-        false
-    } else if arm {
-        if state.production_override_armed() {
-            // Already armed; re-arming refreshes but we skip the notice to
-            // avoid repeating it every prompt that mentions the phrase.
-            return HookOutput::allow();
-        }
-        // Capture the short command-like line that armed it as the note
-        // (same gating as is_arm, so we record the operator's actual command,
-        // not some unrelated long line that also happens to contain the phrase).
-        let note = prompt
-            .lines()
-            .map(str::trim)
-            .find(|l| {
-                l.to_lowercase().contains(ARM_PHRASE) && l.chars().count() <= MAX_ARM_LINE_LEN
-            })
-            .map(ToString::to_string);
-        state.arm_production_override(note);
-        true
+    let transition = if lock_signal && prior_armed {
+        ProductionOverrideTransition::Lock
+    } else if !lock_signal && arm_signal && !prior_armed {
+        ProductionOverrideTransition::Arm
     } else {
-        return HookOutput::allow();
+        ProductionOverrideTransition::Noop
+    };
+    let target_armed = match transition {
+        ProductionOverrideTransition::Arm => true,
+        ProductionOverrideTransition::Lock => false,
+        ProductionOverrideTransition::Noop => prior_armed,
+    };
+    let note = if matches!(transition, ProductionOverrideTransition::Arm) {
+        arm_note(prompt)
+    } else {
+        None
+    };
+    let decision = match transition {
+        ProductionOverrideTransition::Noop => ProductionOverrideDecision::AllowNoop,
+        ProductionOverrideTransition::Arm => ProductionOverrideDecision::Arm,
+        ProductionOverrideTransition::Lock => ProductionOverrideDecision::Lock,
+    };
+
+    ProductionOverrideEvaluation {
+        session_id: input.session_id.clone(),
+        prompt_present: true,
+        prompt_sha256: Some(prompt_sha256(prompt)),
+        prior_armed,
+        arm_signal,
+        lock_signal,
+        lock_precedence: lock_signal && arm_signal,
+        note,
+        transition,
+        target_armed,
+        notice_required: !matches!(transition, ProductionOverrideTransition::Noop),
+        decision,
+    }
+}
+
+pub fn apply_authorized_evaluation(
+    state: &mut SessionState,
+    evaluation: &ProductionOverrideEvaluation,
+) -> HookOutput {
+    let armed = match evaluation.transition {
+        ProductionOverrideTransition::Noop => return HookOutput::allow(),
+        ProductionOverrideTransition::Arm => {
+            state.arm_production_override(evaluation.note.clone());
+            true
+        }
+        ProductionOverrideTransition::Lock => {
+            state.revoke_production_override();
+            false
+        }
     };
 
     let (human, model) = format_transition_notice(armed);
@@ -140,6 +228,15 @@ pub fn process(input: &HookInput, state: &mut SessionState) -> HookOutput {
         ..Default::default()
     });
     out
+}
+
+#[must_use]
+pub fn arm_note(prompt: &str) -> Option<String> {
+    prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| l.to_lowercase().contains(ARM_PHRASE) && l.chars().count() <= MAX_ARM_LINE_LEN)
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]
@@ -157,7 +254,10 @@ mod tests {
     fn arm_phrase_sets_state_and_emits_dual_display() {
         let mut state = SessionState::new("s");
         assert!(!state.production_override_armed());
-        let out = process(&prompt_input("production override — hotfix the migration"), &mut state);
+        let out = process(
+            &prompt_input("production override — hotfix the migration"),
+            &mut state,
+        );
         assert!(state.production_override_armed());
         assert!(out.system_message.is_some(), "human channel set");
         let ctx = out
@@ -190,14 +290,20 @@ mod tests {
         let mut state = SessionState::new("s");
         state.arm_production_override(None);
         // Both phrases in one prompt → lock (fail-safe toward refusal).
-        process(&prompt_input("production override then production lock"), &mut state);
+        let _ = process(
+            &prompt_input("production override then production lock"),
+            &mut state,
+        );
         assert!(!state.production_override_armed());
     }
 
     #[test]
     fn no_phrase_is_noop() {
         let mut state = SessionState::new("s");
-        let out = process(&prompt_input("just deploy the staging build please"), &mut state);
+        let out = process(
+            &prompt_input("just deploy the staging build please"),
+            &mut state,
+        );
         assert!(!state.production_override_armed());
         assert!(out.system_message.is_none());
         assert!(out.hook_specific_output.is_none());
@@ -237,7 +343,7 @@ mod tests {
         // A short command line arms even if the prompt has other (short) lines.
         let mut state = SessionState::new("s");
         let prompt = "hey can you\nproduction override\nthen run the migration";
-        process(&prompt_input(prompt), &mut state);
+        let _ = process(&prompt_input(prompt), &mut state);
         assert!(state.production_override_armed());
     }
 
@@ -247,7 +353,10 @@ mod tests {
         let mut state = SessionState::new("s");
         state.arm_production_override(None);
         let long = format!("{} production lock {}", "y".repeat(100), "z".repeat(100));
-        process(&prompt_input(&long), &mut state);
-        assert!(!state.production_override_armed(), "lock must fire even in a long line");
+        let _ = process(&prompt_input(&long), &mut state);
+        assert!(
+            !state.production_override_armed(),
+            "lock must fire even in a long line"
+        );
     }
 }

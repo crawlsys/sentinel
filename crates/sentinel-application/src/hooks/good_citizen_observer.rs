@@ -26,9 +26,8 @@
 //! ## State file shape
 //!
 //! Append-only JSONL of `Observation` records. The Stop phase reads the
-//! whole file (typically a few KB), counts entries, and rewrites only on
-//! prune (TODO: not yet implemented — the file grows for the session
-//! lifetime, which is fine because sessions are short-lived).
+//! whole file (bounded to the most recent observations), counts entries, and
+//! rewrites after appends when pruning is needed.
 
 use sentinel_domain::events::{HookEnvelope, HookEvent, HookInput, HookOutput, HookTier};
 use serde::{Deserialize, Serialize};
@@ -61,6 +60,11 @@ const OBSERVATION_PATTERNS: &[(&str, &str)] = &[
     (r"\bFIXME\b", "FIXME marker"),
     (r"\bHACK\b", "HACK marker"),
 ];
+
+/// Upper bound for one session's observation log. Stop only displays the first
+/// few findings; keeping the latest 200 preserves useful context without
+/// allowing a noisy command to grow the session file indefinitely.
+const MAX_OBSERVATIONS_PER_SESSION: usize = 200;
 
 /// One observation written to the session JSONL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +148,7 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
             let _ = ctx.fs.append(&path, &bytes);
         }
     }
+    prune_observation_log(ctx.fs, &path);
     HookOutput::allow()
 }
 
@@ -232,6 +237,24 @@ fn compile_observation_patterns() -> Vec<(regex::Regex, &'static str)> {
         .collect()
 }
 
+fn prune_observation_log(fs: &dyn super::FileSystemPort, path: &Path) {
+    let Ok(content) = fs.read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.len() <= MAX_OBSERVATIONS_PER_SESSION {
+        return;
+    }
+
+    let start = lines.len() - MAX_OBSERVATIONS_PER_SESSION;
+    let mut pruned = lines[start..].join("\n");
+    pruned.push('\n');
+    let _ = fs.write(path, pruned.as_bytes());
+}
+
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -286,19 +309,35 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(par)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(vec![])
         }
         fn exists(&self, p: &Path) -> bool {
@@ -307,12 +346,20 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(par)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
@@ -320,7 +367,8 @@ mod tests {
                 .append(true)
                 .open(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-            f.write_all(c).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+            f.write_all(c)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             self.appends
                 .lock()
                 .unwrap()
@@ -391,6 +439,50 @@ mod tests {
             .map(|(_, b)| std::str::from_utf8(b).unwrap().to_string())
             .collect::<String>();
         assert!(body.contains("test failure"), "got: {body}");
+    }
+
+    #[test]
+    fn post_tool_prunes_observation_log_to_recent_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = CapturingFs::new(tmp.path().to_path_buf());
+        let session_id = "s-citizen-prune";
+        let path = observation_path(tmp.path(), session_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let mut body = String::new();
+        for ts in 0..(MAX_OBSERVATIONS_PER_SESSION + 5) {
+            let obs = Observation {
+                ts_ms: ts as u128,
+                category: "dead code".into(),
+                excerpt: format!("old warning {ts}"),
+            };
+            body.push_str(&serde_json::to_string(&obs).unwrap());
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+
+        let ctx = ctx_with_fs(&fs);
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_result: Some(serde_json::json!({
+                "stdout": "warning: function `new_helper` is never used"
+            })),
+            session_id: Some(session_id.into()),
+            ..Default::default()
+        };
+        process_post_tool(&input, &ctx);
+
+        let pruned = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = pruned.lines().collect();
+        assert_eq!(lines.len(), MAX_OBSERVATIONS_PER_SESSION);
+        assert!(
+            !pruned.contains("old warning 0"),
+            "oldest observations should be pruned"
+        );
+        assert!(
+            pruned.contains("new_helper"),
+            "new observation should be retained"
+        );
     }
 
     #[test]

@@ -69,7 +69,7 @@ Wait for the project's CI to finish, then read and triage CodeRabbit's review co
 
 ### Diagnosing CI failures
 
-Don't just retry CI hoping it goes green. Read `gh run view --log-failed` for the failing job and the Blacksmith analytics dashboard (per project config). Fix the root cause, push the fix, re-check. Max 3 iterations before the **Circuit Breaker** trips (M4.4 / commit 880eb27) — if CI is failing 3+ times in a row, something deeper is wrong than a flaky test. Stop, escalate.
+Don't just retry CI hoping it goes green. Read `gh run view --log-failed` for the failing job and the Blacksmith analytics report (per project config). Fix the root cause, push the fix, re-check. Max 3 iterations before the **Circuit Breaker** trips (M4.4 / commit 880eb27) — if CI is failing 3+ times in a row, something deeper is wrong than a flaky test. Stop, escalate.
 
 ### CodeRabbit triage
 

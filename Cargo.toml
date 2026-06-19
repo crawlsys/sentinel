@@ -64,8 +64,8 @@ ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 rand_core = { version = "0.6", features = ["std"] }
 hex = "0.4"
 
-# HTTP client (Anthropic API + the sync legatus_client that hooks
-# use to POST escalations to the local sentinel daemon).
+# HTTP client (OpenRouter/A2-routed LLM calls + the sync legatus_client that
+# hooks use to POST escalations to the local sentinel daemon).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "blocking", "http2", "charset", "macos-system-configuration"] }
 
 # LLM framework (adversarial Codex judge + Opus skill router).
@@ -75,7 +75,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # "error decoding response body" — the self-heal LLM hang on gpt-5.5-pro).
 rig-core = { version = "0.38", package = "rig-core" }
 
-# HTTP server (dashboard API)
+# HTTP server (local API)
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }

@@ -29,12 +29,15 @@ impl FileSystemPort for RealFileSystem {
 
     fn claude_dir(&self) -> PathBuf {
         if let Ok(dir) = std::env::var("SENTINEL_CLAUDE_DIR") {
-            if !dir.is_empty() {
-                return PathBuf::from(dir);
+            if dir.is_empty() {
+                panic!("[sentinel] FATAL: SENTINEL_CLAUDE_DIR is set but empty");
             }
+            return PathBuf::from(dir);
         }
         self.home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .expect(
+                "[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.",
+            )
             .join(".claude")
     }
 
@@ -53,6 +56,35 @@ impl FileSystemPort for RealFileSystem {
         std::fs::write(path, content)
             .with_context(|| format!("write {}", path.display()))
             .map_err(FileSystemError::backend)
+    }
+
+    fn replace_file_atomic(&self, path: &Path, content: &[u8]) -> Result<()> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))
+            .map_err(FileSystemError::backend)?;
+
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".sentinel-")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .with_context(|| format!("create temporary file in {}", parent.display()))
+            .map_err(FileSystemError::backend)?;
+        tmp.write_all(content)
+            .with_context(|| format!("write temporary replacement for {}", path.display()))
+            .map_err(FileSystemError::backend)?;
+        tmp.as_file()
+            .sync_all()
+            .with_context(|| format!("sync temporary replacement for {}", path.display()))
+            .map_err(FileSystemError::backend)?;
+        tmp.persist(path)
+            .map_err(|err| {
+                FileSystemError::backend(
+                    anyhow::Error::new(err.error)
+                        .context(format!("atomically replace {}", path.display())),
+                )
+            })
+            .map(|_| ())
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
@@ -264,10 +296,7 @@ fn stamp_trace_id_if_missing_with<F: Fn() -> String>(content: &[u8], gen_id: F) 
         match serde_json::from_str::<serde_json::Value>(body) {
             Ok(serde_json::Value::Object(mut map)) => {
                 if !map.contains_key("trace_id") {
-                    map.insert(
-                        "trace_id".to_string(),
-                        serde_json::Value::String(gen_id()),
-                    );
+                    map.insert("trace_id".to_string(), serde_json::Value::String(gen_id()));
                     needs_stamp = true;
                 }
                 match serde_json::to_string(&serde_json::Value::Object(map)) {
@@ -357,6 +386,19 @@ mod tests {
         let content = fs.read_to_string(&tmp).unwrap();
         assert_eq!(content, "hello world");
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn replace_file_atomic_replaces_existing_file() {
+        let fs = RealFileSystem;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+
+        fs.write(&path, br#"[{"id":"old"}]"#).unwrap();
+        fs.replace_file_atomic(&path, br#"[{"id":"new"}]"#).unwrap();
+
+        let content = fs.read_to_string(&path).unwrap();
+        assert_eq!(content, r#"[{"id":"new"}]"#);
     }
 
     #[test]
@@ -484,7 +526,10 @@ mod tests {
             fixed_id("test-stamp-fixed-id"),
         );
         let s = String::from_utf8(stamped).unwrap();
-        assert!(s.contains("\"trace_id\":\"test-stamp-fixed-id\""), "got {s}");
+        assert!(
+            s.contains("\"trace_id\":\"test-stamp-fixed-id\""),
+            "got {s}"
+        );
         assert!(s.contains("\"event\":\"foo\""));
         assert!(s.ends_with('\n'));
     }
@@ -567,8 +612,10 @@ mod tests {
     /// will stop being correlated with sentinel hook events.
     #[test]
     fn env_var_name_is_stable() {
-        assert_eq!(TRACE_ID_ENV_VAR, "CLAUDE_TRACE_ID",
+        assert_eq!(
+            TRACE_ID_ENV_VAR, "CLAUDE_TRACE_ID",
             "TRACE_ID_ENV_VAR is part of the cross-crate contract — \
-             change requires matching update in accounts-application");
+             change requires matching update in accounts-application"
+        );
     }
 }

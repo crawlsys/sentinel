@@ -4,7 +4,7 @@
 //! Uses a sliding window counter stored as a small file per session.
 //! Checked BEFORE session lock acquisition to avoid lock contention from floods.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -17,16 +17,11 @@ const WINDOW_SECONDS: u64 = 60;
 
 /// Rate limit state file directory.
 fn rate_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory")
-        .join(".claude")
-        .join("sentinel")
-        .join("rate")
+    crate::paths::sentinel_root().join("rate")
 }
 
-/// Rate limit file for a specific session.
-fn rate_file(session_id: &str) -> PathBuf {
-    rate_dir().join(format!("{session_id}.rate"))
+fn rate_file_in_dir(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!("{session_id}.rate"))
 }
 
 /// Check and record a hook invocation. Returns Ok(()) if allowed, Err if rate-limited.
@@ -40,13 +35,16 @@ fn rate_file(session_id: &str) -> PathBuf {
 /// This is intentionally not locked — a small race between concurrent hooks is
 /// acceptable since the rate limit is a soft safety net, not a hard security boundary.
 pub fn check_rate_limit(session_id: &str) -> Result<()> {
+    check_rate_limit_in_dir(session_id, &rate_dir())
+}
+
+fn check_rate_limit_in_dir(session_id: &str, dir: &Path) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let path = rate_file(session_id);
-    let dir = rate_dir();
+    let path = rate_file_in_dir(dir, session_id);
     std::fs::create_dir_all(&dir).context("Failed to create rate limit directory")?;
 
     // Read existing timestamps
@@ -126,39 +124,32 @@ mod tests {
 
     #[test]
     fn test_rate_limit_allows_normal_usage() {
-        let session_id = format!("test-rate-{}", std::process::id());
-        // Clean up from previous runs
-        let _ = std::fs::remove_file(rate_file(&session_id));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = "test-rate-normal";
 
         // First invocation should be allowed
-        assert!(check_rate_limit(&session_id).is_ok());
+        assert!(check_rate_limit_in_dir(session_id, tmp.path()).is_ok());
 
         // A few more should be fine
         for _ in 0..5 {
-            assert!(check_rate_limit(&session_id).is_ok());
+            assert!(check_rate_limit_in_dir(session_id, tmp.path()).is_ok());
         }
-
-        // Clean up
-        let _ = std::fs::remove_file(rate_file(&session_id));
     }
 
     #[test]
     fn test_rate_limit_blocks_flood() {
-        let session_id = format!("test-flood-{}", std::process::id());
-        let _ = std::fs::remove_file(rate_file(&session_id));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = "test-rate-flood";
 
         // Fill up to the limit
         for i in 0..MAX_INVOCATIONS_PER_WINDOW {
             assert!(
-                check_rate_limit(&session_id).is_ok(),
+                check_rate_limit_in_dir(session_id, tmp.path()).is_ok(),
                 "Invocation {i} should be allowed"
             );
         }
 
         // Next one should be blocked
-        assert!(check_rate_limit(&session_id).is_err());
-
-        // Clean up
-        let _ = std::fs::remove_file(rate_file(&session_id));
+        assert!(check_rate_limit_in_dir(session_id, tmp.path()).is_err());
     }
 }

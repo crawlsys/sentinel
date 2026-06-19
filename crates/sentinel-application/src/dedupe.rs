@@ -109,7 +109,8 @@ impl DedupKey {
         let event_type = event
             .meta
             .get("event_type")
-            .and_then(|v| v.as_str()).map_or_else(|| event.event.clone(), String::from);
+            .and_then(|v| v.as_str())
+            .map_or_else(|| event.event.clone(), String::from);
         Some(Self::new(source, resource_id, event_type))
     }
 }

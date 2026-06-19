@@ -41,9 +41,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use sentinel_application::evidence_adapters::EvidenceAdapter;
-use sentinel_domain::evidence_adapter::{
-    AdapterError, EvidenceClaim, EvidenceReceipt,
-};
+use sentinel_domain::evidence_adapter::{AdapterError, EvidenceClaim, EvidenceReceipt};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -120,9 +118,7 @@ impl FilesystemAdapter {
         let exists = path.exists();
         let is_dir = exists && path.is_dir();
         let entry_count = if is_dir {
-            std::fs::read_dir(&path)
-                .ok()
-                .map(|rd| rd.count() as u64)
+            std::fs::read_dir(&path).ok().map(|rd| rd.count() as u64)
         } else {
             None
         };
@@ -142,9 +138,7 @@ impl FilesystemAdapter {
         ))
     }
 
-    fn handle_file_contains_hash(
-        claim: &EvidenceClaim,
-    ) -> Result<EvidenceReceipt, AdapterError> {
+    fn handle_file_contains_hash(claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
         let path = Self::extract_path(claim)?;
         let expected = claim
             .context
@@ -192,10 +186,7 @@ impl EvidenceAdapter for FilesystemAdapter {
         claim_type.starts_with(CLAIM_PREFIX)
     }
 
-    async fn fetch(
-        &self,
-        claim: &EvidenceClaim,
-    ) -> Result<EvidenceReceipt, AdapterError> {
+    async fn fetch(&self, claim: &EvidenceClaim) -> Result<EvidenceReceipt, AdapterError> {
         match claim.claim_type.as_str() {
             "filesystem.file_exists" => Self::handle_file_exists(claim),
             "filesystem.dir_exists" => Self::handle_dir_exists(claim),
@@ -365,19 +356,13 @@ mod tests {
         let adapter = FilesystemAdapter::new();
         let c = claim("filesystem.file_exists", serde_json::json!({}));
         let err = adapter.fetch(&c).await.unwrap_err();
-        assert!(
-            matches!(err, AdapterError::Fetch(_)),
-            "got {err:?}",
-        );
+        assert!(matches!(err, AdapterError::Fetch(_)), "got {err:?}",);
     }
 
     #[tokio::test]
     async fn empty_path_rejected() {
         let adapter = FilesystemAdapter::new();
-        let c = claim(
-            "filesystem.file_exists",
-            serde_json::json!({"path": ""}),
-        );
+        let c = claim("filesystem.file_exists", serde_json::json!({"path": ""}));
         let err = adapter.fetch(&c).await.unwrap_err();
         assert!(matches!(err, AdapterError::Fetch(_)));
     }

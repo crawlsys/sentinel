@@ -5,18 +5,19 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 
-pub fn run(top: usize) -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+pub async fn run(top: usize) -> Result<()> {
+    let home = sentinel_infrastructure::paths::home_root_or_fatal();
     let projects: PathBuf = home.join(".claude").join("projects");
-    let metrics_dir: PathBuf = home.join(".claude").join("sentinel").join("metrics");
+    let metrics_dir: PathBuf = sentinel_infrastructure::paths::sentinel_root().join("metrics");
     let output_jsonl: PathBuf = metrics_dir.join("cache-efficiency.jsonl");
     let output_summary: PathBuf = metrics_dir.join("cache-efficiency-summary.json");
+    let graph_runs = output_summary.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Cache Efficiency Scan".bold());
     println!("Projects: {}", projects.display());
     println!("Output:   {}", output_jsonl.display());
     println!("Summary:  {}", output_summary.display());
+    println!("Graph:    {}", graph_runs.display());
     println!();
 
     let report = sentinel_application::cache_efficiency::scan_cache_efficiency(
@@ -25,9 +26,22 @@ pub fn run(top: usize) -> Result<()> {
         &output_summary,
     )
     .context("scan_cache_efficiency failed")?;
+    let graph_audit =
+        crate::cache_efficiency_graph::run_cache_efficiency_graph_audit(&report, &graph_runs)
+            .await
+            .context("cache efficiency graph audit failed")?;
 
     println!("{}", "Summary".bold());
     println!("  Sessions scanned:     {}", report.sessions_scanned);
+    println!(
+        "  Graph decision:       {} ({})",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("cache efficiency graph audit requires checkpoint")
+            .dimmed()
+    );
     println!(
         "  Sessions with usage:  {}",
         report.sessions_with_usage.to_string().green()

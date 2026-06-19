@@ -5,23 +5,25 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 
-pub fn run(top: usize) -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+pub async fn run(top: usize) -> Result<()> {
+    let home = sentinel_infrastructure::paths::home_root_or_fatal();
     let projects: PathBuf = home.join(".claude").join("projects");
-    let output: PathBuf = home
-        .join(".claude")
-        .join("sentinel")
+    let output: PathBuf = sentinel_infrastructure::paths::sentinel_root()
         .join("metrics")
         .join("tokens-per-ticket.jsonl");
+    let graph_runs = output.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Tokens Scan".bold());
     println!("Projects: {}", projects.display());
     println!("Output:   {}", output.display());
+    println!("Graph:    {}", graph_runs.display());
     println!();
 
     let report = sentinel_application::tokens::scan_token_usage(&projects, &output)
         .context("scan_token_usage failed")?;
+    let graph_audit = crate::token_usage_graph::run_token_usage_graph_audit(&report, &graph_runs)
+        .await
+        .context("token usage graph audit failed")?;
 
     let coverage_pct = if report.total_sessions == 0 {
         0.0_f64
@@ -34,6 +36,15 @@ pub fn run(top: usize) -> Result<()> {
     println!("{}", "Summary".bold());
     println!("  Total sessions:    {}", report.total_sessions);
     println!(
+        "  Graph decision:    {} ({})",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("token usage graph audit requires checkpoint")
+            .dimmed()
+    );
+    println!(
         "  Mapped to ticket:  {} ({:.1}%)",
         report.mapped_sessions.to_string().green(),
         coverage_pct
@@ -42,6 +53,13 @@ pub fn run(top: usize) -> Result<()> {
         "  Unmapped:          {}",
         report.unmapped_sessions.to_string().yellow()
     );
+    if report.unpriced_tokens > 0 {
+        println!(
+            "  Unpriced usage:    {} sessions · {:.2}M tokens",
+            report.unpriced_sessions.to_string().red(),
+            m(report.unpriced_tokens)
+        );
+    }
     println!("  Distinct tickets:  {}", report.tickets);
     println!();
 
@@ -59,4 +77,9 @@ pub fn run(top: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn m(t: u64) -> f64 {
+    t as f64 / 1e6
 }

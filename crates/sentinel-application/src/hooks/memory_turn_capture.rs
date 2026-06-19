@@ -9,11 +9,11 @@
 //! hook runs under a hard 3s wall-clock budget (`run_async`). A slow LLM call
 //! can't complete in that window — it would always be cancelled and capture
 //! nothing. So the hook stays fast: it builds the turn text, gates on length,
-//! and fires `memory turn-capture` as a **detached** background process that
+//! and fires `memory-rs turn-capture` as a **detached** background process that
 //! runs the Opus extraction + dual-judge capture on its own time, outliving
 //! the hook. Fire-and-forget; never blocks the turn.
 //!
-//! Flow: build turn → gate trivial turns → `spawn_detached("memory",
+//! Flow: build turn → gate trivial turns → `spawn_detached("memory-rs",
 //! ["turn-capture", "--project", P, "--prompt", U, "--response", A])`.
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
@@ -62,42 +62,24 @@ fn project_label(cwd: &str) -> String {
         .unwrap_or_else(|| "global".to_string())
 }
 
-/// Locate the `memory` CLI binary. Prefers `~/.cargo/bin`, falls back to the
-/// dev release build. Returns the command string for `spawn_detached`.
+/// Locate the canonical `memory-rs` CLI binary. Returns the command string for
+/// `spawn_detached`.
 fn memory_bin() -> Option<String> {
     let home = dirs::home_dir()?;
-    // Binary names, newest convention first. The CLI binary was standardized to
-    // `memory-rs` (the `{product}-rs` convention); the legacy `memory` name is
-    // kept as a fallback so this resolves whether the new or old binary is
-    // installed. Order matters: prefer `memory-rs`.
-    let bin_names = ["memory-rs", "memory-rs.exe", "memory", "memory.exe"];
-
     let cargo_bin_dir = home.join(".cargo").join("bin");
-    for name in bin_names {
+    for name in ["memory-rs", "memory-rs.exe"] {
         let cand = cargo_bin_dir.join(name);
         if cand.exists() {
             return Some(cand.to_string_lossy().to_string());
         }
     }
-
-    // Dev fallback: the CLI lives in `memory-cli-rust` (binary `memory-rs`,
-    // legacy `memory`). Check the common clone locations + both names.
-    for repo in ["memory-cli-rust", "memory"] {
-        for base in ["Downloads", "Documents/GitHub", "repos"] {
-            let mut dir = home.clone();
-            for seg in base.split('/') {
-                dir = dir.join(seg);
-            }
-            let root = dir.join(repo).join("target").join("release");
-            for name in bin_names {
-                let cand = root.join(name);
-                if cand.exists() {
-                    return Some(cand.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
     None
+}
+
+fn concrete_context_session_id(ctx: &super::HookContext<'_>) -> Option<String> {
+    let session_id = ctx.session_id()?;
+    let session_id = session_id.trim();
+    super::session_path_component(session_id).map(str::to_string)
 }
 
 /// Returns true at most once per session: writes a session-scoped marker so
@@ -105,11 +87,13 @@ fn memory_bin() -> Option<String> {
 /// Stop. Best-effort — if state can't be written, default to warning (a
 /// repeated visible warning is far better than a silent capture outage).
 fn first_warn_this_session(ctx: &super::HookContext<'_>) -> bool {
+    let Some(sid) = concrete_context_session_id(ctx) else {
+        return true;
+    };
     let Some(home) = ctx.fs.home_dir() else {
         return true;
     };
     let dir = home.join(".claude").join("sentinel").join("state");
-    let sid = ctx.session_id().unwrap_or_else(|| "unknown".to_string());
     let path = dir.join(format!("memory-bin-missing-warned-{sid}"));
     if ctx.fs.read_to_string(&path).is_ok() {
         return false; // already warned this session
@@ -127,15 +111,15 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     };
 
     let Some(bin) = memory_bin() else {
-        // The `memory` CLI is a HARD dependency of auto-capture. If it's missing
+        // The `memory-rs` CLI is a HARD dependency of auto-capture. If it's missing
         // every turn silently captures nothing — an undetectable memory outage
         // (this exact gap hid a multi-session capture loss). Surface it LOUDLY,
         // but only once per session so we don't spam every Stop.
-        warn!("memory_turn_capture: `memory` CLI binary not found — auto-capture is DISABLED");
+        warn!("memory_turn_capture: `memory-rs` CLI binary not found — auto-capture is DISABLED");
         if first_warn_this_session(ctx) {
-            let msg = "🧠 [memory] auto-capture DISABLED: the `memory` CLI binary \
+            let msg = "🧠 [memory] auto-capture DISABLED: the `memory-rs` CLI binary \
                 is not installed. Memories are NOT being saved this session. Fix: \
-                `cargo install --path ~/Downloads/memory-cli-rust/crates/memory-cli --bin memory`.";
+                `cargo install --path ~/Downloads/memory-cli-rust/crates/memory-cli --bin memory-rs`.";
             let mut out = HookOutput::inject_context(HookEvent::Stop, msg);
             out.system_message = Some(msg.to_string());
             return out;
@@ -169,7 +153,26 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::test_support::{stub_ctx_with_fs, StubEnv, TestHomeFs};
+    use crate::hooks::HookContext;
     use sentinel_domain::events::HookInput;
+
+    fn ctx_with_fs_env<'a>(
+        fs: &'a dyn crate::hooks::FileSystemPort,
+        env: &'a dyn crate::hooks::EnvPort,
+    ) -> HookContext<'a> {
+        let base = stub_ctx_with_fs(fs);
+        HookContext {
+            git: base.git,
+            vector_store: base.vector_store,
+            fs,
+            process: base.process,
+            llm: base.llm,
+            memory_mcp: base.memory_mcp,
+            env,
+            linear_lookup: base.linear_lookup,
+        }
+    }
 
     #[test]
     fn skips_trivial_turn() {
@@ -207,5 +210,64 @@ mod tests {
     fn project_label_from_cwd() {
         assert_eq!(project_label("/c/Users/x/GitHub/memory"), "memory");
         assert_eq!(project_label(""), "global");
+    }
+
+    #[test]
+    fn missing_session_warns_without_writing_unknown_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let env = StubEnv::new();
+        let ctx = ctx_with_fs_env(&fs, &env);
+        let marker = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("memory-bin-missing-warned-unknown");
+
+        assert!(first_warn_this_session(&ctx));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn synthetic_unknown_session_warns_without_writing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let env = StubEnv::with(&[("CLAUDE_SESSION_ID", " unknown ")]);
+        let ctx = ctx_with_fs_env(&fs, &env);
+        let raw_marker = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("memory-bin-missing-warned- unknown ");
+        let trimmed_marker = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("memory-bin-missing-warned-unknown");
+
+        assert!(first_warn_this_session(&ctx));
+        assert!(!raw_marker.exists());
+        assert!(!trimmed_marker.exists());
+    }
+
+    #[test]
+    fn concrete_session_writes_marker_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let env = StubEnv::with(&[("CLAUDE_SESSION_ID", "memory-session-123")]);
+        let ctx = ctx_with_fs_env(&fs, &env);
+        let marker = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("memory-bin-missing-warned-memory-session-123");
+
+        assert!(first_warn_this_session(&ctx));
+        assert!(marker.exists());
+        assert!(!first_warn_this_session(&ctx));
     }
 }

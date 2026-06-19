@@ -25,15 +25,14 @@
 //! registry for ALL receipts (not just the first); see
 //! [`EvidenceAdapterRegistry::fetch_all`].
 //!
-//! # The self-attested fallback
+//! # Self-attested receipts
 //!
-//! [`SelfAttestedAdapter`] is the catch-all. It "supports" every
-//! claim type and returns a receipt with `verified=false`. This makes
-//! "we know we don't know" a first-class chain entry rather than an
-//! absence-of-data ambiguity. Corpus queries filter on
-//! `verified == false` to find unverified claims and prioritize them
-//! for real-adapter coverage. The self-attested adapter is registered
-//! LAST so real adapters get first dibs.
+//! [`SelfAttestedAdapter`] is explicit diagnostic plumbing, not the
+//! production default. It "supports" every claim type and returns a
+//! receipt with `verified=false`, which is useful for tests and corpus
+//! gap analysis but must not satisfy step-completion proof sealing.
+//! Production registries should register real adapters only; unsupported
+//! claims return [`AdapterError::NoAdapterForClaim`] and fail closed.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -72,8 +71,8 @@ pub struct EvidenceAdapterRegistry {
 }
 
 impl EvidenceAdapterRegistry {
-    /// Empty registry. Most callers immediately register
-    /// [`SelfAttestedAdapter`] then layer real adapters on top.
+    /// Empty strict registry. Production callers register real adapters
+    /// only; unsupported claims fail with [`AdapterError::NoAdapterForClaim`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -81,19 +80,21 @@ impl EvidenceAdapterRegistry {
         }
     }
 
-    /// Build a registry pre-populated with the self-attested fallback.
-    /// Convenience for tests + minimal production deployments.
+    /// Build a registry pre-populated with the self-attested adapter.
+    ///
+    /// This is for tests and diagnostic corpus gap analysis. The MCP
+    /// step-completion path refuses `verified=false` receipts, so this cannot
+    /// satisfy production proof sealing.
     #[must_use]
-    pub fn with_fallback() -> Self {
+    pub fn with_self_attested_adapter() -> Self {
         let mut r = Self::new();
         r.register(Box::new(SelfAttestedAdapter::new()));
         r
     }
 
     /// Register an adapter. Order matters — the first adapter that
-    /// `supports()` a claim handles it in [`fetch`]. Register real
-    /// adapters BEFORE the self-attested fallback so the fallback
-    /// only fires when nothing else applies.
+    /// `supports()` a claim handles it in [`fetch`]. Production registries
+    /// should avoid catch-all adapters so unsupported claims fail closed.
     pub fn register(&mut self, adapter: Box<dyn EvidenceAdapter>) {
         self.adapters.push(adapter);
     }
@@ -111,7 +112,7 @@ impl EvidenceAdapterRegistry {
     }
 
     /// Adapter names in registration order. For diagnostics + the
-    /// future dashboard "which adapters are wired up?" view.
+    /// future operator "which adapters are wired up?" view.
     pub fn names(&self) -> Vec<&str> {
         self.adapters.iter().map(|a| a.name()).collect()
     }
@@ -119,8 +120,7 @@ impl EvidenceAdapterRegistry {
     /// Fetch a receipt from the first adapter that supports the claim.
     ///
     /// Returns [`AdapterError::NoAdapterForClaim`] when nothing
-    /// matches. With [`SelfAttestedAdapter`] registered (the common
-    /// case), this never fires — the fallback supports everything.
+    /// matches.
     ///
     /// **Provenance verification** is performed against the receipt
     /// before return. A buggy adapter that builds the receipt with a
@@ -169,17 +169,14 @@ impl EvidenceAdapterRegistry {
 
 impl Default for EvidenceAdapterRegistry {
     fn default() -> Self {
-        Self::with_fallback()
+        Self::new()
     }
 }
 
-/// The catch-all adapter. Supports every claim type and returns a
-/// receipt with `verified=false`. Makes "we know we don't know" a
-/// first-class chain entry — corpus queries filter on
-/// `verified == false` to find unverified claims and prioritize them
-/// for real-adapter coverage.
-///
-/// Always register LAST so real adapters get first dibs.
+/// Explicit diagnostic catch-all adapter. Supports every claim type and
+/// returns a receipt with `verified=false`. This is useful when auditing
+/// adapter coverage, but production step proof sealing rejects unverified
+/// receipts.
 pub struct SelfAttestedAdapter {
     name: String,
 }
@@ -421,8 +418,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_fallback_handles_any_claim_via_self_attested() {
-        let r = EvidenceAdapterRegistry::with_fallback();
+    async fn self_attested_adapter_handles_any_claim_for_diagnostics() {
+        let r = EvidenceAdapterRegistry::with_self_attested_adapter();
         let claim = sample_claim("totally.made.up.claim");
         let receipt = r.fetch(&claim).await.unwrap();
         assert!(!receipt.verified);
@@ -431,8 +428,8 @@ mod tests {
 
     #[tokio::test]
     async fn registry_dispatches_to_first_supporting_adapter() {
-        // Real adapter for git.pr_opened; self-attested fallback
-        // last. Registry must hit the real adapter, not the fallback.
+        // Real adapter for git.pr_opened; self-attested diagnostic adapter
+        // last. Registry must hit the real adapter.
         let mut r = EvidenceAdapterRegistry::new();
         r.register(Box::new(StubAdapter::new(
             "github_api",
@@ -448,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_falls_through_to_self_attested_when_real_adapter_doesnt_support() {
+    async fn registry_uses_self_attested_when_no_real_adapter_supports_claim() {
         let mut r = EvidenceAdapterRegistry::new();
         r.register(Box::new(StubAdapter::new(
             "github_api",
@@ -482,8 +479,8 @@ mod tests {
     #[tokio::test]
     async fn registry_does_not_fall_through_after_real_adapter_fails() {
         // Critical: when GitHub returns 503, we surface the failure.
-        // We do NOT silently fall through to the self-attested
-        // fallback — that would mask real outages and let agents
+        // We do NOT silently use the self-attested diagnostic adapter after
+        // a real adapter fails; that would mask real outages and let agents
         // claim verification that didn't happen.
         let mut r = EvidenceAdapterRegistry::new();
         r.register(Box::new(FailingAdapter {
@@ -606,9 +603,9 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_includes_fallback() {
+    fn default_registry_is_strict_and_empty() {
         let r = EvidenceAdapterRegistry::default();
-        assert_eq!(r.len(), 1);
-        assert_eq!(r.names()[0], "self_attested");
+        assert!(r.is_empty());
+        assert!(r.names().is_empty());
     }
 }

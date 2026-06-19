@@ -6,33 +6,17 @@
 //! `rig_judge.rs` pattern so sentinel has a unified seam for every
 //! LLM-backed verdict.
 //!
-//! ## Supported providers
+//! ## Direct env provider
 //!
-//! Selected by `SENTINEL_AUDITOR_PROVIDER` (default `openrouter`):
-//!
-//! - **`openrouter`** — hosted, single auth surface, broad model
-//!   catalog. Reads `OPENROUTER_API_KEY`. Default model
-//!   `anthropic/claude-opus-4.8`.
-//! - **`ollama`** — auto-detects local vs cloud at construction time:
-//!     - If `OLLAMA_API_KEY` is set → **Ollama Cloud** mode. Reads
-//!       `OLLAMA_API_KEY` + `OLLAMA_BASE_URL` (default
-//!       `https://ollama.com/v1`). Uses the OpenAI-compatible endpoint
-//!       with bearer auth via rig-core's `openai` provider client.
-//!     - Otherwise → **local Ollama** mode. Reads `OLLAMA_HOST`
-//!       (default `http://localhost:11434`); appends `/v1` for the
-//!       OpenAI-compatible path; passes a dummy bearer token (Ollama's
-//!       OpenAI-compat endpoint ignores it). Same `openai` provider
-//!       client.
-//!
-//!   In both Ollama modes, `SENTINEL_AUDITOR_MODEL` is **required**
-//!   (no sensible default — operators choose what they've pulled,
-//!   e.g. `moonshotai/kimi-k2`, `qwen3:8b`).
+//! `from_env()` is OpenRouter-only: hosted, single auth surface, broad model
+//! catalog. Reads `OPENROUTER_API_KEY`. Default model
+//! `anthropic/claude-opus-4.8`.
 //!
 //! Vendor-class separation (the A3 spec's "auditor must be a different
 //! model family than the acting agent" contract) is the operator's
-//! responsibility today: choose a `SENTINEL_AUDITOR_MODEL` that
-//! differs from the acting model's vendor. A2's
-//! `CapabilityRouterPort` will take over selection once it ships.
+//! responsibility on direct env construction. The production A2 path uses
+//! `CapabilityRouterPort` plus `for_profile()`; that is the only route that
+//! may select an Ollama-backed profile.
 //!
 //! ## Sync ↔ async bridging
 //!
@@ -79,10 +63,6 @@ pub use llm_scorer_runtime::{DEFAULT_OLLAMA_CLOUD_BASE_URL, DEFAULT_OLLAMA_LOCAL
 /// `OpenAI` / Google. Operator overrides per workflow.
 pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-opus-4.8";
 
-/// Legacy alias for back-compat with Phase 3b callers.
-#[deprecated(note = "use DEFAULT_OPENROUTER_MODEL — name disambiguates per-provider defaults")]
-pub const DEFAULT_AUDITOR_MODEL: &str = DEFAULT_OPENROUTER_MODEL;
-
 /// Default timeout for an auditor call. 30s is comfortable for frontier
 /// reasoning models; operator can override via `SENTINEL_AUDITOR_TIMEOUT_SECS`.
 pub const DEFAULT_AUDITOR_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,13 +88,6 @@ pub struct RigAuditor {
     /// Per-call timeout. Auditor calls exceeding this surface as
     /// [`AuditorError::TimedOut`].
     timeout: Duration,
-    /// When true, [`Self::resolve_leg`] never substitutes a subscription CLI —
-    /// it always returns this auditor's configured `prompt_fn`. Set by the
-    /// stub-driven unit tests (so they exercise the injected `PromptFn` rather
-    /// than shelling out to a real `claude`/`codex` that happens to be on the
-    /// dev box) and via the `SENTINEL_AUDITOR_NO_SUBSCRIPTION` env opt-out.
-    /// Production constructors leave it `false`.
-    force_configured_prompt_fn: bool,
 }
 
 impl std::fmt::Debug for RigAuditor {
@@ -128,13 +101,9 @@ impl std::fmt::Debug for RigAuditor {
 }
 
 impl RigAuditor {
-    /// Construct from a custom prompt function — primarily for tests
-    /// (lets the test inject a stub `PromptFn` instead of hitting the
-    /// network). Defaults `provider_prefix` to `"openrouter"` so the
-    /// pre-Phase-5 test fixtures keep working unchanged. Pins
-    /// `force_configured_prompt_fn = true` so the injected stub is ALWAYS used —
-    /// a stub-driven test must never shell out to a real `claude`/`codex` that
-    /// happens to be installed on the dev box.
+    /// Construct from a custom prompt function — primarily for tests.
+    /// Defaults `provider_prefix` to `"openrouter"` so the pre-Phase-5 test
+    /// fixtures keep working unchanged.
     #[must_use]
     pub fn with_prompt_fn(prompt_fn: PromptFn, model_id: impl Into<String>) -> Self {
         Self {
@@ -142,7 +111,6 @@ impl RigAuditor {
             model_id: model_id.into(),
             provider_prefix: "openrouter".to_string(),
             timeout: DEFAULT_AUDITOR_TIMEOUT,
-            force_configured_prompt_fn: true,
         }
     }
 
@@ -162,20 +130,15 @@ impl RigAuditor {
         self
     }
 
-    /// Construct from environment, dispatching on
-    /// `SENTINEL_AUDITOR_PROVIDER`:
-    ///
-    /// - `openrouter` (default) → [`Self::openrouter_from_env`]
-    /// - `ollama` → [`Self::ollama_from_env`] (auto-detects local vs
-    ///   cloud by `OLLAMA_API_KEY` presence)
-    ///
-    /// Any other value is an unrecoverable configuration error.
+    /// Construct from environment. Direct provider dispatch is OpenRouter-only;
+    /// use [`Self::via_router`] / [`Self::for_profile`] when an A2-selected
+    /// non-OpenRouter profile should own the auditor transport.
     pub fn from_env() -> Result<Self> {
         Self::from_env_with(real_env)
     }
 
     /// Construct an OpenRouter-backed auditor from environment.
-    /// See [`Self::from_env`] for the variables consulted.
+    /// See [`Self::from_env`] for the variables queried.
     pub fn openrouter_from_env() -> Result<Self> {
         Self::openrouter_from_env_with(real_env)
     }
@@ -194,6 +157,7 @@ impl RigAuditor {
     ///
     /// `SENTINEL_AUDITOR_MODEL` is **required** for Ollama (no sensible
     /// default — operators choose what they've pulled).
+    #[cfg(test)]
     pub fn ollama_from_env() -> Result<Self> {
         Self::ollama_from_env_with(real_env)
     }
@@ -209,9 +173,12 @@ impl RigAuditor {
             .to_lowercase();
         match provider.as_str() {
             "openrouter" => Self::openrouter_from_env_with(env),
-            "ollama" => Self::ollama_from_env_with(env),
+            "ollama" => Err(anyhow::anyhow!(
+                "SENTINEL_AUDITOR_PROVIDER=ollama is not a direct env provider; \
+                 register an Ollama AgentCapabilityProfile and route through A2"
+            )),
             other => Err(anyhow::anyhow!(
-                "unknown SENTINEL_AUDITOR_PROVIDER={other:?}; expected one of: openrouter, ollama"
+                "unknown SENTINEL_AUDITOR_PROVIDER={other:?}; expected: openrouter"
             )),
         }
     }
@@ -222,19 +189,23 @@ impl RigAuditor {
     {
         let key = env("OPENROUTER_API_KEY")
             .context("OPENROUTER_API_KEY not set (required for openrouter auditor)")?;
-        let model_id = env("SENTINEL_AUDITOR_MODEL")
-            .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
-        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
+        let model_id =
+            env("SENTINEL_AUDITOR_MODEL").unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_AUDITOR_TIMEOUT_SECS",
+            DEFAULT_AUDITOR_TIMEOUT,
+        )?;
         let (prompt_fn, provider_prefix) = build_openrouter_prompt_fn(&key, "auditor")?;
         Ok(Self {
             prompt_fn,
             model_id,
             provider_prefix,
             timeout,
-            force_configured_prompt_fn: false,
         })
     }
 
+    #[cfg(test)]
     fn ollama_from_env_with<F>(env: F) -> Result<Self>
     where
         F: Fn(&str) -> Option<String>,
@@ -243,14 +214,17 @@ impl RigAuditor {
             "SENTINEL_AUDITOR_MODEL not set (required for ollama auditor; no sensible default — \
              pick what you've pulled, e.g. moonshotai/kimi-k2 or qwen3:8b)",
         )?;
-        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_AUDITOR_TIMEOUT_SECS",
+            DEFAULT_AUDITOR_TIMEOUT,
+        )?;
         let (prompt_fn, provider_prefix) = build_ollama_prompt_fn(&env, "auditor")?;
         Ok(Self {
             prompt_fn,
             model_id,
             provider_prefix,
             timeout,
-            force_configured_prompt_fn: false,
         })
     }
 
@@ -272,7 +246,7 @@ impl RigAuditor {
     /// Uses `profile.model_id` instead of `SENTINEL_AUDITOR_MODEL` so
     /// the router's pick determines the model. The relevant env vars
     /// (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`/`OLLAMA_HOST`,
-    /// `SENTINEL_AUDITOR_TIMEOUT_SECS`) are still consulted via the
+    /// `SENTINEL_AUDITOR_TIMEOUT_SECS`) are still queried via the
     /// supplied resolver.
     pub fn for_profile(profile: &AgentCapabilityProfile) -> Result<Self> {
         Self::for_profile_with(profile, real_env)
@@ -284,7 +258,11 @@ impl RigAuditor {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let timeout = read_timeout(&env, "SENTINEL_AUDITOR_TIMEOUT_SECS", DEFAULT_AUDITOR_TIMEOUT);
+        let timeout = read_timeout(
+            &env,
+            "SENTINEL_AUDITOR_TIMEOUT_SECS",
+            DEFAULT_AUDITOR_TIMEOUT,
+        )?;
         let model_id = profile.model_id.clone();
 
         // Exhaustive match (no wildcard) so a new VendorClass variant
@@ -297,7 +275,6 @@ impl RigAuditor {
                     model_id,
                     provider_prefix,
                     timeout,
-                    force_configured_prompt_fn: false,
                 })
             }
             VendorClass::Anthropic
@@ -319,8 +296,8 @@ impl RigAuditor {
                         profile.agent_id, profile.vendor
                     )
                 })?;
-                let (prompt_fn, provider_prefix) =
-                    build_openrouter_prompt_fn(&key, "auditor").map_err(|e| {
+                let (prompt_fn, provider_prefix) = build_openrouter_prompt_fn(&key, "auditor")
+                    .map_err(|e| {
                         anyhow::anyhow!(
                             "failed to build OpenRouter client for profile {}: {e}",
                             profile.agent_id
@@ -331,13 +308,12 @@ impl RigAuditor {
                     model_id,
                     provider_prefix,
                     timeout,
-                    force_configured_prompt_fn: false,
                 })
             }
         }
     }
 
-    /// Consult the A2 capability router to pick a suitable auditor
+    /// Query the A2 capability router to pick a suitable auditor
     /// for an Irreversible/Catastrophic action whose acting agent is
     /// `acting_vendor`, then construct a [`RigAuditor`] for the
     /// chosen profile via [`Self::for_profile`].
@@ -352,11 +328,9 @@ impl RigAuditor {
     /// - Preferred: `Reasoning(Deep)` (stronger if the operator has
     ///   registered one).
     ///
-    /// Returns `RoutingError::NoAgentSatisfies` when no registered
-    /// profile clears the requirement; the production caller in
-    /// `hook_cmd.rs` falls back to env-driven [`Self::from_env`] in
-    /// that case so legacy operators without `agents.toml` still get
-    /// an auditor.
+    /// Returns an error when no registered profile clears the requirement.
+    /// Production hook dispatch treats that as fail-closed: the A2 router is
+    /// the authority for auditor selection.
     pub fn via_router(
         router: &dyn CapabilityRouterPort,
         profiles: &[AgentCapabilityProfile],
@@ -423,39 +397,13 @@ pub const DUAL_PRIMARY_MODEL: &str = "anthropic/claude-opus-4.8"; // $15/$75
 pub const DUAL_SECOND_MODEL: &str = "openai/gpt-5.5-pro"; // $30/$180
 
 impl RigAuditor {
-    /// Resolve the transport for a given `model_id`, preferring a
-    /// **subscription-backed CLI** over the metered OpenRouter path.
+    /// Resolve the transport for a given `model_id`.
     ///
-    /// The dual auditor cross-checks one Anthropic + one OpenAI model. When the
-    /// operator has the matching subscription CLI installed (`claude` for an
-    /// `anthropic/*` model, `codex` for an `openai/*` model), use it for $0
-    /// per-token; otherwise fall back to this auditor's configured prompt-fn
-    /// (OpenRouter). Detect-and-use only — never auto-installs. The opt-out
-    /// `SENTINEL_AUDITOR_NO_SUBSCRIPTION=1` forces the OpenRouter path.
-    ///
-    /// Returns `(prompt_fn, provider_prefix)`. The CLI prompt-fns ignore the
-    /// `model_id` (the CLI uses its own subscription model), so the returned
-    /// `provider_prefix` (`claude-cli` / `codex-cli`) is what distinguishes the
-    /// audit attribution from the `openrouter` fallback.
-    fn resolve_leg(&self, model_id: &str) -> (PromptFn, String) {
-        // Test-pinned (stub injected) or operator opt-out → always use the
-        // configured prompt-fn, never a subscription CLI.
-        if self.force_configured_prompt_fn
-            || std::env::var("SENTINEL_AUDITOR_NO_SUBSCRIPTION")
-                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        {
-            return (self.prompt_fn.clone(), self.provider_prefix.clone());
-        }
-        let vendor = model_id.split('/').next().unwrap_or("");
-        let cli = match vendor {
-            "anthropic" => llm_scorer_runtime::build_claude_cli_prompt_fn("auditor"),
-            // No schema: the auditor's verdict shape is a nested enum
-            // (`{Block:{reason}}`), awkward to JSON-Schema-constrain; the
-            // existing free-form JSON parse path handles it.
-            "openai" => llm_scorer_runtime::build_codex_cli_prompt_fn("auditor", None),
-            _ => None,
-        };
-        cli.unwrap_or_else(|| (self.prompt_fn.clone(), self.provider_prefix.clone()))
+    /// The A2-selected profile owns auditor transport. Do not substitute a
+    /// local CLI based on PATH; hidden provider changes make audit evidence
+    /// non-reproducible and break model attribution.
+    fn resolve_leg(&self, _model_id: &str) -> (PromptFn, String) {
+        (self.prompt_fn.clone(), self.provider_prefix.clone())
     }
 
     /// Run the single-model audit against an explicit `model_id`. Factored out
@@ -472,8 +420,6 @@ impl RigAuditor {
             AuditorError::Other("auditor sidecar runtime unavailable".to_string())
         })?;
 
-        // Subscription-first: prefer claude/codex CLI for the matching vendor,
-        // fall back to this auditor's prompt-fn (OpenRouter) otherwise.
         let (prompt_fn, provider_prefix) = self.resolve_leg(model_id);
         let model_id = model_id.to_string();
         // Build the attribution string before `model_id` is moved into the
@@ -744,7 +690,7 @@ struct RawAxes {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — exercise prompt + parsing with stub PromptFn; no real network.
+// Tests — exercise prompt + parsing with test_double PromptFn; no real network.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -769,7 +715,7 @@ mod tests {
         .with_expected_effect("remote main advances to local HEAD")
     }
 
-    fn make_stub(responses: Vec<anyhow::Result<String>>) -> PromptFn {
+    fn make_test_double(responses: Vec<anyhow::Result<String>>) -> PromptFn {
         let queue = Arc::new(Mutex::new(responses));
         Arc::new(move |_model_id, _system, _user| {
             let queue = queue.clone();
@@ -821,7 +767,10 @@ mod tests {
             "safety",
             "unstated_assumptions",
         ] {
-            assert!(prompt.contains(axis), "system prompt should reference axis {axis}");
+            assert!(
+                prompt.contains(axis),
+                "system prompt should reference axis {axis}"
+            );
         }
     }
 
@@ -838,11 +787,17 @@ mod tests {
 
     #[test]
     fn parses_pass_verdict() {
-        let verdict =
-            parse_verdict(&make_pass_response(), "openrouter:anthropic/claude-opus-4.8").unwrap();
+        let verdict = parse_verdict(
+            &make_pass_response(),
+            "openrouter:anthropic/claude-opus-4.8",
+        )
+        .unwrap();
         assert!(verdict.decision.is_pass());
         assert!((verdict.confidence - 0.92).abs() < 1e-5);
-        assert_eq!(verdict.auditor_model, "openrouter:anthropic/claude-opus-4.8");
+        assert_eq!(
+            verdict.auditor_model,
+            "openrouter:anthropic/claude-opus-4.8"
+        );
     }
 
     #[test]
@@ -900,21 +855,21 @@ mod tests {
         assert!((verdict.axes.intent_alignment - 1.0).abs() < f32::EPSILON);
     }
 
-    // ---- score() end-to-end with stub PromptFn ----
+    // ---- score() end-to-end with test_double PromptFn ----
 
     #[test]
-    fn score_with_stub_pass_response_returns_pass_verdict() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+    fn score_with_test_double_pass_response_returns_pass_verdict() {
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert!(verdict.decision.is_pass());
         assert_eq!(verdict.auditor_model, "openrouter:test/model");
     }
 
     #[test]
-    fn score_with_stub_block_response_returns_block() {
-        let stub = make_stub(vec![Ok(make_block_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+    fn score_with_test_double_block_response_returns_block() {
+        let test_double = make_test_double(vec![Ok(make_block_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert!(verdict.decision.is_block());
     }
@@ -922,17 +877,22 @@ mod tests {
     #[test]
     fn dual_blocks_if_either_judge_blocks() {
         // First call (model 1) passes, second (model 2) blocks → BLOCK.
-        let stub = make_stub(vec![Ok(make_pass_response()), Ok(make_block_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let test_double =
+            make_test_double(vec![Ok(make_pass_response()), Ok(make_block_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let v = auditor.score_dual(&fixture_dry_run()).unwrap();
-        assert!(v.decision.is_block(), "a single dissent must block a prod action");
+        assert!(
+            v.decision.is_block(),
+            "a single dissent must block a prod action"
+        );
         assert!(v.auditor_model.starts_with("dual:"));
     }
 
     #[test]
     fn dual_passes_only_when_both_pass() {
-        let stub = make_stub(vec![Ok(make_pass_response()), Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let test_double =
+            make_test_double(vec![Ok(make_pass_response()), Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let v = auditor.score_dual(&fixture_dry_run()).unwrap();
         assert!(v.decision.is_pass());
         assert!(v.auditor_model.starts_with("dual:"));
@@ -941,11 +901,11 @@ mod tests {
     #[test]
     fn dual_one_errors_and_other_passes_is_inconclusive_block() {
         // Model 1 passes, model 2 errors → can't confirm safety → BLOCK.
-        let stub = make_stub(vec![
+        let test_double = make_test_double(vec![
             Ok(make_pass_response()),
             Err(anyhow::anyhow!("connection refused")),
         ]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let v = auditor.score_dual(&fixture_dry_run()).unwrap();
         assert!(v.decision.is_block());
         assert!(v.auditor_model.starts_with("dual-inconclusive:"));
@@ -953,11 +913,11 @@ mod tests {
 
     #[test]
     fn dual_one_errors_and_other_blocks_stays_block() {
-        let stub = make_stub(vec![
+        let test_double = make_test_double(vec![
             Ok(make_block_response()),
             Err(anyhow::anyhow!("timeout")),
         ]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let v = auditor.score_dual(&fixture_dry_run()).unwrap();
         assert!(v.decision.is_block());
     }
@@ -979,53 +939,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_leg_opt_out_forces_openrouter_fallback() {
-        // With SENTINEL_AUDITOR_NO_SUBSCRIPTION=1, resolve_leg must ignore any
-        // installed CLI and return the auditor's own (OpenRouter) prefix for
-        // BOTH vendors — the zero-regression escape hatch. Build with the
-        // force-flag OFF so we're exercising the ENV path specifically.
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let mut auditor = RigAuditor::with_prompt_fn(stub, "anthropic/claude-opus-4.8");
-        auditor.force_configured_prompt_fn = false;
-        // SAFETY: single-threaded test; restore after.
-        std::env::set_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION", "1");
-        let (_pf_a, prefix_a) = auditor.resolve_leg("anthropic/claude-opus-4.8");
-        let (_pf_o, prefix_o) = auditor.resolve_leg("openai/gpt-5.5-pro");
-        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
-        assert_eq!(prefix_a, "openrouter", "opt-out must use the auditor's prefix");
-        assert_eq!(prefix_o, "openrouter", "opt-out must use the auditor's prefix");
+    fn resolve_leg_uses_configured_auditor_transport_for_every_vendor() {
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "anthropic/claude-opus-4.8");
+        for model in [
+            "anthropic/claude-opus-4.8",
+            "openai/gpt-5.5-pro",
+            "moonshotai/kimi-k2",
+        ] {
+            let (_pf, prefix) = auditor.resolve_leg(model);
+            assert_eq!(
+                prefix, "openrouter",
+                "auditor transport must come from the configured profile for {model}"
+            );
+        }
     }
 
     #[test]
-    fn resolve_leg_unknown_vendor_falls_back_to_auditor_prompt_fn() {
-        // A model whose vendor has no subscription-CLI mapping (e.g. moonshot)
-        // always resolves to the auditor's configured prompt-fn (OpenRouter),
-        // regardless of what CLIs are installed. Force-flag OFF + env cleared so
-        // we hit the vendor-match branch (which has no "moonshotai" CLI).
-        std::env::remove_var("SENTINEL_AUDITOR_NO_SUBSCRIPTION");
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let mut auditor = RigAuditor::with_prompt_fn(stub, "moonshotai/kimi-k2");
-        auditor.force_configured_prompt_fn = false;
-        let (_pf, prefix) = auditor.resolve_leg("moonshotai/kimi-k2");
-        assert_eq!(prefix, "openrouter");
-    }
-
-    #[test]
-    fn force_configured_prompt_fn_keeps_stub_for_known_vendors() {
-        // The stub-test constructor pins force_configured_prompt_fn=true, so
-        // even an anthropic/openai model resolves to the injected prompt-fn —
-        // NOT a real claude/codex on the dev box. This is what keeps the
-        // dual_* tests deterministic.
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "anthropic/claude-opus-4.8");
-        let (_pf, prefix) = auditor.resolve_leg("anthropic/claude-opus-4.8");
-        assert_eq!(prefix, "openrouter", "forced constructor must keep the stub prefix");
-    }
-
-    #[test]
-    fn score_with_stub_network_error_returns_unavailable() {
-        let stub = make_stub(vec![Err(anyhow::anyhow!("connection refused"))]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+    fn score_with_test_double_network_error_returns_unavailable() {
+        let test_double = make_test_double(vec![Err(anyhow::anyhow!("connection refused"))]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         match auditor.score(&fixture_dry_run()).unwrap_err() {
             AuditorError::Unavailable(msg) => {
                 assert!(msg.contains("connection refused"));
@@ -1035,9 +968,9 @@ mod tests {
     }
 
     #[test]
-    fn score_with_stub_malformed_response_returns_malformed() {
-        let stub = make_stub(vec![Ok("not json".to_string())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+    fn score_with_test_double_malformed_response_returns_malformed() {
+        let test_double = make_test_double(vec![Ok("not json".to_string())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         match auditor.score(&fixture_dry_run()).unwrap_err() {
             AuditorError::MalformedResponse(_) => {}
             other => panic!("expected MalformedResponse, got {other:?}"),
@@ -1054,8 +987,8 @@ mod tests {
 
     #[test]
     fn usable_through_auditor_port_trait_object() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         let port: &dyn AuditorPort = &auditor;
         let verdict = port.score(&fixture_dry_run()).unwrap();
         assert!(verdict.decision.is_pass());
@@ -1063,9 +996,9 @@ mod tests {
 
     #[test]
     fn with_timeout_overrides_default() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor =
-            RigAuditor::with_prompt_fn(stub, "test/model").with_timeout(Duration::from_secs(5));
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model")
+            .with_timeout(Duration::from_secs(5));
         assert_eq!(auditor.timeout, Duration::from_secs(5));
     }
 
@@ -1092,8 +1025,8 @@ mod tests {
 
     #[test]
     fn score_uses_provider_prefix_in_auditor_model_attribution() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "moonshotai/kimi-k2")
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "moonshotai/kimi-k2")
             .with_provider_prefix("ollama-cloud");
         let verdict = auditor.score(&fixture_dry_run()).unwrap();
         assert_eq!(verdict.auditor_model, "ollama-cloud:moonshotai/kimi-k2");
@@ -1108,8 +1041,8 @@ mod tests {
     /// This test would panic (not just fail) against the pre-fix code.
     #[tokio::test]
     async fn score_does_not_panic_when_called_from_within_a_runtime() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor = RigAuditor::with_prompt_fn(stub, "test/model");
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "test/model");
         // Run the sync `score` on a blocking thread of the CURRENT multi-thread
         // runtime — the same nesting that crashed the live browserbase hook.
         let verdict = tokio::task::spawn_blocking(move || auditor.score(&fixture_dry_run()))
@@ -1121,9 +1054,9 @@ mod tests {
 
     #[test]
     fn with_provider_prefix_overrides_default() {
-        let stub = make_stub(vec![Ok(make_pass_response())]);
-        let auditor =
-            RigAuditor::with_prompt_fn(stub, "qwen3:8b").with_provider_prefix("ollama-local");
+        let test_double = make_test_double(vec![Ok(make_pass_response())]);
+        let auditor = RigAuditor::with_prompt_fn(test_double, "qwen3:8b")
+            .with_provider_prefix("ollama-local");
         assert_eq!(auditor.provider_prefix, "ollama-local");
     }
 
@@ -1132,9 +1065,12 @@ mod tests {
         let env = env_map(&[("SENTINEL_AUDITOR_PROVIDER", "claude-direct")]);
         let err = RigAuditor::from_env_with(env).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("claude-direct"), "error should name unknown provider: {msg}");
         assert!(
-            msg.contains("openrouter") && msg.contains("ollama"),
+            msg.contains("claude-direct"),
+            "error should name unknown provider: {msg}"
+        );
+        assert!(
+            msg.contains("openrouter") && !msg.contains("expected one of"),
             "error should list valid providers: {msg}"
         );
     }
@@ -1183,24 +1119,32 @@ mod tests {
     }
 
     #[test]
-    fn from_env_dispatches_to_ollama_when_provider_ollama() {
+    fn from_env_rejects_direct_ollama_provider() {
         let env = env_map(&[
             ("SENTINEL_AUDITOR_PROVIDER", "ollama"),
             ("SENTINEL_AUDITOR_MODEL", "qwen3:8b"),
         ]);
-        let auditor = RigAuditor::from_env_with(env).unwrap();
-        assert_eq!(auditor.provider_prefix, "ollama-local");
+        let err = RigAuditor::from_env_with(env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("A2"),
+            "error should point to router path: {msg}"
+        );
     }
 
     #[test]
-    fn from_env_provider_is_case_insensitive() {
+    fn from_env_rejects_direct_ollama_provider_case_insensitive() {
         let env = env_map(&[
             ("SENTINEL_AUDITOR_PROVIDER", "OLLAMA"),
             ("OLLAMA_API_KEY", "fake-key"),
             ("SENTINEL_AUDITOR_MODEL", "moonshotai/kimi-k2"),
         ]);
-        let auditor = RigAuditor::from_env_with(env).unwrap();
-        assert_eq!(auditor.provider_prefix, "ollama-cloud");
+        let err = RigAuditor::from_env_with(env).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("SENTINEL_AUDITOR_PROVIDER=ollama"),
+            "error should normalize provider in message: {msg}"
+        );
     }
 
     #[test]
@@ -1266,8 +1210,7 @@ mod tests {
     #[test]
     fn for_profile_ollama_local_when_no_api_key() {
         let env = env_map(&[]);
-        let auditor =
-            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        let auditor = RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
         assert_eq!(auditor.provider_prefix, "ollama-local");
         assert_eq!(auditor.model_id, "kimi-k2.6");
     }
@@ -1275,8 +1218,7 @@ mod tests {
     #[test]
     fn for_profile_ollama_cloud_when_api_key_present() {
         let env = env_map(&[("OLLAMA_API_KEY", "fake-cloud-key")]);
-        let auditor =
-            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        let auditor = RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
         assert_eq!(auditor.provider_prefix, "ollama-cloud");
         assert_eq!(auditor.model_id, "kimi-k2.6");
     }
@@ -1284,8 +1226,7 @@ mod tests {
     #[test]
     fn for_profile_openrouter_path_for_anthropic_vendor() {
         let env = env_map(&[("OPENROUTER_API_KEY", "sk-fake")]);
-        let auditor =
-            RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap();
+        let auditor = RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap();
         assert_eq!(auditor.provider_prefix, "openrouter");
         assert_eq!(auditor.model_id, "claude-opus-4-7");
     }
@@ -1293,10 +1234,12 @@ mod tests {
     #[test]
     fn for_profile_openrouter_errors_when_key_missing() {
         let env = env_map(&[]);
-        let err =
-            RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap_err();
+        let err = RigAuditor::for_profile_with(&openrouter_opus_profile(), env).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("OPENROUTER_API_KEY"), "error should name the missing key: {msg}");
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "error should name the missing key: {msg}"
+        );
     }
 
     #[test]
@@ -1307,42 +1250,40 @@ mod tests {
             ("OLLAMA_API_KEY", "fake"),
             ("SENTINEL_AUDITOR_MODEL", "something-else"),
         ]);
-        let auditor =
-            RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
+        let auditor = RigAuditor::for_profile_with(&ollama_kimi_profile(), env).unwrap();
         assert_eq!(
             auditor.model_id, "kimi-k2.6",
             "router-chosen profile model_id must override env"
         );
     }
 
-    /// Stub router that returns a canned `AgentId` from `route()` and
+    /// TestDouble router that returns a canned `AgentId` from `route()` and
     /// records that the requirement carries the A3 separate-vendor
     /// constraint. Used to test `via_router` without spinning up a
     /// real `TomlCapabilityRouter`.
-    struct StubRouter {
+    struct TestDoubleRouter {
         chosen: AgentId,
     }
 
-    impl CapabilityRouterPort for StubRouter {
+    impl CapabilityRouterPort for TestDoubleRouter {
         fn route(
             &self,
             requirement: &CapabilityRequirement,
         ) -> std::result::Result<AgentId, RoutingError> {
             // Assert the A3 requirement shape — fail loudly if the
             // caller forgot any of the required capabilities.
-            let has_different_vendor = requirement.required.iter().any(|c| {
-                matches!(c, Capability::DifferentVendorFrom(_))
-            });
+            let has_different_vendor = requirement
+                .required
+                .iter()
+                .any(|c| matches!(c, Capability::DifferentVendorFrom(_)));
             assert!(
                 has_different_vendor,
                 "via_router must include DifferentVendorFrom in the A3 requirement"
             );
-            let has_auditor_schema = requirement.required.iter().any(|c| {
-                matches!(
-                    c,
-                    Capability::StructuredOutput(SchemaRef::AuditorVerdict)
-                )
-            });
+            let has_auditor_schema = requirement
+                .required
+                .iter()
+                .any(|c| matches!(c, Capability::StructuredOutput(SchemaRef::AuditorVerdict)));
             assert!(
                 has_auditor_schema,
                 "via_router must require AuditorVerdict StructuredOutput"
@@ -1368,17 +1309,12 @@ mod tests {
     #[test]
     fn via_router_picks_chosen_agent_and_constructs_for_it() {
         let profiles = vec![openrouter_opus_profile(), ollama_kimi_profile()];
-        let router = StubRouter {
+        let router = TestDoubleRouter {
             chosen: AgentId::new("kimi-k2-6-ollama-cloud").unwrap(),
         };
         let env = env_map(&[("OLLAMA_API_KEY", "fake-cloud-key")]);
-        let result = RigAuditor::via_router_with(
-            &router,
-            &profiles,
-            VendorClass::Anthropic,
-            env,
-        )
-        .unwrap();
+        let result =
+            RigAuditor::via_router_with(&router, &profiles, VendorClass::Anthropic, env).unwrap();
         assert_eq!(result.provider_prefix, "ollama-cloud");
         assert_eq!(result.model_id, "kimi-k2.6");
     }
@@ -1386,17 +1322,12 @@ mod tests {
     #[test]
     fn via_router_errors_when_chosen_agent_id_not_in_catalog() {
         let profiles = vec![openrouter_opus_profile()];
-        let router = StubRouter {
+        let router = TestDoubleRouter {
             chosen: AgentId::new("ghost-agent").unwrap(),
         };
         let env = env_map(&[("OPENROUTER_API_KEY", "sk-fake")]);
-        let err = RigAuditor::via_router_with(
-            &router,
-            &profiles,
-            VendorClass::Anthropic,
-            env,
-        )
-        .unwrap_err();
+        let err = RigAuditor::via_router_with(&router, &profiles, VendorClass::Anthropic, env)
+            .unwrap_err();
         assert!(
             format!("{err}").contains("ghost-agent"),
             "error should name the orphaned AgentId: {err}"
@@ -1405,10 +1336,7 @@ mod tests {
 
     struct EmptyRouter;
     impl CapabilityRouterPort for EmptyRouter {
-        fn route(
-            &self,
-            _r: &CapabilityRequirement,
-        ) -> std::result::Result<AgentId, RoutingError> {
+        fn route(&self, _r: &CapabilityRequirement) -> std::result::Result<AgentId, RoutingError> {
             Err(RoutingError::NoAgentSatisfies(vec![]))
         }
         fn candidates(&self, _r: &CapabilityRequirement) -> Vec<AgentId> {
@@ -1429,13 +1357,8 @@ mod tests {
     fn via_router_errors_when_router_returns_no_agent_satisfies() {
         let profiles: Vec<AgentCapabilityProfile> = vec![];
         let env = env_map(&[]);
-        let err = RigAuditor::via_router_with(
-            &EmptyRouter,
-            &profiles,
-            VendorClass::Anthropic,
-            env,
-        )
-        .unwrap_err();
+        let err = RigAuditor::via_router_with(&EmptyRouter, &profiles, VendorClass::Anthropic, env)
+            .unwrap_err();
         assert!(format!("{err}").contains("router could not pick"));
     }
 
@@ -1444,7 +1367,7 @@ mod tests {
     // These do NOT run in the default suite. Operators verify connectivity +
     // model availability with:
     //
-    //   OLLAMA_API_KEY=... SENTINEL_AUDITOR_PROVIDER=ollama \
+    //   OLLAMA_API_KEY=... \
     //   SENTINEL_AUDITOR_MODEL=kimi-k2.6 \
     //   cargo test -p sentinel-infrastructure --lib \
     //     dry_run_auditor::tests::live_ollama -- --ignored --nocapture
@@ -1471,7 +1394,9 @@ mod tests {
             auditor.provider_prefix, auditor.model_id, auditor.timeout
         );
         let dry_run = fixture_dry_run();
-        let verdict = auditor.score(&dry_run).expect("score returned AuditorError");
+        let verdict = auditor
+            .score(&dry_run)
+            .expect("score returned AuditorError");
         eprintln!(
             "  verdict: decision={:?} confidence={:.2} auditor_model={}",
             verdict.decision, verdict.confidence, verdict.auditor_model

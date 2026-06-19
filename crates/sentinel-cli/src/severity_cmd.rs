@@ -1,83 +1,96 @@
 //! `sentinel severity scan [--apply]` — LLM-judged Linear ticket priority.
 //!
 //! Reads the Linear issue cache and asks BOTH Opus 4.8 and GPT-5.5 to judge
-//! each ticket's severity (1-4), reconciling the two verdicts. Shadow by
-//! default (read-only, mutates nothing). See
+//! each ticket's severity (1-4), reconciling the two verdicts. Report-only by
+//! default. See
 //! `sentinel-application::severity`.
 //!
 //! ## The human-confirm rule
 //!
-//! Shadow-by-default means the `set` path (gap-fill a ticket with NO priority)
-//! only runs under `--apply`. For a ticket that ALREADY has a priority the spec
-//! wants a human to confirm BEFORE a suggestion is posted — but a CLI can't ask
-//! an interactive question safely in this harness. So in `--apply` mode this
-//! command applies ONLY the `set` actions (untriaged gap-fills) automatically;
-//! the `suggest` actions (priority already set) are written to the report and
-//! NOT auto-posted. A clear note tells the operator that suggestions need
-//! manual review — the in-session MCP path / a human confirms and posts them.
+//! Report-only by default means mutation is off. Under `--apply`, the scan still
+//! only produces proposal rows first; then this command replays proposal rows
+//! through the infrastructure severity LangGraph before issuing any
+//! `issueUpdate`. The graph only authorizes gap-fill `set` actions; `suggest`
+//! actions remain report-only and require human review.
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use sentinel_application::severity::scan_severity;
+use sentinel_application::severity::{scan_severity, SeverityProposal};
 use sentinel_infrastructure::openrouter_llm::OpenRouterLlm;
+use sentinel_infrastructure::severity_graph::{
+    apply_severity_proposal, build_severity_mutation_graph,
+};
 
-/// `--apply` arms the gap-fill (`set`) mutations; suggestions are never
-/// auto-posted from the CLI (they require human confirmation — see module doc).
+use crate::severity_graph_audit::{
+    audit_severity_proposals, load_severity_proposals, severity_graph_row,
+};
+
+/// `--apply` arms graph-backed gap-fill (`set`) mutations; suggestions are
+/// never auto-posted from the CLI.
 pub async fn run(apply: bool) -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let sentinel_dir: PathBuf = home.join(".claude").join("sentinel");
+    let sentinel_dir: PathBuf = sentinel_infrastructure::paths::sentinel_root();
     let linear_cache = sentinel_dir.join("linear-assigned.json");
     let output = sentinel_dir.join("metrics").join("severity.json");
+    let proposals_jsonl = output.with_extension("jsonl");
+    let graph_runs = output.with_extension("graph-runs.jsonl");
 
     println!("{}", "Sentinel Auto-Severity".bold());
     println!("Linear cache:   {}", linear_cache.display());
     println!("Output summary: {}", output.display());
+    println!("Graph audit:    {}", graph_runs.display());
     let mode = if apply {
-        "APPLY (gap-fills set; suggestions report-only)".yellow().bold()
+        "APPLY (graph-backed gap-fills set; suggestions report-only)"
+            .yellow()
+            .bold()
     } else {
-        "SHADOW (read-only — mutates nothing)".green().bold()
+        "REPORT (read-only, mutates nothing)".green().bold()
     };
     println!("Mode:           {mode}");
     println!();
 
-    // Build the OpenRouter LLM. Missing key is a graceful no-op, not a crash.
-    let Ok(llm) = OpenRouterLlm::from_env() else {
-        println!(
-            "{}",
-            "OPENROUTER_API_KEY is not set — auto-severity needs it to call Opus 4.8 + \
-             GPT-5.5. Set the key and re-run. (No tickets were scanned.)"
-                .yellow()
-        );
-        return Ok(());
+    // Auto-severity is model-authoritative; do not silently downgrade to a no-op.
+    let llm = OpenRouterLlm::from_env().context(
+        "OPENROUTER_API_KEY is required for auto-severity; refusing to run without model authority",
+    )?;
+
+    // The Linear token is only needed for the graph-backed apply path.
+    let linear_token = if apply {
+        Some(std::env::var("SENTINEL_LINEAR_TOKEN").context(
+            "--apply requires SENTINEL_LINEAR_TOKEN; refusing to downgrade to a read-only scan",
+        )?)
+    } else {
+        None
     };
 
-    // The Linear token is only needed for the apply path. Suggestions are never
-    // auto-posted from the CLI, so we pass the token only when applying so the
-    // module's `set` mutations can run; the `suggest` rows stay report-only
-    // because we surface them without the CLI confirming them (the module posts
-    // a suggestion only when invoked directly with apply+token — the in-session
-    // MCP/human path owns that confirmation, not this command).
-    let linear_token = std::env::var("SENTINEL_LINEAR_TOKEN").ok();
-    if apply && linear_token.is_none() {
-        println!(
-            "{}",
-            "--apply was set but SENTINEL_LINEAR_TOKEN is not configured — nothing can be \
-             written. Falling back to a shadow report."
-                .yellow()
-        );
-    }
-
-    // In apply mode we pass the token so `set` (gap-fill) mutations fire. The
-    // command intentionally does NOT confirm-and-post `suggest` rows — those are
-    // reported for manual review per the human-confirm rule.
-    let token_for_scan = if apply { linear_token.as_deref() } else { None };
-
-    let summary = scan_severity(&linear_cache, &output, &llm, apply, token_for_scan)
+    let mut summary = scan_severity(&linear_cache, &output, &llm)
         .await
         .context("scan_severity failed")?;
+
+    let proposals = load_severity_proposals(&proposals_jsonl)?;
+    if apply {
+        if let Some(token) = linear_token.as_deref() {
+            let apply_audit = apply_gap_fills(&proposals, &graph_runs, token).await?;
+            summary.applied = apply_audit.applied;
+            summary.report_only = apply_audit.applied == 0;
+            std::fs::write(&output, serde_json::to_vec_pretty(&summary)?)
+                .with_context(|| format!("write updated severity summary {}", output.display()))?;
+            println!(
+                "Graph decisions: {} set-authorized, {} skipped",
+                apply_audit.authorized_sets.to_string().green().bold(),
+                apply_audit.skipped.to_string().dimmed()
+            );
+        }
+    } else {
+        let graph_audit = audit_severity_proposals(&proposals, &graph_runs).await?;
+        println!(
+            "Graph decisions: {} set-authorized, {} skipped",
+            graph_audit.authorized_sets.to_string().yellow().bold(),
+            graph_audit.skipped.to_string().dimmed()
+        );
+    }
 
     if summary.tickets_scanned == 0 {
         println!(
@@ -90,7 +103,7 @@ pub async fn run(apply: bool) -> Result<()> {
     }
 
     // Per-ticket report from the JSONL the scan wrote.
-    print_proposals(&output.with_extension("jsonl"));
+    print_proposals(&proposals_jsonl);
 
     println!();
     println!("{}", "==== AUTO-SEVERITY ====".bold());
@@ -100,18 +113,17 @@ pub async fn run(apply: bool) -> Result<()> {
     print_count_line("Model disagreements (Opus != GPT)", summary.disagreements);
     println!();
 
-    if summary.shadow {
+    if apply && linear_token.is_some() {
         println!(
-            "{}",
-            "Shadow run — no Linear mutations performed. Re-run with --apply to gap-fill \
-             untriaged tickets."
-                .dimmed()
-        );
-    } else {
-        println!(
-            "  {} mutation(s) applied (gap-fill `set` only).",
+            "  {} graph-backed mutation(s) applied (gap-fill `set` only).",
             summary.applied.to_string().green().bold()
         );
+        if summary.applied == 0 {
+            println!(
+                "{}",
+                "No graph-authorized Linear priority mutations were needed.".dimmed()
+            );
+        }
         println!(
             "{}",
             "Note: SUGGEST actions (tickets that already have a priority) were NOT auto-posted. \
@@ -119,9 +131,106 @@ pub async fn run(apply: bool) -> Result<()> {
              the in-session MCP path."
                 .yellow()
         );
+    } else if summary.report_only {
+        println!(
+            "{}",
+            "Report-only run: no Linear mutations performed. Re-run with --apply to gap-fill \
+             untriaged tickets."
+                .dimmed()
+        );
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeverityApplyAudit {
+    applied: usize,
+    authorized_sets: usize,
+    skipped: usize,
+}
+
+async fn apply_gap_fills(
+    proposals: &[SeverityProposal],
+    graph_jsonl: &std::path::Path,
+    token: &str,
+) -> Result<SeverityApplyAudit> {
+    let graph = build_severity_mutation_graph()
+        .await
+        .map_err(|e| anyhow::anyhow!("build severity mutation graph: {e}"))?;
+    let client = reqwest::Client::new();
+    let mut applied = 0usize;
+    let mut authorized_sets = 0usize;
+    let mut skipped = 0usize;
+    let graph_file = std::fs::File::create(graph_jsonl)
+        .with_context(|| format!("create severity graph audit {}", graph_jsonl.display()))?;
+    let mut graph_writer = BufWriter::new(graph_file);
+    for proposal in proposals {
+        let result = apply_severity_proposal(&client, token, &graph, &proposal)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "severity graph apply failed for {}: {e}",
+                    proposal.identifier
+                )
+            })?;
+        let authorization_checkpoint = result
+            .authorization
+            .as_ref()
+            .map(|authorization| authorization.checkpoint_ref());
+        let decision = format!("{:?}", result.run.state.decision).to_ascii_lowercase();
+        let thread_id = result.run.thread_id.clone();
+        if authorization_checkpoint.is_some() {
+            authorized_sets += 1;
+        } else {
+            skipped += 1;
+        }
+        let audit_row = severity_graph_row(
+            &proposal.identifier,
+            &decision,
+            authorization_checkpoint.as_deref(),
+            &thread_id,
+            Some(result.applied),
+            serde_json::to_value(&result.run)?,
+        );
+        serde_json::to_writer(&mut graph_writer, &audit_row).with_context(|| {
+            format!(
+                "write severity graph audit row for {} to {}",
+                proposal.identifier,
+                graph_jsonl.display()
+            )
+        })?;
+        graph_writer.write_all(b"\n").with_context(|| {
+            format!(
+                "terminate severity graph audit row for {} in {}",
+                proposal.identifier,
+                graph_jsonl.display()
+            )
+        })?;
+        applied += usize::from(result.applied);
+        if result.applied {
+            let authorization = result.authorization.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "severity graph applied {} without checkpoint authorization",
+                    proposal.identifier
+                )
+            })?;
+            println!(
+                "  {} {} via {}",
+                "SET".green().bold(),
+                proposal.identifier,
+                authorization.checkpoint_ref()
+            );
+        }
+    }
+    graph_writer
+        .flush()
+        .with_context(|| format!("flush severity graph audit {}", graph_jsonl.display()))?;
+    Ok(SeverityApplyAudit {
+        applied,
+        authorized_sets,
+        skipped,
+    })
 }
 
 /// Stream the JSONL proposal rows into a compact per-ticket report.
@@ -133,16 +242,32 @@ fn print_proposals(jsonl: &std::path::Path) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let id = v.get("identifier").and_then(serde_json::Value::as_str).unwrap_or("?");
-        let proposed = v.get("proposed_priority").and_then(serde_json::Value::as_i64).unwrap_or(0);
-        let action = v.get("action").and_then(serde_json::Value::as_str).unwrap_or("?");
-        let agreed = v.get("models_agreed").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let id = v
+            .get("identifier")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let proposed = v
+            .get("proposed_priority")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let action = v
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let agreed = v
+            .get("models_agreed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         let action_disp = match action {
             "set" => action.green().to_string(),
             "suggest" => action.yellow().to_string(),
             _ => action.dimmed().to_string(),
         };
-        let flag = if agreed { String::new() } else { "  ⚠ models disagreed".dimmed().to_string() };
+        let flag = if agreed {
+            String::new()
+        } else {
+            "  ⚠ models disagreed".dimmed().to_string()
+        };
         println!("  {id:14} P{proposed}  [{action_disp}]{flag}");
     }
 }

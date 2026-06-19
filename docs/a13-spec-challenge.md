@@ -280,7 +280,7 @@ Mitigation: the scoring agent and the acting agent share no training data; the o
 
 ### 9.3 Challenge categories interpreted as legalistic compliance
 
-If agents start writing challenges in a stilted bureaucratic way to satisfy the format, the artifact becomes noise. Mitigation: format examples shipped with prompt templates; operator-facing dashboards surface challenge quality trends; sustained quality decay triggers operator review.
+If agents start writing challenges in a stilted bureaucratic way to satisfy the format, the artifact becomes noise. Mitigation: format examples shipped with prompt templates; operator-facing reports surface challenge quality trends; sustained quality decay triggers operator review.
 
 ### 9.4 The challenge process slows everything
 
@@ -313,7 +313,7 @@ A13 produces gaps; BA4 (when ratified) turns them into stakeholder questions. If
 
 3. **Lookback window for tool-call coverage.** How long does a challenge approve subsequent actions? Recommend: 10 minutes or until the work_id / spec_hash changes, whichever first.
 
-4. **Interaction with consul peer registration (ADR-016).** When a consul peer issues a directive, does the peer's identity influence A13's strictness? (E.g., human-operator peers might be trusted to operate without challenge for some Irreversible actions.) Recommend no — challenge is about the agent's *interpretation*, not the directive's *source*. Human operators can still override.
+4. **Interaction with Legatus AI peer registration (ADR-016).** When a Legatus AI peer issues a directive, does the peer's identity influence A13's strictness? (E.g., human-operator peers might be trusted to operate without challenge for some Irreversible actions.) Recommend no — challenge is about the agent's *interpretation*, not the directive's *source*. Human operators can still override.
 
 5. **Challenge artifact size limits.** A pathologically verbose challenge could exceed reasonable size. Recommend: per-category item count caps (default 20 per category); reasoning text length caps (1000 chars per item); operator-tunable.
 

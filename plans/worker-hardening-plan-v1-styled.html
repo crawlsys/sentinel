@@ -1536,7 +1536,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
             <tr><td><code>POST</code></td><td><code>/verify</code></td><td>Sentinel CLI</td><td>On-demand verification (e.g., before git push)</td></tr>
             <tr><td><code>POST</code></td><td><code>/check-run</code></td><td>Internal</td><td>Post GitHub check run status</td></tr>
             <tr><td><code>GET</code></td><td><code>/health</code></td><td>Any</td><td>Health check</td></tr>
-            <tr><td><code>GET</code></td><td><code>/session/:id</code></td><td>Dashboard</td><td>Session state for debugging</td></tr>
+            <tr><td><code>GET</code></td><td><code>/session/:id</code></td><td>Report</td><td>Session state for debugging</td></tr>
           </tbody>
         </table>
       </div>
@@ -2135,7 +2135,7 @@ outbox.<span class="fn">notify</span>();        <span class="cmt">// Wakes backg
       <ul>
         <li>Proxy runs as a separate OS user/service account</li>
         <li>Sentinel monitors for <code>curl</code>/<code>wget</code>/<code>Invoke-WebRequest</code> calls to Anthropic domains (AnomalyKind::DirectApiAttempt)</li>
-        <li>Worker cross-references proxy logs vs Anthropic usage dashboard for discrepancies</li>
+        <li>Worker cross-references proxy logs vs Anthropic usage report for discrepancies</li>
       </ul>
 
       <h3 id="s8-8">8.8 HMAC Canonicalization</h3>

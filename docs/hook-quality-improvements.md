@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-Three concrete hook-quality issues surfaced during the session that just wired Sentinel's hook engine end-to-end. Each is a small, targeted fix; together they materially improve the day-one experience of Sentinel running on top of an existing development workflow. All three honor hex/DDD layering (no IO in `consul-domain`-style purity — sentinel's equivalent is `sentinel-domain` having no IO; these fixes touch `sentinel-application/src/hooks/`, with one optional port extension).
+Three concrete hook-quality issues surfaced during the session that just wired Sentinel's hook engine end-to-end. Each is a small, targeted fix; together they materially improve the day-one experience of Sentinel running on top of an existing development workflow. All three honor hex/DDD layering (no IO in `legatus-ai-domain`-style purity — sentinel's equivalent is `sentinel-domain` having no IO; these fixes touch `sentinel-application/src/hooks/`, with one optional port extension).
 
 The issues, in priority order:
 
@@ -228,7 +228,7 @@ During the session, `doc_drift` injected the following finding into the user's c
 > 1. **BUILDING.md**: Missing BUILDING.md — project has no build documentation
 >    - Run `sentinel init` to generate this file from templates
 
-The active project was a multi-purpose firefly working tree containing several distinct sub-repositories (sentinel, legatus-consul-agent, firefly-pro-crm, etc.). The hook fired against the *top-level firefly directory* — which is not itself a Sentinel-template project — and demanded `BUILDING.md`.
+The active project was a multi-purpose firefly working tree containing several distinct sub-repositories (sentinel, legatus-ai, firefly-pro-crm, etc.). The hook fired against the *top-level firefly directory* — which is not itself a Sentinel-template project — and demanded `BUILDING.md`.
 
 This is a false positive of a slightly different shape than Issue 1. The detector is right that no `BUILDING.md` exists; it's wrong that one *should* exist in this location. The detector lacks context: it doesn't distinguish "project that should follow Sentinel's canonical template" from "non-Sentinel-template directory containing some Sentinel-template projects."
 

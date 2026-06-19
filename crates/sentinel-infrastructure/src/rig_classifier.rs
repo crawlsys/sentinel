@@ -163,7 +163,7 @@ SKILL CATALOG:
 
 /// Build skill catalog from ~/.claude/skills/ directory
 pub fn build_skill_catalog() -> String {
-    let skills_dir = match dirs::home_dir() {
+    let skills_dir = match crate::paths::home_root() {
         Some(h) => h.join(".claude").join("skills"),
         None => return String::from("(no skills directory found)"),
     };

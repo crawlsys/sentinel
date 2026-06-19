@@ -5,13 +5,15 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-pub fn run(window_days: u32) -> Result<()> {
+pub async fn run(window_days: u32) -> Result<()> {
     let output_dir = sentinel_application::pr_review::default_output_dir()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    let graph_runs = output_dir.join("pr-review-summary.graph-runs.jsonl");
 
     println!("{}", "Sentinel PR-Review Scan".bold());
     println!("Window:   last {window_days} days");
     println!("Output:   {}", output_dir.display());
+    println!("Graph:    {}", graph_runs.display());
     println!();
 
     let repos: Vec<&str> = sentinel_application::pr_review::DEFAULT_REPOS.to_vec();
@@ -23,9 +25,21 @@ pub fn run(window_days: u32) -> Result<()> {
 
     let report = sentinel_application::pr_review::scan_pr_reviews(window_days, &repos, &output_dir)
         .context("scan_pr_reviews failed")?;
+    let graph_audit = crate::pr_review_graph::run_pr_review_graph_audit(&report, &graph_runs)
+        .await
+        .context("PR review graph audit failed")?;
 
     println!("{}", "Summary".bold());
     println!("  Total merged PRs:           {}", report.total_prs);
+    println!(
+        "  Graph decision:             {} ({})",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("PR review graph audit requires checkpoint")
+            .dimmed()
+    );
     println!(
         "  Avg comments per PR:        {:.2}",
         report.avg_comments_per_pr

@@ -23,20 +23,14 @@
 //!
 //! ## Trust model
 //!
-//! - **Hash-only mode** (no signature): used in dev. Producer just records
-//!   the hash; consumer re-hashes and refuses to load if the hash drifted.
-//!   Catches accidental edits and bit-rot but offers no integrity vs. a
-//!   sophisticated attacker who can edit the manifest too.
-//!
-//! - **Signed mode**: producer signs the hash with an Ed25519 key.
+//! - **Signed verification**: producer signs the hash with an Ed25519 key.
 //!   Consumer verifies against a configured public key. Catches any
 //!   tampering of either the source or the manifest, assuming the
 //!   public key is delivered out-of-band (in a binary, in a TUF root,
 //!   or pinned in code).
 //!
-//! Both modes share the same on-disk format — the `signature` field is
-//! just `None` in hash-only mode. This keeps the verify path uniform:
-//! one struct, one parser, two trust levels.
+//! - **Hash-only inspection**: non-authoritative helper for tests and local
+//!   drift checks. Strict verification rejects unsigned entries.
 //!
 //! ## Canonical hash
 //!
@@ -78,7 +72,7 @@ pub struct ManifestEntry {
     /// Optional Ed25519 signature over the bytes of `hash` (NOT over the
     /// canonical source — keeps signatures and hashes verifiable
     /// independently). Hex-encoded 64-byte signature when present,
-    /// `None` in hash-only mode.
+    /// `None` only for non-authoritative hash inspection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 }
@@ -93,8 +87,8 @@ pub struct StepConfigManifest {
     pub version: u32,
 
     /// Optional hex-encoded Ed25519 public key the entries are signed
-    /// with. Optional because hash-only manifests don't carry one. When
-    /// present, consumers verify each signed entry against this key.
+    /// with. Strict verification requires either this key or an out-of-band
+    /// key supplied by the caller.
     /// Including the key in the manifest is a convenience — the
     /// *trust* in the key still has to come from an out-of-band channel
     /// (binary, TUF root, pinned constant). Don't be fooled into
@@ -157,9 +151,9 @@ impl StepConfigManifest {
         hex::encode(digest)
     }
 
-    /// Add (or replace) an unsigned entry — hash-only mode. If an entry
-    /// with the same `name` exists it's overwritten so re-running this
-    /// is idempotent.
+    /// Add (or replace) an unsigned entry for non-authoritative hash
+    /// inspection. If an entry with the same `name` exists it's overwritten
+    /// so re-running this is idempotent.
     pub fn upsert_hash_only(&mut self, name: impl Into<String>, source: &str) {
         let name = name.into();
         let hash = Self::compute_hash(source);
@@ -199,7 +193,6 @@ impl StepConfigManifest {
     /// Verify one entry against fresh source bytes.
     ///
     /// Returns:
-    /// - `Ok(ManifestCheck::HashOnlyOk)` — hash matches, no signature on file.
     /// - `Ok(ManifestCheck::SignedOk)` — hash matches AND signature verifies
     ///   against the supplied public key.
     /// - `Err(ManifestError::HashMismatch)` — the source's canonical hash
@@ -208,9 +201,10 @@ impl StepConfigManifest {
     /// - `Err(ManifestError::MissingEntry)` — no entry by that name.
     /// - `Err(ManifestError::Signature(_))` — signature exists but is
     ///   malformed or doesn't verify.
+    /// - `Err(ManifestError::SignatureRequired)` — hash matches, but the
+    ///   entry is unsigned. Call `verify_entry_hash_only` for local hash checks.
     /// - `Err(ManifestError::PublicKeyRequired)` — entry is signed but no
-    ///   verifying key was supplied. Producers can request hash-only
-    ///   consumers to "verify hash, ignore signature" via `verify_entry_hash_only`.
+    ///   verifying key was supplied.
     pub fn verify_entry(
         &self,
         name: &str,
@@ -229,7 +223,7 @@ impl StepConfigManifest {
         }
 
         match (&entry.signature, verifying_key) {
-            (None, _) => Ok(ManifestCheck::HashOnlyOk),
+            (None, _) => Err(ManifestError::SignatureRequired),
             (Some(_), None) => Err(ManifestError::PublicKeyRequired),
             (Some(sig_hex), Some(key)) => {
                 let sig_bytes = hex::decode(sig_hex)
@@ -247,11 +241,11 @@ impl StepConfigManifest {
         }
     }
 
-    /// Hash-only check — useful for dev where you trust the local file
-    /// system and just want bit-rot protection. Same as `verify_entry`
-    /// minus signature handling, so a signed entry that has the right
-    /// hash but a wrong (or missing) key still returns `Ok(...)`. Use
-    /// `verify_entry` for production paths.
+    /// Hash-only check — a local integrity helper for tests and explicit
+    /// non-authoritative inspection. Same hash comparison as `verify_entry`
+    /// minus signature handling, so a signed entry that has the right hash
+    /// but a wrong or missing key still returns `Ok(...)`. Production paths
+    /// use `verify_entry`.
     pub fn verify_entry_hash_only(
         &self,
         name: &str,
@@ -276,8 +270,8 @@ impl StepConfigManifest {
 /// Successful manifest-check outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestCheck {
-    /// The entry has no signature; hash matched. Trust level is "no edit
-    /// drift detected." Acceptable in dev; risky in prod.
+    /// The hash matched without signature verification. This is returned only
+    /// by explicit hash-only verification.
     HashOnlyOk,
     /// The entry was signed and the signature verified against the
     /// supplied key. Trust level is "signed by holder of the matching
@@ -295,8 +289,10 @@ pub enum ManifestError {
     HashMismatch,
     /// Entry is signed but the caller supplied no verifying key. Either
     /// fix the caller to supply one (production path) or call
-    /// `verify_entry_hash_only` (dev path).
+    /// `verify_entry_hash_only` for non-authoritative hash inspection.
     PublicKeyRequired,
+    /// Entry is unsigned. Strict manifest verification requires a signature.
+    SignatureRequired,
     /// Signature is present and a key was supplied, but the signature
     /// failed to decode or verify.
     Signature(SignatureError),
@@ -310,6 +306,7 @@ impl std::fmt::Display for ManifestError {
             Self::PublicKeyRequired => {
                 write!(f, "manifest entry is signed but no public key was supplied")
             }
+            Self::SignatureRequired => write!(f, "manifest entry is unsigned"),
             Self::Signature(e) => write!(f, "signature error: {e}"),
         }
     }
@@ -400,6 +397,19 @@ mod tests {
             m.verify_entry_hash_only("linear", src),
             Ok(ManifestCheck::HashOnlyOk)
         ));
+    }
+
+    #[test]
+    fn strict_verify_rejects_unsigned_entry() {
+        let key = fresh_key();
+        let mut m = StepConfigManifest::new();
+        let src = "name = \"linear\"\n";
+        m.upsert_hash_only("linear", src);
+
+        let err = m
+            .verify_entry("linear", src, Some(&key.verifying_key()))
+            .expect_err("strict verification must reject unsigned entries");
+        assert_eq!(err, ManifestError::SignatureRequired);
     }
 
     #[test]

@@ -164,15 +164,10 @@ fn summarize(chain: &ProofChain) -> ArchivedChainSummary {
         })
         .collect();
 
-    let phase_count = chain.proofs.len()
-        + chain
-            .entries
-            .iter()
-            .filter(|e| matches!(e, ProofEntry::Phase(_)))
-            .count();
+    let phase_count = chain.phase_count();
 
-    let all_sufficient = step_entries.iter().all(|s| s.judge_verdict.sufficient)
-        && chain.proofs.iter().all(|p| p.judge_verdict.sufficient);
+    let all_sufficient =
+        step_entries.iter().all(|s| s.judge_verdict.sufficient) && chain.phases_all_sufficient();
 
     let step_sequence: Vec<String> = step_entries
         .iter()
@@ -228,15 +223,13 @@ pub fn archive_chains(state: &SessionState, fs: &dyn FileSystemPort, home: &Path
     fs.create_dir_all(&proofs_dir(home))
         .context("create proofs archive dir")?;
 
-    for (skill, chain) in &state.proof_chains {
-        if let Err(e) = archive_one_chain(fs, home, skill, chain) {
-            tracing::warn!(
-                skill = %skill,
-                session_id = %chain.session_id,
-                error = %e,
-                "proof chain archive failed for chain — continuing"
-            );
-        }
+    for (skill, chain) in state.proof_chains() {
+        archive_one_chain(fs, home, skill, chain).with_context(|| {
+            format!(
+                "archive proof chain for skill '{skill}' in session '{}'",
+                chain.session_id
+            )
+        })?;
     }
     Ok(())
 }
@@ -264,24 +257,19 @@ fn archive_one_chain(
     // a crashed Stop can't leave half-written JSON in the bucket.
     let tmp_path = path.with_file_name(format!(
         ".{}.tmp",
-        path.file_name().map_or_else(|| "chain".to_string(), |n| n.to_string_lossy().into_owned())
+        path.file_name()
+            .map_or_else(|| "chain".to_string(), |n| n.to_string_lossy().into_owned())
     ));
     fs.write(&tmp_path, &json_bytes)
         .context("write archived chain tmp file")?;
-    // Rename through std::fs since the port doesn't expose rename. Fall
-    // back to a plain write if rename fails (cross-device or permissions
-    // edge cases) — better to have a non-atomic write than no archive.
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        tracing::warn!(
-            error = %e,
-            path = %path.display(),
-            "atomic rename failed — falling back to direct write"
-        );
-        fs.write(&path, &json_bytes)
-            .context("fallback direct write of archived chain")?;
-        // Best-effort cleanup of the leftover tmp.
-        let _ = std::fs::remove_file(&tmp_path);
-    }
+    // Rename through std::fs since the port doesn't expose rename. Atomicity is
+    // part of the proof-corpus contract: if rename fails, fail closed instead
+    // of downgrading to a non-atomic direct write.
+    std::fs::rename(&tmp_path, &path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_path);
+        })
+        .with_context(|| format!("atomic rename archived chain to {}", path.display()))?;
 
     // Append to index only if no entry yet — idempotency.
     if !index_has_entry(fs, home, session_id, skill) {
@@ -340,19 +328,35 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-            std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            std::fs::read_to_string(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(par)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-            std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            std::fs::create_dir_all(p)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             std::fs::read_dir(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -363,20 +367,29 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
-        fn append(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write;
             if let Some(par) = p.parent() {
-                std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                std::fs::create_dir_all(par)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
             }
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(p)
                 .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
-            f.write_all(c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            f.write_all(c)
+                .map_err(sentinel_domain::port_errors::FileSystemError::backend)
         }
     }
 
@@ -401,6 +414,7 @@ mod tests {
             combined_hash,
             judge_model: "kimi".to_string(),
             judge_verdict: JudgeVerdict::pass(0.95, "ok"),
+            signature: None,
             started_at: now,
             completed_at: now,
             duration_ms: 1,
@@ -413,7 +427,7 @@ mod tests {
         let phase = make_phase_proof("claim", skill, session_id, GENESIS_HASH);
         let mut chain = ProofChain::new(skill, session_id);
         chain.add_proof(phase).unwrap();
-        state.proof_chains.insert(skill.to_string(), chain);
+        state.restore_proof_chain(skill.to_string(), chain);
         state
     }
 
@@ -455,7 +469,7 @@ mod tests {
         assert_eq!(summary.schema_version, SCHEMA_VERSION);
         assert_eq!(summary.session_id, "sess-1");
         assert_eq!(summary.skill, "linear");
-        // build_state currently produces a phase-only chain (no step proofs).
+        // build_state currently produces a phase-entry chain with no step proofs.
         // step_count == 0 is the correct assertion for this fixture; the
         // step-count > 0 path is exercised in the live-session tests in
         // mcp_handler::query_proof_corpus_returns_summaries_for_live_chains.
@@ -524,7 +538,7 @@ mod tests {
             let phase = make_phase_proof("claim", skill, "sess-1", GENESIS_HASH);
             let mut chain = ProofChain::new(skill, "sess-1");
             chain.add_proof(phase).unwrap();
-            state.proof_chains.insert(skill.to_string(), chain);
+            state.restore_proof_chain(skill.to_string(), chain);
         }
 
         archive_chains(&state, &fs, tmp.path()).unwrap();
@@ -534,6 +548,32 @@ mod tests {
         let idx = std::fs::read_to_string(index_path(tmp.path())).unwrap();
         let lines: Vec<&str> = idx.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 2, "two skills => two index lines");
+    }
+
+    #[test]
+    fn archive_fails_closed_when_atomic_rename_fails() {
+        let _g = ENV_LOCK.lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let state = build_state("sess-1", "linear");
+        std::fs::create_dir_all(chain_path(tmp.path(), "sess-1", "linear")).unwrap();
+
+        let err = archive_chains(&state, &fs, tmp.path()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("archive proof chain for skill 'linear'"),
+            "archive_chains must surface the failing chain context: {text}"
+        );
+        assert!(
+            text.contains("atomic rename archived chain"),
+            "archive_chains must fail at the atomic proof-corpus boundary: {text}"
+        );
+        assert!(
+            !index_path(tmp.path()).exists(),
+            "failed chain archive must not append an index entry"
+        );
     }
 
     #[test]

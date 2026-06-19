@@ -80,8 +80,13 @@ pub enum EnforcerError {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
-    ConnectionInit { payload: Value },
-    Subscribe { id: String, payload: SubscribePayload },
+    ConnectionInit {
+        payload: Value,
+    },
+    Subscribe {
+        id: String,
+        payload: SubscribePayload,
+    },
     Pong,
 }
 
@@ -94,7 +99,10 @@ enum ServerMsg {
         id: String,
         payload: NextPayload,
     },
-    Error { id: String, payload: Value },
+    Error {
+        id: String,
+        payload: Value,
+    },
     Complete {
         #[allow(dead_code)]
         id: String,
@@ -184,7 +192,7 @@ pub enum SlaVerdict {
 /// Pure SLA evaluation — `now` is injected so this stays testable and free of
 /// `Utc::now()` in domain-ish logic. Prefers Linear's NATIVE `slaHighRiskAt`
 /// threshold when present (fires `HighRisk` once `now >= slaHighRiskAt`);
-/// falls back to the ≥80%-elapsed heuristic when Linear doesn't supply one.
+/// otherwise applies Sentinel's ≥80%-elapsed high-risk policy.
 #[must_use]
 pub fn evaluate_sla(
     priority: Option<i64>,
@@ -194,8 +202,11 @@ pub fn evaluate_sla(
     now: chrono::DateTime<chrono::Utc>,
 ) -> SlaVerdict {
     use chrono::DateTime;
-    let parse =
-        |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&chrono::Utc));
+    let parse = |s: &str| {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
     match sla_breaches_at {
         Some(breach_s) => {
             let Some(breach) = parse(breach_s) else {
@@ -204,7 +215,7 @@ pub fn evaluate_sla(
             if now >= breach {
                 return SlaVerdict::Breached;
             }
-            // Prefer Linear's native high-risk threshold; else the 80% fallback.
+            // Prefer Linear's native high-risk threshold; else Sentinel's 80% policy.
             if let Some(hr) = sla_high_risk_at.and_then(parse) {
                 if now >= hr {
                     return SlaVerdict::HighRisk;
@@ -360,9 +371,8 @@ enum ConnectOutcome {
     Failed(EnforcerError),
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn ws_url() -> String {
     std::env::var("SENTINEL_LINEAR_WS_URL").unwrap_or_else(|_| DEFAULT_WS_URL.to_string())
@@ -461,7 +471,9 @@ async fn connect_once(url: &str, token: &str) -> ConnectOutcome {
 fn parse_issue_changed(payload: &NextPayload) -> Option<IssueChanged> {
     let node = payload.data.as_object()?.get("issueHistoryCreated")?;
     let id = node.get("issue")?.get("id")?.as_str()?.to_string();
-    Some(IssueChanged { linear_issue_id: id })
+    Some(IssueChanged {
+        linear_issue_id: id,
+    })
 }
 
 async fn sleep_backoff(idx: &mut usize) {
@@ -544,7 +556,8 @@ pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
                         ServerMsg::Error { id, payload } => {
                             tracing::warn!(?id, ?payload, "linear enforcer: error frame");
                         }
-                        ServerMsg::Complete { .. } | ServerMsg::Pong | ServerMsg::ConnectionAck => {}
+                        ServerMsg::Complete { .. } | ServerMsg::Pong | ServerMsg::ConnectionAck => {
+                        }
                     }
                 }
                 Ok(Message::Ping(p)) => {
@@ -576,13 +589,11 @@ pub async fn run_subscription(token: String, tx: mpsc::Sender<IssueChanged>) {
 //
 // Linear's wss `subscribe` op refuses a personal API key with a 4002 close
 // even though the same key authenticates REST + the `connection_init` ack —
-// this is expected Linear behavior, and legatus-desktop (the reference impl)
-// handles it by falling back to REST polling (`LinearPollActor`: "bump to 30s
-// when the WS auth is rejected"). Our spine omitted that fallback; this is it.
-// It feeds the SAME `IssueChanged` channel, so the whole `run_enforcer`
-// pipeline (debounce, team filter, shadow/live, escalation graph) is unchanged.
+// this is expected Linear behavior, so Sentinel runs REST polling as a required
+// realtime feed. It writes into the same `IssueChanged` channel, so the
+// graph-backed `run_enforcer` pipeline stays single-path after ingestion.
 
-/// Poll cadence for the realtime feed (matches legatus' WS-rejected fallback).
+/// Poll cadence for the REST realtime feed.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Default poll cursor lower bound when `SENTINEL_LINEAR_POLL_SINCE` is unset.
 /// A fixed recent date keeps the first poll bounded (started-state issues only)
@@ -650,7 +661,13 @@ async fn poll_once(
     }
     for n in nodes {
         if let Some(id) = n.get("id").and_then(Value::as_str) {
-            if tx.send(IssueChanged { linear_issue_id: id.to_string() }).await.is_err() {
+            if tx
+                .send(IssueChanged {
+                    linear_issue_id: id.to_string(),
+                })
+                .await
+                .is_err()
+            {
                 return None; // receiver gone — stop polling
             }
         }
@@ -660,12 +677,15 @@ async fn poll_once(
 
 /// Run the REST poll source forever, forwarding `IssueChanged` events on `tx`.
 /// This is the reliable feed that does NOT depend on the wss subscription —
-/// the legatus fallback pattern. `cursor` seeds the first `updatedAt` lower
+/// `cursor` seeds the first `updatedAt` lower
 /// bound (the daemon passes a recent timestamp so a fresh start still catches
 /// very recent transitions). Stops when the receiver is dropped.
 pub async fn run_poll_source(token: String, tx: mpsc::Sender<IssueChanged>, mut cursor: String) {
     let client = reqwest::Client::new();
-    tracing::info!(interval_secs = POLL_INTERVAL.as_secs(), "linear enforcer: poll source started");
+    tracing::info!(
+        interval_secs = POLL_INTERVAL.as_secs(),
+        "linear enforcer: poll source started"
+    );
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     loop {
         ticker.tick().await;
@@ -827,19 +847,123 @@ async fn backlog_state_id(
         .ok_or_else(|| EnforcerError::Api("no backlog state for team".into()))
 }
 
-/// Enforce on one ticket: if it has STARTED while not dev-ready, revert it to
-/// Backlog and post a comment listing the missing fields. No-op otherwise.
+/// Enforce on one ticket through the durable LangGraph escalation authority.
+/// If the graph decides `Revert`, move it to Backlog and post a comment listing
+/// the missing fields. No-op otherwise.
 ///
 /// Returns `true` if an enforcement action (revert) was taken.
 ///
 /// # Errors
-/// Returns [`EnforcerError`] on any Linear API failure.
+/// Returns [`EnforcerError`] on Linear API failure or when the graph authority
+/// cannot be constructed. This public helper intentionally has no direct
+/// readiness-only mutation path.
 pub async fn enforce_ticket(
     client: &reqwest::Client,
     token: &str,
     issue_id: &str,
 ) -> Result<bool, EnforcerError> {
+    let readiness = fetch_readiness(client, token, issue_id).await?;
+    let llm = crate::openrouter_llm::OpenRouterLlm::from_env()
+        .map_err(|e| EnforcerError::Api(format!("graph authority unavailable: {e}")))?;
+    let graph = crate::enforcement_graph::build_escalation_graph()
+        .await
+        .map_err(|e| EnforcerError::Api(format!("escalation graph unavailable: {e}")))?;
+    let comment_graph = crate::linear_comment_graph::build_linear_comment_graph()
+        .await
+        .map_err(|e| EnforcerError::Api(format!("comment graph unavailable: {e}")))?;
+    let run = crate::enforcement_graph::evaluate_ticket_report(&llm, &graph, &readiness)
+        .await
+        .map_err(|e| EnforcerError::Api(format!("escalation graph decision failed: {e}")))?;
+    if run.state.decision != crate::enforcement_graph::Decision::Revert {
+        return Ok(false);
+    }
+    let enforcement_authorization = run
+        .revert_authorization()
+        .map_err(|e| EnforcerError::Api(format!("enforcement graph authorization failed: {e}")))?
+        .ok_or_else(|| EnforcerError::Api("enforcement graph did not authorize revert".into()))?;
+    let revert_authorization =
+        LinearRevertAuthorization::from_enforcement(&enforcement_authorization);
+
+    let audit_note = graph_checkpoint_note(&enforcement_authorization.checkpoint_ref(), &[]);
+    enforce_ticket_with_graph_audit(
+        client,
+        token,
+        issue_id,
+        &audit_note,
+        &comment_graph,
+        &revert_authorization,
+    )
+    .await
+}
+
+struct LinearRevertAuthorization {
+    identifier: String,
+    checkpoint_refs: Vec<String>,
+}
+
+impl LinearRevertAuthorization {
+    fn from_enforcement(
+        enforcement: &crate::enforcement_graph::EnforcementRevertAuthorization,
+    ) -> Self {
+        Self {
+            identifier: enforcement.identifier().to_string(),
+            checkpoint_refs: vec![enforcement.checkpoint_ref()],
+        }
+    }
+
+    fn from_enforcement_and_remediation(
+        enforcement: &crate::enforcement_graph::EnforcementRevertAuthorization,
+        remediation: &crate::remediation::RemediationRevertAuthorization,
+    ) -> Result<Self, EnforcerError> {
+        if enforcement.identifier() != remediation.identifier() {
+            return Err(EnforcerError::Api(format!(
+                "revert authorization identifier mismatch: enforcement={} remediation={}",
+                enforcement.identifier(),
+                remediation.identifier()
+            )));
+        }
+        Ok(Self {
+            identifier: enforcement.identifier().to_string(),
+            checkpoint_refs: vec![enforcement.checkpoint_ref(), remediation.checkpoint_ref()],
+        })
+    }
+
+    fn verify(
+        &self,
+        readiness_identifier: &str,
+        graph_audit_note: &str,
+    ) -> Result<(), EnforcerError> {
+        if self.identifier != readiness_identifier {
+            return Err(EnforcerError::Api(format!(
+                "revert authorization identifier mismatch: authorization={} readiness={readiness_identifier}",
+                self.identifier
+            )));
+        }
+        for checkpoint in &self.checkpoint_refs {
+            if !graph_audit_note.contains(checkpoint) {
+                return Err(EnforcerError::Api(format!(
+                    "revert authorization checkpoint missing from audit note: {checkpoint}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn checkpoint_refs(&self) -> Vec<String> {
+        self.checkpoint_refs.clone()
+    }
+}
+
+async fn enforce_ticket_with_graph_audit(
+    client: &reqwest::Client,
+    token: &str,
+    issue_id: &str,
+    graph_audit_note: &str,
+    comment_graph: &crate::linear_comment_graph::LinearCommentGraph,
+    authorization: &LinearRevertAuthorization,
+) -> Result<bool, EnforcerError> {
     let r = fetch_readiness(client, token, issue_id).await?;
+    authorization.verify(&r.identifier, graph_audit_note)?;
     if !r.should_revert() {
         return Ok(false);
     }
@@ -848,20 +972,15 @@ pub async fn enforce_ticket(
 
     let backlog = backlog_state_id(client, token, issue_id).await?;
     // Revert state.
-    let mutation = format!(
-        r#"{{"query":"mutation{{issueUpdate(id:\"{issue_id}\",input:{{stateId:\"{backlog}\"}}){{success}}}}"}}"#
-    );
-    client
-        .post(LINEAR_GRAPHQL_URL)
-        .header("Authorization", token)
-        .header("Content-Type", "application/json")
-        .body(mutation)
-        .send()
-        .await
-        .map_err(|e| EnforcerError::Api(e.to_string()))?;
+    let mutation = serde_json::json!({
+        "query": "mutation($id:String!,$state:String!){issueUpdate(id:$id,input:{stateId:$state}){success}}",
+        "variables": { "id": issue_id, "state": backlog }
+    })
+    .to_string();
+    post_linear_success(client, token, mutation, "issueUpdate").await?;
 
     // Comment listing the gap + the fix path.
-    let comment_body = format!(
+    let mut comment_body = format!(
         "## 🚧 Reverted — ticket not dev-ready (bad PM is bad software)\\n\\n\
          This ticket entered a started state ({state}) while missing: **{missing}**. \
          The real-time enforcer moved it back to Backlog.\\n\\n\
@@ -870,34 +989,291 @@ pub async fn enforce_ticket(
         state = r.state_name,
         missing = missing,
     );
-    let comment_mutation = serde_json::json!({
-        "query": "mutation($id:String!,$b:String!){commentCreate(input:{issueId:$id,body:$b}){success}}",
-        "variables": { "id": issue_id, "b": comment_body }
-    });
-    client
-        .post(LINEAR_GRAPHQL_URL)
-        .header("Authorization", token)
-        .header("Content-Type", "application/json")
-        .json(&comment_mutation)
-        .send()
-        .await
-        .map_err(|e| EnforcerError::Api(e.to_string()))?;
+    comment_body.push_str(graph_audit_note);
+    post_live_graph_comment(
+        client,
+        token,
+        comment_graph,
+        issue_id,
+        &r.identifier,
+        "revert_audit",
+        comment_body,
+        authorization.checkpoint_refs(),
+    )
+    .await?;
 
     Ok(true)
 }
 
-// ----- the driver: wire the live subscription to the enforcer -----------
-
-/// How the enforcer acts on an un-ready started ticket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EnforcerMode {
-    /// Observe and log what *would* be reverted, but never mutate Linear.
-    /// The conservative default — ship this, watch the logs, then arm `Live`.
-    #[default]
-    Shadow,
-    /// Actually revert un-ready started tickets and post the comment.
-    Live,
+async fn post_linear_success(
+    client: &reqwest::Client,
+    token: &str,
+    body: String,
+    op: &str,
+) -> Result<(), EnforcerError> {
+    let response = client
+        .post(LINEAR_GRAPHQL_URL)
+        .header("Authorization", token)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| EnforcerError::Api(format!("{op} request failed: {e}")))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| EnforcerError::Api(format!("read {op} response: {e}")))?;
+    if !status.is_success() {
+        return Err(EnforcerError::Api(format!(
+            "{op} returned HTTP {status}: {body}"
+        )));
+    }
+    validate_linear_success(op, &body)
 }
+
+fn validate_linear_success(op: &str, body: &str) -> Result<(), EnforcerError> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| EnforcerError::Api(format!("parse {op} response: {e}: {body}")))?;
+    if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+        if !errors.is_empty() {
+            return Err(EnforcerError::Api(format!(
+                "{op} returned GraphQL errors: {errors:?}"
+            )));
+        }
+    }
+    let ok = value
+        .get("data")
+        .and_then(|data| data.get(op))
+        .and_then(|operation| operation.get("success"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if !ok {
+        return Err(EnforcerError::Api(format!(
+            "{op} omitted success=true: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn graph_checkpoint_note(
+    enforcement_checkpoint_ref: &str,
+    remediation_checkpoints: &[(&str, &str)],
+) -> String {
+    let mut note = format!("\n\nLangGraph checkpoints: enforcement `{enforcement_checkpoint_ref}`");
+    for (label, checkpoint_ref) in remediation_checkpoints {
+        note.push_str(", ");
+        note.push_str(label);
+        note.push_str(" `");
+        note.push_str(checkpoint_ref);
+        note.push('`');
+    }
+    note
+}
+
+fn terminal_decision_checkpoint_ref<S: Serialize>(
+    graph_name: &str,
+    thread_id: &str,
+    terminal_state: &S,
+    checkpoints: &[crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot<S>],
+    write_history: &[crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry],
+) -> Result<String, EnforcerError> {
+    crate::decision_graph_introspection::terminal_decision_checkpoint_result(
+        graph_name,
+        thread_id,
+        terminal_state,
+        checkpoints,
+        write_history,
+    )
+    .map(crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot::checkpoint_ref)
+    .map_err(|err| {
+        EnforcerError::Api(format!(
+            "{graph_name} LangGraph authorization failed: {err}"
+        ))
+    })
+}
+
+fn linear_enforcer_graph_audit_path() -> std::path::PathBuf {
+    crate::paths::sentinel_root()
+        .join("metrics")
+        .join("linear-enforcer-graph-runs.jsonl")
+}
+
+fn append_linear_enforcer_graph_audit<S, R>(
+    graph_name: &str,
+    stage: &str,
+    identifier: &str,
+    thread_id: &str,
+    terminal_state: &S,
+    checkpoints: &[crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot<S>],
+    write_history: &[crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry],
+    run: &R,
+) -> Result<(), EnforcerError>
+where
+    S: Serialize,
+    R: Serialize,
+{
+    append_linear_enforcer_graph_audit_to_path(
+        &linear_enforcer_graph_audit_path(),
+        graph_name,
+        stage,
+        identifier,
+        thread_id,
+        terminal_state,
+        checkpoints,
+        write_history,
+        run,
+    )
+}
+
+fn append_linear_enforcer_graph_audit_to_path<S, R>(
+    path: &std::path::Path,
+    graph_name: &str,
+    stage: &str,
+    identifier: &str,
+    thread_id: &str,
+    terminal_state: &S,
+    checkpoints: &[crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot<S>],
+    write_history: &[crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry],
+    run: &R,
+) -> Result<(), EnforcerError>
+where
+    S: Serialize,
+    R: Serialize,
+{
+    let checkpoint_ref = terminal_decision_checkpoint_ref(
+        graph_name,
+        thread_id,
+        terminal_state,
+        checkpoints,
+        write_history,
+    )?;
+    let row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": graph_name,
+        "stage": stage,
+        "identifier": identifier,
+        "thread_id": thread_id,
+        "terminal_checkpoint_ref": checkpoint_ref,
+        "run": run,
+    });
+    let mut line = serde_json::to_vec(&row)?;
+    line.push(b'\n');
+    let fs = crate::filesystem::RealFileSystem;
+    sentinel_domain::ports::FileSystemPort::append(&fs, path, &line).map_err(|e| {
+        EnforcerError::Api(format!(
+            "append linear enforcer graph audit {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+fn post_apply_missing_from_readiness(
+    readiness: Result<TicketReadiness, EnforcerError>,
+) -> Result<Vec<String>, EnforcerError> {
+    Ok(readiness?.missing_owned())
+}
+
+async fn post_live_graph_comment(
+    client: &reqwest::Client,
+    token: &str,
+    comment_graph: &crate::linear_comment_graph::LinearCommentGraph,
+    issue_id: &str,
+    identifier: &str,
+    category: &str,
+    body: String,
+    checkpoint_refs: Vec<String>,
+) -> Result<(), EnforcerError> {
+    let state = crate::linear_comment_graph::LinearCommentState::new(
+        identifier,
+        issue_id,
+        category,
+        body,
+        checkpoint_refs,
+    );
+    let result = crate::linear_comment_graph::post_graph_authorized_comment(
+        client,
+        token,
+        comment_graph,
+        state,
+    )
+    .await
+    .map_err(|e| EnforcerError::Api(format!("comment graph decision failed: {e}")))?;
+    ensure_comment_graph_post_authorized(category, result.run.state.decision)?;
+    append_linear_comment_graph_audit(category, &result)?;
+    tracing::debug!(
+        ticket = %identifier,
+        category,
+        comment_graph_thread_id = %result.run.thread_id,
+        posted = result.posted,
+        "linear enforcer: graph-backed comment path completed"
+    );
+    Ok(())
+}
+
+fn linear_comment_graph_audit_path() -> std::path::PathBuf {
+    crate::paths::sentinel_root()
+        .join("metrics")
+        .join("linear-comment-graph-runs.jsonl")
+}
+
+fn append_linear_comment_graph_audit(
+    category: &str,
+    result: &crate::linear_comment_graph::LinearCommentApplyResult,
+) -> Result<(), EnforcerError> {
+    append_linear_comment_graph_audit_to_path(&linear_comment_graph_audit_path(), category, result)
+}
+
+fn append_linear_comment_graph_audit_to_path(
+    path: &std::path::Path,
+    category: &str,
+    result: &crate::linear_comment_graph::LinearCommentApplyResult,
+) -> Result<(), EnforcerError> {
+    let comment_checkpoint_ref = terminal_decision_checkpoint_ref(
+        "linear_comment",
+        &result.run.thread_id,
+        &result.run.state,
+        &result.run.checkpoints,
+        &result.run.write_history,
+    )?;
+    let row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": "linear_comment",
+        "identifier": result.run.state.identifier.clone(),
+        "issue_id": result.run.state.issue_id.clone(),
+        "category": category,
+        "posted": result.posted,
+        "decision": result.run.state.decision,
+        "comment_checkpoint_ref": comment_checkpoint_ref,
+        "required_checkpoint_refs": result.run.state.checkpoint_refs.clone(),
+        "thread_id": result.run.thread_id.clone(),
+        "run": &result.run,
+    });
+    let mut line = serde_json::to_vec(&row)?;
+    line.push(b'\n');
+    let fs = crate::filesystem::RealFileSystem;
+    sentinel_domain::ports::FileSystemPort::append(&fs, path, &line).map_err(|e| {
+        EnforcerError::Api(format!(
+            "append linear comment graph audit {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+fn ensure_comment_graph_post_authorized(
+    category: &str,
+    decision: crate::linear_comment_graph::LinearCommentDecision,
+) -> Result<(), EnforcerError> {
+    if decision == crate::linear_comment_graph::LinearCommentDecision::Post {
+        Ok(())
+    } else {
+        Err(EnforcerError::Api(format!(
+            "comment graph rejected live comment category `{category}` with decision {decision:?}"
+        )))
+    }
+}
+
+// ----- the driver: wire the live subscription to the enforcer -----------
 
 /// Per-issue cooldown: a burst of `issueHistoryCreated` events on one ticket
 /// (Linear fires several per edit) collapses to a single enforcement check.
@@ -908,8 +1284,6 @@ const DEBOUNCE: Duration = Duration::from_secs(20);
 pub struct EnforcerConfig {
     /// Linear PAT (drives both the wss subscription and the REST calls).
     pub token: String,
-    /// Shadow (log-only) or Live (mutate). Defaults to Shadow.
-    pub mode: EnforcerMode,
     /// If set, only tickets whose identifier prefix matches one of these teams
     /// are enforced (e.g. `["FPCRM", "FPROUTE"]`). `None` = all teams.
     pub team_filter: Option<Vec<String>>,
@@ -927,13 +1301,12 @@ impl EnforcerConfig {
         }
     }
 
-    /// Build a config from the process environment, or `None` (enforcer
-    /// disabled) when no `SENTINEL_LINEAR_TOKEN` is set. The daemon calls this at
-    /// startup and only spawns [`run_enforcer`] when it returns `Some`.
+    /// Build a config from the process environment, or `None` when the
+    /// graph-backed live enforcer is not explicitly armed. The daemon calls this
+    /// at startup and only spawns [`run_enforcer`] when it returns `Some`.
     ///
     /// - `SENTINEL_LINEAR_TOKEN` — the PAT. Absent/empty ⇒ `None` (disabled).
-    /// - `SENTINEL_LINEAR_ENFORCE` — `live` arms mutation; anything else
-    ///   (including unset) stays in the safe `Shadow` default.
+    /// - `SENTINEL_LINEAR_ENFORCE` — must be exactly `live` (case-insensitive).
     /// - `SENTINEL_LINEAR_TEAMS` — comma-separated team prefixes (e.g.
     ///   `FPCRM,FPROUTE`). Empty/unset ⇒ all teams.
     #[must_use]
@@ -958,10 +1331,12 @@ impl EnforcerConfig {
         if token.trim().is_empty() {
             return None;
         }
-        let mode = match enforce {
-            Some(v) if v.eq_ignore_ascii_case("live") => EnforcerMode::Live,
-            _ => EnforcerMode::Shadow,
-        };
+        if !enforce
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("live"))
+        {
+            return None;
+        }
         let team_filter = teams.and_then(|v| {
             let teams: Vec<String> = v
                 .split(',')
@@ -971,7 +1346,7 @@ impl EnforcerConfig {
                 .collect();
             (!teams.is_empty()).then_some(teams)
         });
-        Some(Self { token, mode, team_filter })
+        Some(Self { token, team_filter })
     }
 }
 
@@ -991,17 +1366,55 @@ fn debounced(
     false
 }
 
-/// Run the full enforcement spine: hold the live subscription and enforce each
-/// issue-change event according to `cfg.mode`. Runs until the subscription gives
-/// up permanently (PAT rejected) or the receiver is dropped.
+type EnforcementGraph = langgraph_core::application::services::CompilationResult<
+    crate::enforcement_graph::EscalationState,
+>;
+type RemediationGraph =
+    langgraph_core::application::services::CompilationResult<crate::remediation::RemediationState>;
+type LiveEnforcerRuntime = (
+    crate::openrouter_llm::OpenRouterLlm,
+    EnforcementGraph,
+    RemediationGraph,
+    crate::linear_comment_graph::LinearCommentGraph,
+);
+
+async fn build_live_enforcer_runtime() -> Result<LiveEnforcerRuntime, String> {
+    let llm = crate::openrouter_llm::OpenRouterLlm::from_env()
+        .map_err(|e| format!("OpenRouter LLM unavailable: {e}"))?;
+    let enforcement_graph = crate::enforcement_graph::build_escalation_graph()
+        .await
+        .map_err(|e| format!("escalation graph unavailable: {e}"))?;
+    let remediation_graph = crate::remediation::build_remediation_graph()
+        .await
+        .map_err(|e| format!("remediation graph unavailable: {e}"))?;
+    let comment_graph = crate::linear_comment_graph::build_linear_comment_graph()
+        .await
+        .map_err(|e| format!("comment graph unavailable: {e}"))?;
+    Ok((llm, enforcement_graph, remediation_graph, comment_graph))
+}
+
+/// Run the full graph-backed enforcement spine: hold the live subscription and
+/// enforce each issue-change event through LangGraph checkpoint authorization.
+/// Runs until the subscription gives up permanently (PAT rejected) or the
+/// receiver is dropped.
 ///
-/// In `Shadow` mode it fetches readiness and logs what it *would* revert, with
-/// zero mutations. In `Live` mode an un-ready started ticket is routed through
-/// the `LangGraph` escalation graph ([`crate::enforcement_graph`]): an adversarial
-/// `Codex` judge must CONFIRM before the strict revert + comment fires. If the
-/// `OPENROUTER_API_KEY` isn't set, Live falls back to the direct
-/// [`enforce_ticket`] path (judge unavailable ⇒ readiness check alone).
+/// An un-ready started agent-authored ticket is routed through the durable
+/// LangGraph remediation graph: it can heal, escalate, or choose last-resort
+/// revert only from checkpointed graph decisions. If any required graph runtime
+/// cannot be initialized, the enforcer exits instead of running a degraded path.
 pub async fn run_enforcer(cfg: EnforcerConfig) {
+    let live_runtime = match build_live_enforcer_runtime().await {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "linear enforcer: required LangGraph runtime unavailable; driver not started"
+            );
+            return;
+        }
+    };
+    let (llm, egraph, rgraph, cgraph) = &live_runtime;
+
     let (tx, mut rx) = mpsc::channel::<IssueChanged>(256);
     // Two feeds into the one channel: the wss subscription (optimization — may
     // 4002 on a PAT) and the REST poll source (the reliable backstop, the
@@ -1017,26 +1430,12 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
     let mut seen: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
 
-    // Build the escalation graph + LLM judge once, for Live mode. Either being
-    // unavailable degrades Live to the direct readiness-only revert path.
-    let (llm, remediation_graph) = if matches!(cfg.mode, EnforcerMode::Live) {
-        let llm = crate::openrouter_llm::OpenRouterLlm::from_env().ok();
-        // The self-heal graph: remediate-first, escalate the gaps, revert last.
-        // (Supersedes the bare escalation graph as the Live decision path; the
-        // judge-gated `enforcement_graph` remains available for direct use.)
-        let remediation_graph = match crate::remediation::build_remediation_graph().await {
-            Ok(g) => Some(g),
-            Err(e) => {
-                tracing::warn!(error = %e, "linear enforcer: remediation graph unavailable; Live falls back to readiness-only revert");
-                None
-            }
-        };
-        (llm, remediation_graph)
-    } else {
-        (None, None)
-    };
-
-    tracing::info!(mode = ?cfg.mode, judge = llm.is_some(), heal = remediation_graph.is_some(), "linear enforcer: driver started");
+    tracing::info!(
+        escalation_runtime = true,
+        remediation_runtime = true,
+        comment_runtime = true,
+        "linear enforcer: driver started"
+    );
 
     while let Some(ev) = rx.recv().await {
         let id = &ev.linear_issue_id;
@@ -1044,165 +1443,663 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
             continue;
         }
 
-        match cfg.mode {
-            EnforcerMode::Shadow => match fetch_readiness(&client, &cfg.token, id).await {
-                Ok(r) => {
-                    if cfg.team_allowed(&r.identifier) && r.should_revert() {
-                        tracing::warn!(
-                            ticket = %r.identifier,
-                            missing = %r.missing().join(", "),
-                            state = %r.state_name,
-                            "linear enforcer [SHADOW]: WOULD revert un-ready started ticket"
-                        );
-                    }
-                }
+        // Fetch once to learn the identifier + readiness, and gate on team.
+        let readiness = match fetch_readiness(&client, &cfg.token, id).await {
+            Ok(r) if !cfg.team_allowed(&r.identifier) => continue,
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, issue = %id, "linear enforcer: pre-check fetch failed");
+                continue;
+            }
+        };
+
+        let enforcement_run =
+            match crate::enforcement_graph::evaluate_ticket_report(llm, egraph, &readiness).await {
+                Ok(run) => run,
                 Err(e) => {
-                    tracing::debug!(error = %e, issue = %id, "linear enforcer [SHADOW]: readiness fetch failed");
+                    tracing::warn!(
+                        error = %e,
+                        ticket = %readiness.identifier,
+                        "linear enforcer [LIVE]: enforcement graph decision failed"
+                    );
+                    continue;
                 }
-            },
-            EnforcerMode::Live => {
-                // Fetch once to learn the identifier + readiness, and gate on team.
-                let readiness = match fetch_readiness(&client, &cfg.token, id).await {
-                    Ok(r) if !cfg.team_allowed(&r.identifier) => continue,
-                    Ok(r) => r,
+            };
+        let enforcement_thread_id = enforcement_run.thread_id.clone();
+        let enforcement_checkpoint_ref = match terminal_decision_checkpoint_ref(
+            "enforcement",
+            &enforcement_run.thread_id,
+            &enforcement_run.state,
+            &enforcement_run.checkpoints,
+            &enforcement_run.write_history,
+        ) {
+            Ok(checkpoint_ref) => checkpoint_ref,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    ticket = %readiness.identifier,
+                    enforcement_graph_thread_id = %enforcement_thread_id,
+                    "linear enforcer [LIVE]: enforcement graph decision-node checkpoint missing"
+                );
+                continue;
+            }
+        };
+        if let Err(e) = append_linear_enforcer_graph_audit(
+            "enforcement",
+            "readiness",
+            &readiness.identifier,
+            &enforcement_run.thread_id,
+            &enforcement_run.state,
+            &enforcement_run.checkpoints,
+            &enforcement_run.write_history,
+            &enforcement_run,
+        ) {
+            tracing::warn!(
+                error = %e,
+                ticket = %readiness.identifier,
+                enforcement_graph_thread_id = %enforcement_thread_id,
+                "linear enforcer [LIVE]: enforcement graph audit append failed"
+            );
+            continue;
+        }
+        let enforcement_note = graph_checkpoint_note(&enforcement_checkpoint_ref, &[]);
+
+        // SLA gate (Tier 3) — orthogonal to dev-readiness, comment-only,
+        // runs on every team-allowed event: escalate breached/high-risk
+        // SLAs and flag Urgent tickets that have no SLA clock at all.
+        let now = chrono::Utc::now();
+        match evaluate_sla(
+            readiness.priority,
+            readiness.sla_started_at.as_deref(),
+            readiness.sla_breaches_at.as_deref(),
+            readiness.sla_high_risk_at.as_deref(),
+            now,
+        ) {
+            SlaVerdict::Breached => {
+                let body = format!(
+                            "## ⏰ SLA breached\n\nThis ticket's SLA deadline has passed. Escalate or re-scope now.{enforcement_note}"
+                        );
+                if let Err(e) = post_live_graph_comment(
+                    &client,
+                    &cfg.token,
+                    cgraph,
+                    id,
+                    &readiness.identifier,
+                    "sla_breached",
+                    body,
+                    vec![enforcement_checkpoint_ref.clone()],
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA breached comment failed");
+                }
+                tracing::info!(ticket = %readiness.identifier, graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: SLA breached — escalated");
+            }
+            SlaVerdict::HighRisk => {
+                let body = format!(
+                            "## ⏳ SLA at risk\n\nThis ticket's SLA is in its high-risk window and it isn't done. Prioritize it before it breaches.{enforcement_note}"
+                        );
+                if let Err(e) = post_live_graph_comment(
+                    &client,
+                    &cfg.token,
+                    cgraph,
+                    id,
+                    &readiness.identifier,
+                    "sla_high_risk",
+                    body,
+                    vec![enforcement_checkpoint_ref.clone()],
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA high-risk comment failed");
+                }
+                tracing::info!(ticket = %readiness.identifier, graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: SLA high-risk — escalated");
+            }
+            SlaVerdict::UrgentNoSla => {
+                let body = format!(
+                            "## 🚨 Urgent without an SLA\n\nThis ticket is **Urgent** but has no SLA clock running. Apply an SLA so urgent work is time-bound.{enforcement_note}"
+                        );
+                if let Err(e) = post_live_graph_comment(
+                    &client,
+                    &cfg.token,
+                    cgraph,
+                    id,
+                    &readiness.identifier,
+                    "urgent_without_sla",
+                    body,
+                    vec![enforcement_checkpoint_ref.clone()],
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: urgent-without-SLA comment failed");
+                }
+                tracing::info!(ticket = %readiness.identifier, graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: urgent-without-SLA — flagged");
+            }
+            SlaVerdict::Ok => {}
+        }
+
+        // Due-date gate (comment-only): an open ticket past its dueDate
+        // (distinct from SLA). Completed/canceled tickets are exempt.
+        if !matches!(readiness.state_type.as_str(), "completed" | "canceled")
+            && is_overdue(readiness.due_date.as_deref(), now.date_naive())
+        {
+            let body = format!(
+                        "## 📅 Past due date\n\nThis ticket's due date ({}) has passed and it isn't done. Re-date it or push to close.{}",
+                        readiness.due_date.as_deref().unwrap_or(""),
+                        enforcement_note,
+                    );
+            if let Err(e) = post_live_graph_comment(
+                &client,
+                &cfg.token,
+                cgraph,
+                id,
+                &readiness.identifier,
+                "past_due_date",
+                body,
+                vec![enforcement_checkpoint_ref.clone()],
+            )
+            .await
+            {
+                tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: overdue comment failed");
+            }
+            tracing::info!(ticket = %readiness.identifier, due = ?readiness.due_date, graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: overdue — flagged");
+        }
+
+        // Extended workflow discipline (comment-only): a started ticket
+        // with no assignee / not in a cycle / no project / no milestone /
+        // actively blocked. Flagged, never auto-filled or reverted.
+        let discipline = readiness.extended_discipline();
+        if !discipline.is_empty() {
+            let body = format!(
+                        "## 📋 Workflow discipline\n\nThis started ticket has loose ends: **{}**. \
+                         Tidy these so the board stays trustworthy (the enforcer flags but won't auto-fill them).{}",
+                        discipline.join(", "),
+                        enforcement_note,
+                    );
+            if let Err(e) = post_live_graph_comment(
+                &client,
+                &cfg.token,
+                cgraph,
+                id,
+                &readiness.identifier,
+                "workflow_discipline",
+                body,
+                vec![enforcement_checkpoint_ref.clone()],
+            )
+            .await
+            {
+                tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: workflow-discipline comment failed");
+            }
+            tracing::info!(ticket = %readiness.identifier, gaps = %discipline.join(", "), graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: extended-discipline flags — commented");
+        }
+
+        if enforcement_run.state.decision != crate::enforcement_graph::Decision::Revert {
+            tracing::debug!(
+                ticket = %readiness.identifier,
+                decision = ?enforcement_run.state.decision,
+                graph_thread_id = %enforcement_thread_id,
+                "linear enforcer [LIVE]: readiness decision clear"
+            );
+            continue;
+        }
+        let enforcement_revert_authorization = match enforcement_run.revert_authorization() {
+            Ok(Some(authorization)) => authorization,
+            Ok(None) => {
+                tracing::warn!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: enforcement graph returned Revert without authorization token");
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: enforcement graph authorization failed");
+                continue;
+            }
+        };
+
+        // Actor differential (L2): a HUMAN-authored ticket is the
+        // operator's own — we ask via comment rather than silently
+        // rewriting their fields. Only AGENT/integration-authored
+        // tickets get the silent heal-first treatment below.
+        if !readiness.created_by_agent {
+            let body = format!(
+                        "## 🩺 Not dev-ready — please complete before starting\n\nThis ticket entered **{}** while still missing: **{}**. \
+                         Set these so it meets the Definition of Ready (the enforcer leaves human-authored tickets for you to fill rather than rewriting them).{}",
+                        readiness.state_name,
+                        readiness.missing_owned().join(", "),
+                        enforcement_note,
+                    );
+            if let Err(e) = post_live_graph_comment(
+                &client,
+                &cfg.token,
+                cgraph,
+                id,
+                &readiness.identifier,
+                "human_authored_readiness",
+                body,
+                vec![enforcement_checkpoint_ref.clone()],
+            )
+            .await
+            {
+                tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: human-authored readiness comment failed");
+            }
+            tracing::info!(ticket = %readiness.identifier, missing = %readiness.missing_owned().join(", "), graph_thread_id = %enforcement_thread_id, "linear enforcer [LIVE]: human-authored — escalated via comment (no auto-heal)");
+            continue;
+        }
+
+        // ASSISTANT, not bouncer: remediate-first. Heal as many gaps as
+        // we can confidently infer; the ticket stays in progress. Only
+        // escalate the gaps we can't fill, and revert as a last resort.
+        {
+            let missing = readiness.missing_owned();
+            let catalog =
+                match crate::remediation::fetch_label_catalog(&client, &cfg.token, id).await {
+                    Ok(catalog) => catalog,
                     Err(e) => {
-                        tracing::debug!(error = %e, issue = %id, "linear enforcer [LIVE]: pre-check fetch failed");
+                        tracing::warn!(
+                            error = %e,
+                            ticket = %readiness.identifier,
+                            enforcement_graph_thread_id = %enforcement_thread_id,
+                            "linear enforcer [LIVE]: remediation catalog fetch failed"
+                        );
                         continue;
                     }
                 };
-
-                // SLA gate (Tier 3) — orthogonal to dev-readiness, comment-only,
-                // runs on every team-allowed event: escalate breached/high-risk
-                // SLAs and flag Urgent tickets that have no SLA clock at all.
-                let now = chrono::Utc::now();
-                match evaluate_sla(
-                    readiness.priority,
-                    readiness.sla_started_at.as_deref(),
-                    readiness.sla_breaches_at.as_deref(),
-                    readiness.sla_high_risk_at.as_deref(),
-                    now,
-                ) {
-                    SlaVerdict::Breached => {
-                        crate::remediation::post_comment(&client, &cfg.token, id,
-                            "## ⏰ SLA breached\n\nThis ticket's SLA deadline has passed. Escalate or re-scope now.").await;
-                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA breached — escalated");
+            let (title, desc) =
+                match crate::remediation::fetch_ticket_text(&client, &cfg.token, id).await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            ticket = %readiness.identifier,
+                            enforcement_graph_thread_id = %enforcement_thread_id,
+                            "linear enforcer [LIVE]: remediation ticket text fetch failed"
+                        );
+                        continue;
                     }
-                    SlaVerdict::HighRisk => {
-                        crate::remediation::post_comment(&client, &cfg.token, id,
-                            "## ⏳ SLA at risk\n\nThis ticket's SLA is in its high-risk window and it isn't done. Prioritize it before it breaches.").await;
-                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: SLA high-risk — escalated");
-                    }
-                    SlaVerdict::UrgentNoSla => {
-                        crate::remediation::post_comment(&client, &cfg.token, id,
-                            "## 🚨 Urgent without an SLA\n\nThis ticket is **Urgent** but has no SLA clock running. Apply an SLA so urgent work is time-bound.").await;
-                        tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: urgent-without-SLA — flagged");
-                    }
-                    SlaVerdict::Ok => {}
-                }
-
-                // Due-date gate (comment-only): an open ticket past its dueDate
-                // (distinct from SLA). Completed/canceled tickets are exempt.
-                if !matches!(readiness.state_type.as_str(), "completed" | "canceled")
-                    && is_overdue(readiness.due_date.as_deref(), now.date_naive())
-                {
-                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
-                        "## 📅 Past due date\n\nThis ticket's due date ({}) has passed and it isn't done. Re-date it or push to close.",
-                        readiness.due_date.as_deref().unwrap_or(""),
-                    )).await;
-                    tracing::info!(ticket = %readiness.identifier, due = ?readiness.due_date, "linear enforcer [LIVE]: overdue — flagged");
-                }
-
-                // Extended workflow discipline (comment-only): a started ticket
-                // with no assignee / not in a cycle / no project / no milestone /
-                // actively blocked. Flagged, never auto-filled or reverted.
-                let discipline = readiness.extended_discipline();
-                if !discipline.is_empty() {
-                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
-                        "## 📋 Workflow discipline\n\nThis started ticket has loose ends: **{}**. \
-                         Tidy these so the board stays trustworthy (the enforcer flags but won't auto-fill them).",
-                        discipline.join(", "),
-                    )).await;
-                    tracing::info!(ticket = %readiness.identifier, gaps = %discipline.join(", "), "linear enforcer [LIVE]: extended-discipline flags — commented");
-                }
-
-                if !readiness.should_revert() {
-                    continue; // dev-ready or not started — nothing to do
-                }
-
-                // Actor differential (L2): a HUMAN-authored ticket is the
-                // operator's own — we ask via comment rather than silently
-                // rewriting their fields. Only AGENT/integration-authored
-                // tickets get the silent heal-first treatment below.
-                if !readiness.created_by_agent {
-                    crate::remediation::post_comment(&client, &cfg.token, id, &format!(
-                        "## 🩺 Not dev-ready — please complete before starting\n\nThis ticket entered **{}** while still missing: **{}**. \
-                         Set these so it meets the Definition of Ready (the enforcer leaves human-authored tickets for you to fill rather than rewriting them).",
-                        readiness.state_name, readiness.missing_owned().join(", "),
-                    )).await;
-                    tracing::info!(ticket = %readiness.identifier, missing = %readiness.missing_owned().join(", "), "linear enforcer [LIVE]: human-authored — escalated via comment (no auto-heal)");
+                };
+            let plan = crate::remediation::propose_remediation(
+                llm,
+                &readiness.identifier,
+                &title,
+                &desc,
+                &missing,
+                &catalog,
+            )
+            .await;
+            let planned_count = plan.applicable_change_count(&catalog);
+            let pre_state = crate::remediation::RemediationState {
+                identifier: readiness.identifier.clone(),
+                stage: crate::remediation::RemediationStage::PreApply,
+                missing_before: missing.clone(),
+                planned_count,
+                applied_count: 0,
+                still_missing: plan.unfillable.clone(),
+                proposal_failed: plan.proposal_failed,
+                outcome: crate::remediation::RemediationOutcome::Clear,
+            };
+            let pre_run = match crate::remediation::run_remediation_decision_report(
+                rgraph, pre_state,
+            )
+            .await
+            {
+                Ok(run) => run,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ticket = %readiness.identifier,
+                        enforcement_graph_thread_id = %enforcement_thread_id,
+                        "linear enforcer [LIVE]: remediation pre-apply graph failed"
+                    );
                     continue;
                 }
-
-                // ASSISTANT, not bouncer: remediate-first. Heal as many gaps as
-                // we can confidently infer; the ticket stays in progress. Only
-                // escalate the gaps we can't fill, and revert as a last resort.
-                if let (Some(llm), Some(rgraph)) = (llm.as_ref(), remediation_graph.as_ref()) {
-                    let missing = readiness.missing_owned();
-                    let catalog = crate::remediation::fetch_label_catalog(&client, &cfg.token, id).await;
-                    let (title, desc) = crate::remediation::fetch_ticket_text(&client, &cfg.token, id).await;
-                    let plan = crate::remediation::propose_remediation(
-                        llm, &readiness.identifier, &title, &desc, &missing, &catalog,
+            };
+            let pre_graph_thread_id = pre_run.thread_id.clone();
+            let pre_graph_checkpoint_ref = match terminal_decision_checkpoint_ref(
+                "remediation",
+                &pre_run.thread_id,
+                &pre_run.state,
+                &pre_run.checkpoints,
+                &pre_run.write_history,
+            ) {
+                Ok(checkpoint_ref) => checkpoint_ref,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ticket = %readiness.identifier,
+                        enforcement_graph_thread_id = %enforcement_thread_id,
+                        remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                        "linear enforcer [LIVE]: remediation pre-apply decision-node checkpoint missing"
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = append_linear_enforcer_graph_audit(
+                "remediation",
+                "pre_apply",
+                &readiness.identifier,
+                &pre_run.thread_id,
+                &pre_run.state,
+                &pre_run.checkpoints,
+                &pre_run.write_history,
+                &pre_run,
+            ) {
+                tracing::warn!(
+                    error = %e,
+                    ticket = %readiness.identifier,
+                    enforcement_graph_thread_id = %enforcement_thread_id,
+                    remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                    "linear enforcer [LIVE]: remediation pre-apply graph audit append failed"
+                );
+                continue;
+            }
+            let apply_authorization = match pre_run.state.outcome {
+                crate::remediation::RemediationOutcome::Apply => {
+                    match pre_run.apply_authorization() {
+                        Ok(Some(authorization)) => authorization,
+                        Ok(None) => {
+                            tracing::warn!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation graph returned Apply without authorization token");
+                            continue;
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation apply authorization failed");
+                            continue;
+                        }
+                    }
+                }
+                crate::remediation::RemediationOutcome::Escalate => {
+                    let comment_refs = vec![
+                        enforcement_checkpoint_ref.clone(),
+                        pre_graph_checkpoint_ref.clone(),
+                    ];
+                    let graph_note = graph_checkpoint_note(
+                        &enforcement_checkpoint_ref,
+                        &[("remediation_pre", &pre_graph_checkpoint_ref)],
+                    );
+                    let body = format!(
+                                "## 🩺 Auto-remediation needs your input\n\nThe enforcer could not safely apply a remediation plan. Still needs a human decision: **{}**. Please set these so the ticket is dev-ready.{}",
+                                if plan.unfillable.is_empty() {
+                                    missing.join(", ")
+                                } else {
+                                    plan.unfillable.join(", ")
+                                },
+                                graph_note,
+                            );
+                    if let Err(e) = post_live_graph_comment(
+                        &client,
+                        &cfg.token,
+                        cgraph,
+                        id,
+                        &readiness.identifier,
+                        "remediation_pre_escalate",
+                        body,
+                        comment_refs,
                     )
-                    .await;
-                    let applied =
-                        crate::remediation::apply_remediation(&client, &cfg.token, id, &plan, &catalog).await;
+                    .await
+                    {
+                        tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation pre-apply escalation comment failed");
+                    }
+                    tracing::info!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation pre-apply escalated");
+                    continue;
+                }
+                crate::remediation::RemediationOutcome::Revert => {
+                    let remediation_revert_authorization = match pre_run.revert_authorization() {
+                        Ok(Some(authorization)) => authorization,
+                        Ok(None) => {
+                            tracing::warn!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation pre-apply graph returned Revert without authorization token");
+                            continue;
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation pre-apply revert authorization failed");
+                            continue;
+                        }
+                    };
+                    let revert_authorization =
+                        match LinearRevertAuthorization::from_enforcement_and_remediation(
+                            &enforcement_revert_authorization,
+                            &remediation_revert_authorization,
+                        ) {
+                            Ok(authorization) => authorization,
+                            Err(e) => {
+                                tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation pre-apply revert authorization failed");
+                                continue;
+                            }
+                        };
+                    let graph_note = graph_checkpoint_note(
+                        &enforcement_checkpoint_ref,
+                        &[("remediation_pre", &pre_graph_checkpoint_ref)],
+                    );
+                    match enforce_ticket_with_graph_audit(
+                        &client,
+                        &cfg.token,
+                        id,
+                        &graph_note,
+                        cgraph,
+                        &revert_authorization,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: reverted after pre-apply graph decision")
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: pre-apply revert failed")
+                        }
+                    }
+                    continue;
+                }
+                crate::remediation::RemediationOutcome::Clear => {
+                    tracing::info!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, "linear enforcer [LIVE]: remediation pre-apply graph cleared without mutation");
+                    continue;
+                }
+            };
 
-                    // Re-fetch to learn what's STILL missing after the heal.
-                    let still_missing = match fetch_readiness(&client, &cfg.token, id).await {
-                        Ok(r) => r.missing_owned(),
-                        Err(_) => plan.unfillable.clone(),
+            let applied = match crate::remediation::apply_remediation(
+                &client,
+                &cfg.token,
+                id,
+                &plan,
+                &catalog,
+                &apply_authorization,
+            )
+            .await
+            {
+                Ok(applied) => applied,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ticket = %readiness.identifier,
+                        enforcement_graph_thread_id = %enforcement_thread_id,
+                        remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                        remediation_pre_graph_checkpoint = %pre_graph_checkpoint_ref,
+                        "linear enforcer [LIVE]: graph-authorized remediation apply failed"
+                    );
+                    continue;
+                }
+            };
+
+            // Re-fetch to learn what's STILL missing after the heal.
+            let still_missing = match post_apply_missing_from_readiness(
+                fetch_readiness(&client, &cfg.token, id).await,
+            ) {
+                Ok(still_missing) => still_missing,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ticket = %readiness.identifier,
+                        enforcement_graph_thread_id = %enforcement_thread_id,
+                        remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                        remediation_pre_graph_checkpoint = %pre_graph_checkpoint_ref,
+                        "linear enforcer [LIVE]: remediation post-apply readiness fetch failed"
+                    );
+                    continue;
+                }
+            };
+            let state = crate::remediation::RemediationState {
+                identifier: readiness.identifier.clone(),
+                stage: crate::remediation::RemediationStage::PostApply,
+                missing_before: missing,
+                planned_count,
+                applied_count: applied.len(),
+                still_missing: still_missing.clone(),
+                proposal_failed: plan.proposal_failed,
+                outcome: crate::remediation::RemediationOutcome::Clear,
+            };
+            match crate::remediation::run_remediation_decision_report(rgraph, state).await {
+                Ok(run) => {
+                    let graph_thread_id = run.thread_id.clone();
+                    let graph_checkpoint_ref = match terminal_decision_checkpoint_ref(
+                        "remediation",
+                        &run.thread_id,
+                        &run.state,
+                        &run.checkpoints,
+                        &run.write_history,
+                    ) {
+                        Ok(checkpoint_ref) => checkpoint_ref,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                ticket = %readiness.identifier,
+                                enforcement_graph_thread_id = %enforcement_thread_id,
+                                remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                                remediation_post_graph_thread_id = %graph_thread_id,
+                                "linear enforcer [LIVE]: remediation post-apply decision-node checkpoint missing"
+                            );
+                            continue;
+                        }
                     };
-                    let state = crate::remediation::RemediationState {
-                        identifier: readiness.identifier.clone(),
-                        missing_before: missing,
-                        applied_count: applied.len(),
-                        still_missing: still_missing.clone(),
-                        outcome: crate::remediation::RemediationOutcome::Clear,
-                    };
-                    match crate::remediation::run_remediation_decision(rgraph, state).await {
-                        Ok(crate::remediation::RemediationOutcome::Clear) => {
+                    if let Err(e) = append_linear_enforcer_graph_audit(
+                        "remediation",
+                        "post_apply",
+                        &readiness.identifier,
+                        &run.thread_id,
+                        &run.state,
+                        &run.checkpoints,
+                        &run.write_history,
+                        &run,
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            ticket = %readiness.identifier,
+                            enforcement_graph_thread_id = %enforcement_thread_id,
+                            remediation_pre_graph_thread_id = %pre_graph_thread_id,
+                            remediation_post_graph_thread_id = %graph_thread_id,
+                            "linear enforcer [LIVE]: remediation post-apply graph audit append failed"
+                        );
+                        continue;
+                    }
+                    let comment_refs = vec![
+                        enforcement_checkpoint_ref.clone(),
+                        pre_graph_checkpoint_ref.clone(),
+                        graph_checkpoint_ref.clone(),
+                    ];
+                    let graph_note = graph_checkpoint_note(
+                        &enforcement_checkpoint_ref,
+                        &[
+                            ("remediation_pre", &pre_graph_checkpoint_ref),
+                            ("remediation_post", &graph_checkpoint_ref),
+                        ],
+                    );
+                    match run.state.outcome {
+                        crate::remediation::RemediationOutcome::Apply => {
+                            tracing::warn!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_pre_graph_thread_id = %pre_graph_thread_id, remediation_post_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: post-apply remediation graph returned Apply")
+                        }
+                        crate::remediation::RemediationOutcome::Clear => {
                             if !applied.is_empty() {
-                                crate::remediation::post_comment(&client, &cfg.token, id, &format!(
-                                    "## 🩺 Auto-remediated to dev-ready\n\nThe enforcer filled: {}. Ticket stays in progress. ({})",
-                                    applied.join(", "), plan.rationale,
-                                )).await;
+                                let body = format!(
+                                            "## 🩺 Auto-remediated to dev-ready\n\nThe enforcer filled: {}. Ticket stays in progress. ({}){}",
+                                            applied.join(", "),
+                                            plan.rationale,
+                                            graph_note,
+                                        );
+                                if let Err(e) = post_live_graph_comment(
+                                    &client,
+                                    &cfg.token,
+                                    cgraph,
+                                    id,
+                                    &readiness.identifier,
+                                    "remediation_post_clear",
+                                    body,
+                                    comment_refs.clone(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation clear comment failed");
+                                }
                             }
-                            tracing::info!(ticket = %readiness.identifier, healed = %applied.join(", "), "linear enforcer [LIVE]: healed in place (Clear)");
+                            tracing::info!(ticket = %readiness.identifier, healed = %applied.join(", "), enforcement_graph_thread_id = %enforcement_thread_id, remediation_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: healed in place (Clear)");
                         }
-                        Ok(crate::remediation::RemediationOutcome::Escalate) => {
-                            crate::remediation::post_comment(&client, &cfg.token, id, &format!(
-                                "## 🩺 Partially auto-remediated — needs your input\n\nFilled: {}. Still needs a human decision: **{}**. Please set these so the ticket is dev-ready.",
-                                if applied.is_empty() { "(nothing)".into() } else { applied.join(", ") },
-                                still_missing.join(", "),
-                            )).await;
-                            tracing::info!(ticket = %readiness.identifier, gaps = %still_missing.join(", "), "linear enforcer [LIVE]: escalated remaining gaps (stays in progress)");
+                        crate::remediation::RemediationOutcome::Escalate => {
+                            let body = format!(
+                                        "## 🩺 Partially auto-remediated — needs your input\n\nFilled: {}. Still needs a human decision: **{}**. Please set these so the ticket is dev-ready.{}",
+                                        if applied.is_empty() {
+                                            "(nothing)".into()
+                                        } else {
+                                            applied.join(", ")
+                                        },
+                                        still_missing.join(", "),
+                                        graph_note,
+                                    );
+                            if let Err(e) = post_live_graph_comment(
+                                &client,
+                                &cfg.token,
+                                cgraph,
+                                id,
+                                &readiness.identifier,
+                                "remediation_post_escalate",
+                                body,
+                                comment_refs.clone(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation post-apply escalation comment failed");
+                            }
+                            tracing::info!(ticket = %readiness.identifier, gaps = %still_missing.join(", "), enforcement_graph_thread_id = %enforcement_thread_id, remediation_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: escalated remaining gaps (stays in progress)");
                         }
-                        Ok(crate::remediation::RemediationOutcome::Revert) => {
+                        crate::remediation::RemediationOutcome::Revert => {
                             // Last resort: nothing could be healed.
-                            match enforce_ticket(&client, &cfg.token, id).await {
-                                Ok(_) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (last resort — unhealable)"),
-                                Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: revert failed"),
+                            let remediation_revert_authorization = match run.revert_authorization()
+                            {
+                                Ok(Some(authorization)) => authorization,
+                                Ok(None) => {
+                                    tracing::warn!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_post_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: remediation post-apply graph returned Revert without authorization token");
+                                    continue;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(error = %err, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_post_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: remediation post-apply revert authorization failed");
+                                    continue;
+                                }
+                            };
+                            let revert_authorization =
+                                match LinearRevertAuthorization::from_enforcement_and_remediation(
+                                    &enforcement_revert_authorization,
+                                    &remediation_revert_authorization,
+                                ) {
+                                    Ok(authorization) => authorization,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation post-apply revert authorization failed");
+                                        continue;
+                                    }
+                                };
+                            match enforce_ticket_with_graph_audit(
+                                &client,
+                                &cfg.token,
+                                id,
+                                &graph_note,
+                                cgraph,
+                                &revert_authorization,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    tracing::info!(ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: reverted (last resort — unhealable)")
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, ticket = %readiness.identifier, enforcement_graph_thread_id = %enforcement_thread_id, remediation_graph_thread_id = %graph_thread_id, "linear enforcer [LIVE]: revert failed")
+                                }
                             }
                         }
-                        Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation graph failed"),
                     }
-                } else {
-                    // No LLM/heal graph available: direct readiness-only revert.
-                    match enforce_ticket(&client, &cfg.token, id).await {
-                        Ok(true) => tracing::info!(ticket = %readiness.identifier, "linear enforcer [LIVE]: reverted (readiness-only, no heal available)"),
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: enforcement failed"),
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, ticket = %readiness.identifier, "linear enforcer [LIVE]: remediation graph failed")
                 }
             }
         }
@@ -1214,6 +2111,8 @@ pub async fn run_enforcer(cfg: EnforcerConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use langgraph_core::domain::value_objects::END;
 
     fn ready(state_type: &str) -> TicketReadiness {
         TicketReadiness {
@@ -1239,6 +2138,344 @@ mod tests {
     }
 
     #[test]
+    fn terminal_decision_checkpoint_ref_uses_decision_node_checkpoint() {
+        let terminal = serde_json::json!({
+            "identifier": "FPCRM-1",
+            "decision": "Revert"
+        });
+        let revert_checkpoint = decision_checkpoint("thread-1", "checkpoint-1", 1, "revert");
+        let end_checkpoint = decision_checkpoint("thread-1", "checkpoint-2", 2, END);
+        let checkpoints = vec![end_checkpoint, revert_checkpoint];
+        let writes = vec![
+            decision_write("checkpoint-1", 1, "revert", terminal.clone()),
+            decision_write("checkpoint-2", 2, END, terminal.clone()),
+        ];
+
+        let checkpoint_ref = terminal_decision_checkpoint_ref(
+            "enforcement",
+            "thread-1",
+            &terminal,
+            &checkpoints,
+            &writes,
+        )
+        .expect("decision-node checkpoint ref must resolve");
+
+        assert_eq!(checkpoint_ref, "thread-1#checkpoint-1");
+    }
+
+    #[test]
+    fn terminal_decision_checkpoint_ref_rejects_boundary_only_history() {
+        let terminal = serde_json::json!({
+            "identifier": "FPCRM-1",
+            "decision": "Revert"
+        });
+        let checkpoints = vec![decision_checkpoint("thread-1", "checkpoint-2", 2, END)];
+        let writes = vec![decision_write("checkpoint-2", 2, END, terminal.clone())];
+
+        let err = terminal_decision_checkpoint_ref(
+            "enforcement",
+            "thread-1",
+            &terminal,
+            &checkpoints,
+            &writes,
+        )
+        .expect_err("boundary-only write history must not authorize an audit ref");
+
+        assert!(err
+            .to_string()
+            .contains("write history omitted terminal decision-node state write"));
+    }
+
+    #[test]
+    fn graph_checkpoint_note_includes_enforcement_and_optional_remediation() {
+        assert_eq!(
+            graph_checkpoint_note("enforcement:FPCRM-1:abc#chk-1", &[]),
+            "\n\nLangGraph checkpoints: enforcement `enforcement:FPCRM-1:abc#chk-1`"
+        );
+        assert_eq!(
+            graph_checkpoint_note(
+                "enforcement:FPCRM-1:abc#chk-1",
+                &[("remediation_pre", "remediation:FPCRM-1:def#chk-2")]
+            ),
+            "\n\nLangGraph checkpoints: enforcement `enforcement:FPCRM-1:abc#chk-1`, remediation_pre `remediation:FPCRM-1:def#chk-2`"
+        );
+        assert_eq!(
+            graph_checkpoint_note(
+                "enforcement:FPCRM-1:abc#chk-1",
+                &[
+                    ("remediation_pre", "remediation:FPCRM-1:def#chk-2"),
+                    ("remediation_post", "remediation:FPCRM-1:ghi#chk-3"),
+                ],
+            ),
+            "\n\nLangGraph checkpoints: enforcement `enforcement:FPCRM-1:abc#chk-1`, remediation_pre `remediation:FPCRM-1:def#chk-2`, remediation_post `remediation:FPCRM-1:ghi#chk-3`"
+        );
+    }
+
+    #[test]
+    fn linear_enforcer_graph_audit_jsonl_preserves_terminal_decision_evidence() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("linear-enforcer-graph-runs.jsonl");
+        let terminal = serde_json::json!({
+            "identifier": "FPCRM-1",
+            "decision": "Revert"
+        });
+        let checkpoints = vec![
+            decision_checkpoint("thread-1", "checkpoint-1", 1, "revert"),
+            decision_checkpoint("thread-1", "checkpoint-2", 2, END),
+        ];
+        let writes = vec![
+            decision_write("checkpoint-1", 1, "revert", terminal.clone()),
+            decision_write("checkpoint-2", 2, END, terminal.clone()),
+        ];
+        let run = serde_json::json!({
+            "state": terminal.clone(),
+            "thread_id": "thread-1",
+            "checkpoints": &checkpoints,
+            "write_history": &writes,
+            "topology": {"graph": "enforcement", "durable_checkpointer": true},
+        });
+
+        append_linear_enforcer_graph_audit_to_path(
+            &path,
+            "enforcement",
+            "readiness",
+            "FPCRM-1",
+            "thread-1",
+            &terminal,
+            &checkpoints,
+            &writes,
+            &run,
+        )
+        .expect("append audit");
+
+        let text = std::fs::read_to_string(&path).expect("audit jsonl");
+        let row: serde_json::Value = serde_json::from_str(text.trim()).expect("audit row");
+        assert_eq!(row["workflow_authority"], "langgraph");
+        assert_eq!(row["graph"], "enforcement");
+        assert_eq!(row["stage"], "readiness");
+        assert_eq!(row["identifier"], "FPCRM-1");
+        assert_eq!(row["terminal_checkpoint_ref"], "thread-1#checkpoint-1");
+        assert_eq!(row["run"]["topology"]["graph"], "enforcement");
+        assert_eq!(
+            row["run"]["checkpoints"][0]["checkpoint_id"],
+            "checkpoint-1"
+        );
+        assert_eq!(row["run"]["write_history"][0]["node_id"], "revert");
+    }
+
+    fn decision_checkpoint(
+        thread_id: &str,
+        checkpoint_id: &str,
+        step_number: u64,
+        node_id: &str,
+    ) -> crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot<serde_json::Value>
+    {
+        crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot {
+            checkpoint_id: checkpoint_id.to_string(),
+            parent_checkpoint_id: None,
+            thread_id: thread_id.to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            step_number,
+            source_step: Some(step_number as i32),
+            source_type: Some("stream_update".to_string()),
+            source_node: Some(node_id.to_string()),
+            tags: std::collections::BTreeMap::new(),
+            writes: vec![
+                crate::decision_graph_introspection::DecisionGraphCheckpointWriteInfo {
+                    node_id: node_id.to_string(),
+                    channel: "state".to_string(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                },
+            ],
+            state: serde_json::json!({
+                "identifier": "FPCRM-1",
+                "decision": "Revert"
+            }),
+        }
+    }
+
+    fn decision_write(
+        checkpoint_id: &str,
+        step_number: u64,
+        node_id: &str,
+        value_json: serde_json::Value,
+    ) -> crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry {
+        crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry {
+            thread_id: "thread-1".to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            step_number,
+            channel: "state".to_string(),
+            node_id: node_id.to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            value_len: 1,
+            value_sha256: "0".repeat(64),
+            value_json,
+        }
+    }
+
+    fn linear_comment_topology() -> crate::decision_graph_introspection::DecisionGraphTopology {
+        crate::decision_graph_introspection::DecisionGraphTopology {
+            graph: "linear_comment".to_string(),
+            durable_checkpointer: true,
+            checkpointer_backend: "sqlite".to_string(),
+            checkpointer_scope: "database_path:test.db".to_string(),
+            auto_checkpoint: true,
+            max_iterations: 100,
+            schemas: crate::decision_graph_introspection::DecisionGraphSchemas {
+                state: None,
+                input: None,
+                output: None,
+                context: None,
+            },
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    fn linear_comment_apply_result() -> crate::linear_comment_graph::LinearCommentApplyResult {
+        let mut state = crate::linear_comment_graph::LinearCommentState::new(
+            "FPCRM-1",
+            "issue-uuid",
+            "sla_breached",
+            "## SLA breached\n\nLangGraph checkpoints: enforcement `e1`",
+            vec!["e1".to_string()],
+        );
+        state.decision = crate::linear_comment_graph::LinearCommentDecision::Post;
+        let checkpoint = crate::decision_graph_introspection::DecisionGraphCheckpointSnapshot {
+            checkpoint_id: "comment-checkpoint".to_string(),
+            parent_checkpoint_id: None,
+            thread_id: "comment-thread".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            step_number: 1,
+            source_step: Some(1),
+            source_type: Some("stream_update".to_string()),
+            source_node: Some("post_comment".to_string()),
+            tags: std::collections::BTreeMap::new(),
+            writes: vec![
+                crate::decision_graph_introspection::DecisionGraphCheckpointWriteInfo {
+                    node_id: "post_comment".to_string(),
+                    channel: "state".to_string(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                },
+            ],
+            state: state.clone(),
+        };
+        let write = crate::decision_graph_introspection::DecisionGraphWriteHistoryEntry {
+            thread_id: "comment-thread".to_string(),
+            checkpoint_id: "comment-checkpoint".to_string(),
+            step_number: 1,
+            channel: "state".to_string(),
+            node_id: "post_comment".to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            value_len: 1,
+            value_sha256: "0".repeat(64),
+            value_json: serde_json::to_value(&state).expect("state json"),
+        };
+        crate::linear_comment_graph::LinearCommentApplyResult {
+            run: crate::linear_comment_graph::LinearCommentRun {
+                state,
+                thread_id: "comment-thread".to_string(),
+                checkpoints: vec![checkpoint],
+                write_history: vec![write],
+                stream: Vec::new(),
+                topology: linear_comment_topology(),
+            },
+            posted: true,
+        }
+    }
+
+    #[test]
+    fn live_comment_requires_comment_graph_post_decision() {
+        ensure_comment_graph_post_authorized(
+            "sla_breached",
+            crate::linear_comment_graph::LinearCommentDecision::Post,
+        )
+        .expect("Post authorizes the live comment path");
+
+        let err = ensure_comment_graph_post_authorized(
+            "sla_breached",
+            crate::linear_comment_graph::LinearCommentDecision::Skip,
+        )
+        .expect_err("Skip must fail the live comment path")
+        .to_string();
+        assert!(err.contains("comment graph rejected"));
+        assert!(err.contains("sla_breached"));
+    }
+
+    #[test]
+    fn linear_comment_graph_audit_jsonl_preserves_checkpoint_evidence() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("linear-comment-graph-runs.jsonl");
+        let result = linear_comment_apply_result();
+
+        append_linear_comment_graph_audit_to_path(&path, "sla_breached", &result)
+            .expect("append audit");
+
+        let text = std::fs::read_to_string(&path).expect("audit jsonl");
+        let row: serde_json::Value = serde_json::from_str(text.trim()).expect("audit row");
+        assert_eq!(row["workflow_authority"], "langgraph");
+        assert_eq!(row["graph"], "linear_comment");
+        assert_eq!(row["identifier"], "FPCRM-1");
+        assert_eq!(row["category"], "sla_breached");
+        assert_eq!(row["posted"], true);
+        assert_eq!(
+            row["comment_checkpoint_ref"],
+            "comment-thread#comment-checkpoint"
+        );
+        assert_eq!(row["required_checkpoint_refs"], serde_json::json!(["e1"]));
+        assert_eq!(row["run"]["topology"]["graph"], "linear_comment");
+        assert_eq!(
+            row["run"]["checkpoints"][0]["checkpoint_id"],
+            "comment-checkpoint"
+        );
+        assert_eq!(row["run"]["write_history"][0]["channel"], "state");
+    }
+
+    #[test]
+    fn post_apply_readiness_must_be_fetched() {
+        let mut readiness = ready("started");
+        readiness.estimate = None;
+        assert_eq!(
+            post_apply_missing_from_readiness(Ok(readiness)).expect("fetched readiness"),
+            vec!["estimate".to_string()]
+        );
+
+        let err = post_apply_missing_from_readiness(Err(EnforcerError::Api("boom".into())))
+            .expect_err("post-apply cannot synthesize readiness evidence")
+            .to_string();
+        assert!(err.contains("boom"));
+    }
+
+    #[test]
+    fn revert_mutation_validator_rejects_failed_graphql_envelopes() {
+        validate_linear_success(
+            "issueUpdate",
+            r#"{"data":{"issueUpdate":{"success":true}}}"#,
+        )
+        .expect("success envelope");
+        assert!(validate_linear_success(
+            "issueUpdate",
+            r#"{"errors":[{"message":"permission denied"}],"data":null}"#
+        )
+        .expect_err("GraphQL errors must fail")
+        .to_string()
+        .contains("GraphQL errors"));
+        assert!(validate_linear_success(
+            "issueUpdate",
+            r#"{"data":{"issueUpdate":{"success":false}}}"#
+        )
+        .expect_err("success=false must fail")
+        .to_string()
+        .contains("success=true"));
+        assert!(
+            validate_linear_success("issueUpdate", r#"{"data":{"issueUpdate":{}}}"#)
+                .expect_err("missing success must fail")
+                .to_string()
+                .contains("success=true")
+        );
+    }
+
+    #[test]
     fn dev_ready_started_is_not_reverted() {
         assert!(!ready("started").should_revert());
     }
@@ -1253,7 +2490,10 @@ mod tests {
                 "labels": { "nodes": [] },
                 "integrationSourceType": null,
             });
-            issue.as_object_mut().unwrap().insert("botActor".into(), actor);
+            issue
+                .as_object_mut()
+                .unwrap()
+                .insert("botActor".into(), actor);
             parse_readiness(&issue).expect("parses")
         };
         // botActor present ⇒ agent-authored (silent heal path).
@@ -1283,28 +2523,46 @@ mod tests {
 
         // Breached: deadline in the past.
         let past = rfc(now - Duration::hours(1));
-        assert_eq!(evaluate_sla(Some(2), None, Some(&past), None, now), SlaVerdict::Breached);
+        assert_eq!(
+            evaluate_sla(Some(2), None, Some(&past), None, now),
+            SlaVerdict::Breached
+        );
 
-        // HighRisk via 80% fallback: 90% of a 10h window elapsed, no native threshold.
+        // HighRisk via Sentinel's 80% policy: 90% of a 10h window elapsed.
         let start = rfc(now - Duration::hours(9));
         let breach = rfc(now + Duration::hours(1));
-        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), None, now), SlaVerdict::HighRisk);
+        assert_eq!(
+            evaluate_sla(Some(2), Some(&start), Some(&breach), None, now),
+            SlaVerdict::HighRisk
+        );
 
         // Ok: only 10% elapsed (started 1h ago, breaches in 9h), no native threshold.
         let start2 = rfc(now - Duration::hours(1));
         let breach2 = rfc(now + Duration::hours(9));
-        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), None, now), SlaVerdict::Ok);
+        assert_eq!(
+            evaluate_sla(Some(2), Some(&start2), Some(&breach2), None, now),
+            SlaVerdict::Ok
+        );
 
         // NATIVE high-risk takes precedence: high-risk-at already passed → HighRisk
         // even though only 10% of the window has elapsed by the 80% heuristic.
         let hr_past = rfc(now - Duration::minutes(5));
-        assert_eq!(evaluate_sla(Some(2), Some(&start2), Some(&breach2), Some(&hr_past), now), SlaVerdict::HighRisk);
+        assert_eq!(
+            evaluate_sla(Some(2), Some(&start2), Some(&breach2), Some(&hr_past), now),
+            SlaVerdict::HighRisk
+        );
         // Native high-risk in the future → still Ok despite being well into the window.
         let hr_future = rfc(now + Duration::hours(8));
-        assert_eq!(evaluate_sla(Some(2), Some(&start), Some(&breach), Some(&hr_future), now), SlaVerdict::Ok);
+        assert_eq!(
+            evaluate_sla(Some(2), Some(&start), Some(&breach), Some(&hr_future), now),
+            SlaVerdict::Ok
+        );
 
         // UrgentNoSla: priority 1, no SLA clock.
-        assert_eq!(evaluate_sla(Some(1), None, None, None, now), SlaVerdict::UrgentNoSla);
+        assert_eq!(
+            evaluate_sla(Some(1), None, None, None, now),
+            SlaVerdict::UrgentNoSla
+        );
 
         // Non-urgent with no SLA is fine.
         assert_eq!(evaluate_sla(Some(3), None, None, None, now), SlaVerdict::Ok);
@@ -1316,10 +2574,19 @@ mod tests {
         use chrono::NaiveDate;
         let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
         assert!(is_overdue(Some("2026-06-09"), today), "yesterday ⇒ overdue");
-        assert!(!is_overdue(Some("2026-06-10"), today), "today ⇒ not overdue");
-        assert!(!is_overdue(Some("2026-06-11"), today), "tomorrow ⇒ not overdue");
+        assert!(
+            !is_overdue(Some("2026-06-10"), today),
+            "today ⇒ not overdue"
+        );
+        assert!(
+            !is_overdue(Some("2026-06-11"), today),
+            "tomorrow ⇒ not overdue"
+        );
         assert!(!is_overdue(None, today), "no due date ⇒ not overdue");
-        assert!(!is_overdue(Some("garbage"), today), "unparseable ⇒ not overdue");
+        assert!(
+            !is_overdue(Some("garbage"), today),
+            "unparseable ⇒ not overdue"
+        );
     }
 
     #[test]
@@ -1335,7 +2602,9 @@ mod tests {
 
     #[test]
     fn acceptance_criteria_needs_three_checklist_or_numbered_items() {
-        assert!(has_acceptance_criteria("## AC\n- [ ] one\n- [ ] two\n- [ ] three"));
+        assert!(has_acceptance_criteria(
+            "## AC\n- [ ] one\n- [ ] two\n- [ ] three"
+        ));
         assert!(has_acceptance_criteria("1. first\n2. second\n3) third"));
         assert!(!has_acceptance_criteria("- [ ] only one\n- [ ] two"));
         assert!(!has_acceptance_criteria("just prose, no list at all"));
@@ -1350,7 +2619,11 @@ mod tests {
         t.in_cycle = false;
         t.in_project = false;
         let d = t.extended_discipline();
-        assert!(d.contains(&"no assignee") && d.contains(&"not in a cycle") && d.contains(&"no project"));
+        assert!(
+            d.contains(&"no assignee")
+                && d.contains(&"not in a cycle")
+                && d.contains(&"no project")
+        );
         // Not started ⇒ discipline checks don't fire (only enforce on active work).
         let mut backlog = ready("backlog");
         backlog.assignee_present = false;
@@ -1361,14 +2634,22 @@ mod tests {
 
     #[test]
     fn has_live_blocker_detects_unresolved_inbound_blocks() {
-        let blocked_by = |state: &str| serde_json::json!({
-            "inverseRelations": { "nodes": [
-                { "type": "blocks", "issue": { "state": { "type": state } } }
-            ] }
-        });
-        assert!(has_live_blocker(&blocked_by("started")), "blocked by active issue ⇒ live");
+        let blocked_by = |state: &str| {
+            serde_json::json!({
+                "inverseRelations": { "nodes": [
+                    { "type": "blocks", "issue": { "state": { "type": state } } }
+                ] }
+            })
+        };
+        assert!(
+            has_live_blocker(&blocked_by("started")),
+            "blocked by active issue ⇒ live"
+        );
         assert!(has_live_blocker(&blocked_by("backlog")));
-        assert!(!has_live_blocker(&blocked_by("completed")), "blocker done ⇒ not live");
+        assert!(
+            !has_live_blocker(&blocked_by("completed")),
+            "blocker done ⇒ not live"
+        );
         assert!(!has_live_blocker(&blocked_by("canceled")));
         // 'related' (not 'blocks') is not a blocker.
         let related = serde_json::json!({"inverseRelations":{"nodes":[{"type":"related","issue":{"state":{"type":"started"}}}]}});
@@ -1381,7 +2662,9 @@ mod tests {
     fn extended_discipline_flags_active_blocker_on_started() {
         let mut t = ready("started");
         t.actively_blocked = true;
-        assert!(t.extended_discipline().contains(&"started but actively blocked"));
+        assert!(t
+            .extended_discipline()
+            .contains(&"started but actively blocked"));
     }
 
     #[test]
@@ -1406,7 +2689,10 @@ mod tests {
         let mut t = ready("backlog");
         t.estimate = None;
         t.has_type_label = false;
-        assert!(!t.should_revert(), "backlog work isn't enforced until it starts");
+        assert!(
+            !t.should_revert(),
+            "backlog work isn't enforced until it starts"
+        );
     }
 
     #[test]
@@ -1457,16 +2743,19 @@ mod tests {
     fn cfg(team_filter: Option<Vec<String>>) -> EnforcerConfig {
         EnforcerConfig {
             token: "tok".into(),
-            mode: EnforcerMode::default(),
             team_filter,
         }
     }
 
     #[test]
-    fn mode_defaults_to_shadow() {
-        // The conservative default — live mutation must be opt-in.
-        assert_eq!(EnforcerMode::default(), EnforcerMode::Shadow);
-        assert_eq!(cfg(None).mode, EnforcerMode::Shadow);
+    fn from_raw_requires_explicit_live_arming() {
+        assert!(EnforcerConfig::from_raw(Some("pat".into()), None, None).is_none());
+        assert!(EnforcerConfig::from_raw(
+            Some("pat".into()),
+            Some("on".into()),
+            Some(" , ".into())
+        )
+        .is_none());
     }
 
     #[test]
@@ -1481,7 +2770,10 @@ mod tests {
         assert!(c.team_allowed("FPCRM-7"));
         assert!(c.team_allowed("fproute-42"), "match is case-insensitive");
         assert!(!c.team_allowed("ATLUS-9"), "off-list team is rejected");
-        assert!(!c.team_allowed("FPCRMX-1"), "prefix must be exact, not a substring");
+        assert!(
+            !c.team_allowed("FPCRMX-1"),
+            "prefix must be exact, not a substring"
+        );
     }
 
     #[test]
@@ -1498,9 +2790,8 @@ mod tests {
             Some("LIVE".into()),
             Some("FPCRM, FPROUTE ,".into()),
         )
-        .expect("token present ⇒ Some");
+        .expect("token and live arming present");
         assert_eq!(c.token, "pat_xyz");
-        assert_eq!(c.mode, EnforcerMode::Live, "ENFORCE=LIVE (any case) arms live");
         assert_eq!(
             c.team_filter,
             Some(vec!["FPCRM".to_string(), "FPROUTE".to_string()]),
@@ -1509,17 +2800,11 @@ mod tests {
     }
 
     #[test]
-    fn from_raw_defaults_to_shadow_and_no_filter() {
-        // ENFORCE unset ⇒ safe Shadow; TEAMS unset ⇒ all teams.
-        let c = EnforcerConfig::from_raw(Some("pat".into()), None, None).unwrap();
-        assert_eq!(c.mode, EnforcerMode::Shadow, "default is safe Shadow");
-        assert_eq!(c.team_filter, None, "no TEAMS ⇒ all teams");
-        // Any non-"live" value also stays Shadow.
-        let c2 =
-            EnforcerConfig::from_raw(Some("pat".into()), Some("on".into()), Some(" , ".into()))
+    fn from_raw_live_with_empty_teams_means_all_teams() {
+        let c =
+            EnforcerConfig::from_raw(Some("pat".into()), Some("live".into()), Some(" , ".into()))
                 .unwrap();
-        assert_eq!(c2.mode, EnforcerMode::Shadow, "ENFORCE=on is not live");
-        assert_eq!(c2.team_filter, None, "all-empty TEAMS ⇒ no filter");
+        assert_eq!(c.team_filter, None, "all-empty TEAMS means no filter");
     }
 
     #[test]
@@ -1536,7 +2821,10 @@ mod tests {
             "issue-1".to_string(),
             std::time::Instant::now() - (DEBOUNCE + Duration::from_secs(1)),
         );
-        assert!(!debounced(&mut seen, "issue-1"), "allowed again after the window");
+        assert!(
+            !debounced(&mut seen, "issue-1"),
+            "allowed again after the window"
+        );
     }
 
     // ----- poll source --------------------------------------------------
@@ -1558,14 +2846,23 @@ mod tests {
             serde_json::json!({ "id": "b", "updatedAt": "2026-06-09T12:00:00Z" }), // newest
             serde_json::json!({ "id": "c", "updatedAt": "2026-06-09T11:00:00Z" }),
         ];
-        assert_eq!(next_cursor("2026-06-01T00:00:00Z", &nodes), "2026-06-09T12:00:00Z");
+        assert_eq!(
+            next_cursor("2026-06-01T00:00:00Z", &nodes),
+            "2026-06-09T12:00:00Z"
+        );
     }
 
     #[test]
     fn next_cursor_keeps_prev_when_nothing_newer() {
         // Empty round, or all older than the cursor → cursor unchanged.
-        assert_eq!(next_cursor("2026-06-09T12:00:00Z", &[]), "2026-06-09T12:00:00Z");
+        assert_eq!(
+            next_cursor("2026-06-09T12:00:00Z", &[]),
+            "2026-06-09T12:00:00Z"
+        );
         let older = vec![serde_json::json!({ "id": "a", "updatedAt": "2026-06-08T00:00:00Z" })];
-        assert_eq!(next_cursor("2026-06-09T12:00:00Z", &older), "2026-06-09T12:00:00Z");
+        assert_eq!(
+            next_cursor("2026-06-09T12:00:00Z", &older),
+            "2026-06-09T12:00:00Z"
+        );
     }
 }

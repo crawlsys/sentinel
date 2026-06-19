@@ -22,9 +22,9 @@
 //! Rates are per million tokens (MTok), from `platform.claude.com`
 //! (verified 2026-06). The Opus 4.x family (4.5/4.6/4.7/4.8) shares one
 //! price; Sonnet 4.x and Haiku 4.x are cheaper. A model string that
-//! doesn't match a known family falls back to the Opus rate (the most
-//! expensive — so an unknown model never *under*-reports cost) and is
-//! counted in `unknown_model_tokens` for transparency.
+//! doesn't match a known family is not priced; it is counted in
+//! `unknown_model_tokens` and the token-cost LangGraph classifies the report
+//! as `UnknownModelRisk`.
 //!
 //! ## Model attribution
 //!
@@ -32,8 +32,8 @@
 //! attribute a ticket's whole token volume to its dominant (most-sessions)
 //! model. This is an approximation, documented as such; it is materially
 //! correct because Opus dominates and the cheaper models are a rounding
-//! error in these workloads. When a ticket has no usable model, it falls to
-//! the Opus rate.
+//! error in these workloads. When a ticket has no usable model, Sentinel
+//! reports unknown model risk instead of inventing a rate.
 //!
 //! Output: `~/.claude/sentinel/metrics/token-cost.{json,jsonl}`.
 
@@ -76,17 +76,17 @@ const HAIKU: Rates = Rates {
 };
 
 /// Map a model string (e.g. `"opus-4-7"`, `"claude-sonnet-4-6"`) to its
-/// rates. Unknown → Opus (never under-reports). Returns `(rates, known)`.
-fn rates_for(model: &str) -> (Rates, bool) {
+/// rates. Unknown models are not priced.
+fn rates_for(model: &str) -> Option<Rates> {
     let m = model.to_lowercase();
     if m.contains("opus") {
-        (OPUS, true)
+        Some(OPUS)
     } else if m.contains("sonnet") {
-        (SONNET, true)
+        Some(SONNET)
     } else if m.contains("haiku") {
-        (HAIKU, true)
+        Some(HAIKU)
     } else {
-        (OPUS, false)
+        None
     }
 }
 
@@ -125,7 +125,9 @@ pub struct TokenCostSummary {
     pub cache_savings_usd: f64,
     /// `cache_savings / without` as a fraction (0–1).
     pub cache_savings_fraction: f64,
-    /// Tokens attributed to an unknown model (priced at the Opus rate).
+    /// Tokens attributed to an unknown model. These tokens are deliberately
+    /// unpriced; any non-zero value makes the graph classify the report as
+    /// `UnknownModelRisk`.
     pub unknown_model_tokens: u64,
     pub by_model: BTreeMap<String, ModelCost>,
 }
@@ -140,8 +142,25 @@ pub fn scan_token_cost(tokens_input: &Path, output_summary: &Path) -> Result<Tok
     let mut jsonl_rows: Vec<serde_json::Value> = Vec::new();
 
     for r in &rows {
-        let (rates, known) = rates_for(&r.model);
         let family = model_family(&r.model);
+        let tok = r.total_input + r.cache_read + r.cache_creation + r.output;
+
+        let Some(rates) = rates_for(&r.model) else {
+            summary.tickets += 1;
+            summary.total_tokens += tok;
+            summary.input_tokens += r.total_input;
+            summary.output_tokens += r.output;
+            summary.cache_write_tokens += r.cache_creation;
+            summary.cache_read_tokens += r.cache_read;
+            summary.unknown_model_tokens += tok;
+            jsonl_rows.push(serde_json::json!({
+                "model": family,
+                "tokens": tok,
+                "priced": false,
+                "reason": "unknown model family",
+            }));
+            continue;
+        };
 
         // With caching: each category at its own rate.
         let cached = per_mtok(r.total_input, rates.input)
@@ -153,7 +172,6 @@ pub fn scan_token_cost(tokens_input: &Path, output_summary: &Path) -> Result<Tok
         let reinput = r.total_input + r.cache_read + r.cache_creation;
         let uncached = per_mtok(reinput, rates.input) + per_mtok(r.output, rates.output);
 
-        let tok = r.total_input + r.cache_read + r.cache_creation + r.output;
         summary.tickets += 1;
         summary.total_tokens += tok;
         summary.input_tokens += r.total_input;
@@ -162,9 +180,6 @@ pub fn scan_token_cost(tokens_input: &Path, output_summary: &Path) -> Result<Tok
         summary.cache_read_tokens += r.cache_read;
         summary.cost_with_caching_usd += cached;
         summary.cost_without_caching_usd += uncached;
-        if !known {
-            summary.unknown_model_tokens += tok;
-        }
 
         let mc = summary.by_model.entry(family.clone()).or_default();
         mc.tokens += tok;
@@ -174,6 +189,7 @@ pub fn scan_token_cost(tokens_input: &Path, output_summary: &Path) -> Result<Tok
         jsonl_rows.push(serde_json::json!({
             "model": family,
             "tokens": tok,
+            "priced": true,
             "cached_usd": cached,
             "uncached_usd": uncached,
         }));
@@ -228,13 +244,22 @@ fn load_rows(path: &Path) -> Result<Vec<TokenRow>> {
             continue;
         };
         out.push(TokenRow {
-            total_input: v.get("total_input").and_then(serde_json::Value::as_u64).unwrap_or(0),
-            cache_read: v.get("cache_read").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            total_input: v
+                .get("total_input")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            cache_read: v
+                .get("cache_read")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             cache_creation: v
                 .get("cache_creation")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0),
-            output: v.get("output").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            output: v
+                .get("output")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             model: dominant_model(v.get("models")),
         });
     }
@@ -276,7 +301,6 @@ fn write_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn input(jsonl: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -313,16 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_falls_to_opus_and_is_counted() {
+    fn unknown_model_is_unpriced_and_counted_as_risk() {
         let i = input(
             r#"{"total_input":1000000,"cache_read":0,"cache_creation":0,"output":0,"models":{"mystery-model":1}}"#,
         );
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_token_cost(i.path(), out.path()).unwrap();
-        // 1M input at opus $5.
-        assert!((s.cost_with_caching_usd - 5.0).abs() < 1e-6);
+        assert_eq!(s.cost_with_caching_usd, 0.0);
+        assert_eq!(s.cost_without_caching_usd, 0.0);
         assert_eq!(s.unknown_model_tokens, 1_000_000);
-        assert!(s.by_model.contains_key("unknown"));
+        assert!(!s.by_model.contains_key("unknown"));
     }
 
     #[test]

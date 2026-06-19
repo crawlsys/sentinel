@@ -6,7 +6,7 @@
 use crate::hooks::FileSystemPort;
 use sentinel_domain::events::HookInput;
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::{SkillWorkflow, WorkflowState};
+use sentinel_domain::workflow::{SkillWorkflow, WorkflowBlock, WorkflowState};
 
 /// Result of evaluating a gate
 #[derive(Debug)]
@@ -43,156 +43,109 @@ pub fn evaluate(
     };
 
     // ── Cross-workflow blocked tool prefix check ──────────────────────
-    // Check blocked_tool_prefixes across ALL workflows that have been activated
-    // in this session (have workflow state) or are the current active skill.
-    // This prevents the skill-switch bypass: switch to skill B (no blocked
-    // prefixes), use tools that skill A blocks, switch back.
+    // Check blocked_tool_prefixes across ALL workflows that have durable
+    // LangGraph projection in this session. `active_skill` is only a context
+    // marker for skill loading; it must not become workflow authority without a
+    // checkpoint-backed graph state.
     for (wf_skill, wf_def) in workflows {
         if wf_def.blocked_tool_prefixes.is_empty() {
             continue;
         }
-        // Only enforce for workflows that have been touched in this session
-        let is_relevant = state.active_skill.as_deref() == Some(wf_skill)
-            || state.workflows.contains_key(wf_skill);
-        if !is_relevant {
+        if !state.has_graph_workflow(wf_skill) {
             continue;
         }
         for prefix in &wf_def.blocked_tool_prefixes {
             if tool_name.starts_with(prefix.as_str()) {
-                let next = wf_def
-                    .phases
-                    .iter()
-                    .find(|p| p.required)
-                    .map(|p| (p.id.clone(), p.file.clone()));
-                let (next_phase, next_file) = next.unwrap_or_default();
+                let Some(next) = wf_def.phases.iter().find(|p| p.required) else {
+                    return GateDecision::Block {
+                        skill: wf_skill.clone(),
+                        reason: format!(
+                            "Workflow '{wf_skill}' has no required phases. Blocking because the workflow configuration is invalid."
+                        ),
+                        next_phase: String::new(),
+                        next_phase_file: String::new(),
+                    };
+                };
                 return GateDecision::Block {
                     skill: wf_skill.clone(),
                     reason: format!(
                         "Workflow '{wf_skill}': tool '{tool_name}' is blocked (matches blocked prefix '{prefix}').\n\
                          Use the workflow's native tools instead of equivalent alternatives."
                     ),
-                    next_phase,
-                    next_phase_file: next_file,
+                    next_phase: next.id.clone(),
+                    next_phase_file: next.file.clone(),
                 };
             }
         }
     }
 
-    // Check active skill's workflow for phase-based gating.
-    //
-    // ── Skill-clear / skill-switch bypass prevention (Attacks #24/#38) ──
-    // Three cases:
-    //   1. active_skill has a workflow → enforce it directly
-    //   2. active_skill is set but has no workflow (Tier 0 skill) → fall through
-    //      to incomplete workflow check
-    //   3. active_skill is None (skill cleared by "no match" or general chat) →
-    //      fall through to incomplete workflow check
-    //
-    // Cases 2 and 3 both search for previously-activated incomplete workflows.
-    // This prevents: activate browserbase → say "hello" (clears skill) → all tools pass.
-    let (workflow, workflow_state, effective_skill) = match &state.active_skill {
-        Some(skill_name) => match workflows.get(skill_name.as_str()) {
-            Some(wf) => match state.workflows.get(skill_name.as_str()) {
-                Some(ws) => (wf, ws, skill_name.clone()),
-                None => return GateDecision::Allow,
-            },
-            None => {
-                // Active skill has no workflow definition (Tier 0) — fall through
-                match find_incomplete_workflow(state, workflows, Some(skill_name)) {
-                    Some((ref_wf, ref_state, ref_skill)) => (ref_wf, ref_state, ref_skill),
-                    None => return GateDecision::Allow,
-                }
-            }
-        },
-        None => {
-            // No active skill — but may have incomplete workflows from earlier.
-            // Attack #38: "say hello" clears active_skill via skill router.
-            match find_incomplete_workflow(state, workflows, None) {
-                Some((ref_wf, ref_state, ref_skill)) => (ref_wf, ref_state, ref_skill),
-                None => return GateDecision::Allow,
-            }
-        }
-    };
+    // Phase gates are driven only by durable LangGraph workflow projection.
+    // This still prevents skill-clear / skill-switch bypasses because projected
+    // graph workflows remain in session state even when `active_skill` changes.
+    let (workflow, workflow_state, effective_skill): (&SkillWorkflow, &WorkflowState, String) =
+        match find_incomplete_workflow(state, workflows, None) {
+            Some((ref_wf, ref_state, ref_skill)) => (ref_wf, ref_state, ref_skill),
+            None => return GateDecision::Allow,
+        };
 
     // Check if workflow blocks this tool
     if let Some(block) = workflow_state.should_block(workflow, tool_name) {
-        // ── Never-entered workflow downgrade (phantom-arming fix) ──────────
-        // A phased hard-gate workflow (e.g. `linear`) can become "active" in a
-        // session merely because the skill-router matched the skill's TOPIC in a
-        // user prompt (e.g. "build me a linear doc") — without the user ever
-        // entering the workflow (no phase file read, no phase completed). In that
-        // state the gate would otherwise hard-deny EVERY non-exempt tool for the
-        // rest of the session, with the only escape being to actually perform the
-        // workflow's first phase (e.g. claim a Linear issue) — which was never the
-        // user's task. That traps unrelated work (writing a Desktop doc, editing
-        // an unrelated file) behind a workflow that was never really started.
-        //
-        // Fix: if the workflow has ZERO completed phases AND no phase file has
-        // been read for this skill, treat it as "armed but never entered" and
-        // downgrade the hard block to Allow (advisory). Enforcement is restored
-        // the instant the user demonstrably enters the workflow — reading any
-        // phase file (record_phase_read) or completing any phase. This preserves
-        // every skip/switch attack mitigation (Attacks #21/#24/#38/#55), which all
-        // assume the workflow was actually entered; it only relaxes the
-        // never-entered false-arm that caused whole-session deadlocks.
-        let entered_workflow = !workflow_state.completed_phases.is_empty()
-            || state
-                .phases_read
-                .get(&effective_skill)
-                .is_some_and(|files| !files.is_empty());
-        if !entered_workflow {
-            eprintln!(
-                "[sentinel] phase_gate: workflow '{effective_skill}' is active but never \
-                 entered (0 phases completed, 0 phase files read) — downgrading hard block to \
-                 advisory ALLOW for tool '{tool_name}'. Enforcement resumes once any phase file \
-                 is read or completed."
-            );
-            return GateDecision::Allow;
-        }
-
-        let phases_dir = fs
-            .home_dir()
-            .expect("[sentinel] FATAL: Cannot determine home directory")
-            .join(".claude/skills")
-            .join(&effective_skill)
-            .join("phases");
-
-        let phase_file_path = phases_dir.join(&block.next_phase_file);
-
-        // Distinguish two cases:
-        // 1. "No phase system" — phases/ directory doesn't exist at all.
-        //    The workflow definition in workflows.toml is documentation only.
-        //    This prevents hard-gate deadlocks for 42+ skills without phase files.
-        // 2. "Phase file missing" — phases/ dir exists but the specific file is gone.
-        //    This is likely a configuration error. Log a loud warning but still block,
-        //    because the skill HAS a phase system — it's just broken.
-        if !fs.exists(&phases_dir) {
-            // Case 1: No phase system authored yet — allow
-            return GateDecision::Allow;
-        }
-
-        if !fs.exists(&phase_file_path) {
-            // Case 2: Phase system exists but specific file is missing.
-            // Log warning for debugging, but still block — fail closed.
-            eprintln!(
-                "[sentinel] WARNING: Phase file missing but phases/ dir exists: {}. \
-                 Skill '{}' has a broken phase configuration. Blocking to fail closed.",
-                phase_file_path.display(),
-                effective_skill,
-            );
-            // Still block — the skill has a phase system, the file is just missing.
-            // The user needs to either create the file or remove the phases/ dir.
-        }
-
-        return GateDecision::Block {
-            skill: effective_skill,
-            reason: block.reason,
-            next_phase: block.next_phase,
-            next_phase_file: block.next_phase_file,
-        };
+        return gate_block_decision(state, effective_skill, block, fs);
     }
 
     GateDecision::Allow
+}
+
+fn gate_block_decision(
+    state: &SessionState,
+    effective_skill: String,
+    block: WorkflowBlock,
+    fs: &dyn FileSystemPort,
+) -> GateDecision {
+    let next_phase_read = state.has_phase_been_read(&effective_skill, &block.next_phase_file);
+    if next_phase_read {
+        return GateDecision::Allow;
+    }
+
+    emit_phase_file_authority_warnings(&effective_skill, &block.next_phase_file, fs);
+
+    GateDecision::Block {
+        skill: effective_skill,
+        reason: block.reason,
+        next_phase: block.next_phase,
+        next_phase_file: block.next_phase_file,
+    }
+}
+
+fn emit_phase_file_authority_warnings(
+    effective_skill: &str,
+    next_phase_file: &str,
+    fs: &dyn FileSystemPort,
+) {
+    let phases_dir = fs
+        .home_dir()
+        .expect("[sentinel] FATAL: Cannot determine home directory")
+        .join(".claude/skills")
+        .join(&effective_skill)
+        .join("phases");
+
+    let phase_file_path = phases_dir.join(next_phase_file);
+
+    if !fs.exists(&phases_dir) {
+        eprintln!(
+            "[sentinel] WARNING: Phase directory missing for active workflow '{}': {}. \
+             Blocking to fail closed.",
+            effective_skill,
+            phases_dir.display(),
+        );
+    } else if !fs.exists(&phase_file_path) {
+        eprintln!(
+            "[sentinel] WARNING: Phase file missing but phases/ dir exists: {}. \
+             Skill '{}' has a broken phase configuration. Blocking to fail closed.",
+            phase_file_path.display(),
+            effective_skill,
+        );
+    }
 }
 
 /// Find the most-progressed incomplete workflow from a previous skill activation.
@@ -214,7 +167,7 @@ fn find_incomplete_workflow<'a>(
 ) -> Option<(&'a SkillWorkflow, &'a WorkflowState, String)> {
     let mut best: Option<(&'a SkillWorkflow, &'a WorkflowState, String, usize)> = None;
 
-    for (prev_skill, prev_state) in &state.workflows {
+    for (prev_skill, prev_state) in state.graph_workflows() {
         // Skip the excluded skill (e.g., the current active Tier 0 skill)
         if exclude_skill == Some(prev_skill) {
             continue;
@@ -233,7 +186,7 @@ fn find_incomplete_workflow<'a>(
 
         // **Attack #55 fix**: Pick the workflow with the LEAST progress (most restrictive).
         // "Most progressed" lets an attacker create a near-complete decoy workflow then
-        // switch skill — the fallback picks the decoy and enforces fewer remaining gates.
+        // switch skill — a loose recovery path picks the decoy and enforces fewer remaining gates.
         // "Least progressed" = most remaining required phases = strictest enforcement.
         let progress = prev_state.completed_phases.len();
         if best
@@ -248,11 +201,244 @@ fn find_incomplete_workflow<'a>(
 }
 
 /// Public wrapper for `find_incomplete_workflow` — used by `phase_gate::check_post_merge_skip`
-/// to mirror the skill-clear fallback logic from the main gate evaluation.
+/// to mirror the skill-clear enforcement logic from the main gate evaluation.
 pub fn find_incomplete_workflow_pub<'a>(
     state: &'a SessionState,
     workflows: &'a std::collections::HashMap<String, SkillWorkflow>,
     exclude_skill: Option<&String>,
 ) -> Option<(&'a SkillWorkflow, &'a WorkflowState, String)> {
     find_incomplete_workflow(state, workflows, exclude_skill)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
+
+    use sentinel_domain::judge::JudgeModel;
+    use sentinel_domain::workflow::WorkflowPhase;
+
+    use super::*;
+
+    fn inject_old_workflows_field(
+        state: &mut SessionState,
+        skill: &str,
+        workflow_state: WorkflowState,
+    ) {
+        let mut value = serde_json::to_value(&*state).expect("session state serializes");
+        let old_workflows = serde_json::json!({
+            skill: serde_json::to_value(workflow_state).expect("workflow state serializes")
+        });
+        value
+            .as_object_mut()
+            .expect("session state is an object")
+            .insert("workflows".to_string(), old_workflows);
+        *state = serde_json::from_value(value).expect("session state deserializes");
+    }
+
+    struct ExistingPhaseFs;
+
+    impl FileSystemPort for ExistingPhaseFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/tmp/sentinel-test-home"))
+        }
+
+        fn read_to_string(
+            &self,
+            _p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not read files")
+        }
+
+        fn write(
+            &self,
+            _p: &Path,
+            _content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not write files")
+        }
+
+        fn create_dir_all(
+            &self,
+            _p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not create directories")
+        }
+
+        fn read_dir(
+            &self,
+            _p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not read directories")
+        }
+
+        fn exists(&self, p: &Path) -> bool {
+            let s = p.to_string_lossy();
+            s.ends_with(".claude/skills/linear/phases")
+                || s.ends_with(".claude/skills/linear/phases/claim.md")
+        }
+
+        fn is_dir(&self, p: &Path) -> bool {
+            p.to_string_lossy()
+                .ends_with(".claude/skills/linear/phases")
+        }
+
+        fn metadata(
+            &self,
+            _p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not inspect metadata")
+        }
+
+        fn append(
+            &self,
+            _p: &Path,
+            _content: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            unimplemented!("gate tests do not append files")
+        }
+    }
+
+    fn workflow() -> SkillWorkflow {
+        SkillWorkflow {
+            skill: "linear".to_string(),
+            phases: vec![WorkflowPhase {
+                id: "claim".to_string(),
+                file: "claim.md".to_string(),
+                required: true,
+                judge: JudgeModel::Sonnet,
+                description: "claim".to_string(),
+                required_dyad: None,
+            }],
+            blocked_tool_prefixes: Vec::new(),
+            blocked_bash_patterns: Vec::new(),
+            bash_allowlist: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn phase_read_allows_next_phase_work_without_marking_phase_complete() {
+        let mut state = SessionState::new("sess");
+        state.set_active_skill("linear");
+        state.record_phase_read("linear", "claim.md");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess"));
+        let workflows = HashMap::from([("linear".to_string(), workflow())]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Allow
+        ));
+        assert!(
+            state
+                .graph_workflow("linear")
+                .is_some_and(|wf| wf.completed_phases.is_empty()),
+            "phase read must not mark completion"
+        );
+    }
+
+    #[test]
+    fn active_workflow_marker_without_graph_state_is_context_only() {
+        let mut state = SessionState::new("sess");
+        state.set_active_skill_marker("linear");
+        let workflows = HashMap::from([("linear".to_string(), workflow())]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Allow
+        ));
+        assert!(
+            !state.has_any_graph_workflow(),
+            "marker-only state must not synthesize graph workflow authority"
+        );
+    }
+
+    #[test]
+    fn phase_read_without_graph_projection_is_not_workflow_authority() {
+        let mut state = SessionState::new("sess");
+        state.set_active_skill_marker("linear");
+        state.record_phase_read("linear", "claim.md");
+        let workflows = HashMap::from([("linear".to_string(), workflow())]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Allow
+        ));
+        assert!(
+            !state.has_any_graph_workflow(),
+            "reading a phase file must not synthesize LangGraph workflow state"
+        );
+    }
+
+    #[test]
+    fn graph_projected_incomplete_workflow_blocks_after_active_skill_cleared() {
+        let mut state = SessionState::new("sess");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess"));
+        let workflows = HashMap::from([("linear".to_string(), workflow())]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Block { skill, .. } if skill == "linear"
+        ));
+    }
+
+    #[test]
+    fn old_workflows_field_does_not_enforce_after_active_skill_cleared() {
+        let mut state = SessionState::new("sess");
+        inject_old_workflows_field(&mut state, "linear", WorkflowState::new("linear", "sess"));
+        let workflows = HashMap::from([("linear".to_string(), workflow())]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Allow
+        ));
+    }
+
+    #[test]
+    fn future_phase_read_does_not_unlock_next_phase() {
+        let mut state = SessionState::new("sess");
+        state.set_active_skill("linear");
+        state.record_phase_read("linear", "fetch.md");
+        state.set_graph_projected_workflow("linear", WorkflowState::new("linear", "sess"));
+        let mut wf = workflow();
+        wf.phases.push(WorkflowPhase {
+            id: "fetch".to_string(),
+            file: "fetch.md".to_string(),
+            required: true,
+            judge: JudgeModel::Sonnet,
+            description: "fetch".to_string(),
+            required_dyad: None,
+        });
+        let workflows = HashMap::from([("linear".to_string(), wf)]);
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            evaluate(&state, &workflows, &input, &ExistingPhaseFs),
+            GateDecision::Block { .. }
+        ));
+    }
 }

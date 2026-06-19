@@ -102,10 +102,9 @@ fn detect_correction(prompt: &str) -> Option<&'static str> {
 /// in the response says nothing about whether the recalled fact was drawn on.
 /// Deliberately small: over-filtering would discard genuine domain terms.
 const USAGE_STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "that", "this", "are", "was", "were", "has",
-    "have", "had", "its", "via", "per", "use", "uses", "used", "default",
-    "value", "count", "runs", "run", "set", "via", "into", "from", "when",
-    "not", "all", "any", "via",
+    "the", "and", "for", "with", "that", "this", "are", "was", "were", "has", "have", "had", "its",
+    "via", "per", "use", "uses", "used", "default", "value", "count", "runs", "run", "set", "via",
+    "into", "from", "when", "not", "all", "any", "via",
 ];
 
 /// Distinctive lowercase tokens from an atom's rendered name (`subject/pred=value`).
@@ -121,7 +120,8 @@ fn distinctive_tokens(name: &str) -> Vec<String> {
         }
         let is_digits = tok.chars().all(|c| c.is_ascii_digit());
         // Keep multi-char words and any all-digit token; drop short words + stopwords.
-        let keep = (is_digits && tok.len() >= 2) || (tok.len() > 3 && !USAGE_STOPWORDS.contains(&tok));
+        let keep =
+            (is_digits && tok.len() >= 2) || (tok.len() > 3 && !USAGE_STOPWORDS.contains(&tok));
         if keep && seen.insert(tok.to_string()) {
             out.push(tok.to_string());
         }
@@ -241,27 +241,30 @@ fn record_outcomes_unified(
     // feedback loop never closed and Loop 4 saw `used=0`. Give it a generous
     // budget (Stop is async; this never blocks the user's turn). Errors per
     // call are logged at WARN inside the loop.
-    crate::hooks::run_async_timeout(async move {
-        for (event_id, outcome) in outcomes {
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "event_id".into(),
-                serde_json::Value::String(event_id.clone()),
-            );
-            args.insert(
-                "outcome".into(),
-                serde_json::Value::String(outcome.to_string()),
-            );
-            if let Err(e) = memory_mcp.call_tool("memory_record_outcome", args).await {
-                warn!(
-                    event_id = %event_id,
-                    outcome = %outcome,
-                    error = %e,
-                    "memory_record_outcome call failed"
+    crate::hooks::run_async_timeout(
+        async move {
+            for (event_id, outcome) in outcomes {
+                let mut args = serde_json::Map::new();
+                args.insert(
+                    "event_id".into(),
+                    serde_json::Value::String(event_id.clone()),
                 );
+                args.insert(
+                    "outcome".into(),
+                    serde_json::Value::String(outcome.to_string()),
+                );
+                if let Err(e) = memory_mcp.call_tool("memory_record_outcome", args).await {
+                    warn!(
+                        event_id = %event_id,
+                        outcome = %outcome,
+                        error = %e,
+                        "memory_record_outcome call failed"
+                    );
+                }
             }
-        }
-    }, std::time::Duration::from_secs(30));
+        },
+        std::time::Duration::from_secs(30),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +289,9 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         Err(_) => return HookOutput::allow(),
     };
 
-    let state: InjectedState = if let Ok(s) = serde_json::from_str(&state_content) { s } else {
+    let state: InjectedState = if let Ok(s) = serde_json::from_str(&state_content) {
+        s
+    } else {
         debug!("Invalid injected-memories state file — skipping");
         return HookOutput::allow();
     };

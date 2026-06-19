@@ -34,30 +34,100 @@ static PROD_INDICATOR: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbOpsDecision {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct DbOpsEvaluation {
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub bash_tool: bool,
+    pub command_present: bool,
+    pub migration: bool,
+    pub destructive: bool,
+    pub database_operation: bool,
+    pub production_target: bool,
+    pub should_block: bool,
+    pub decision: DbOpsDecision,
+    pub block_reason: Option<String>,
+}
+
+impl DbOpsEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.bash_tool && self.database_operation
+    }
+}
+
 /// Process a `PreToolUse` Bash event. Blocks production database operations.
 pub fn process(input: &HookInput) -> HookOutput {
-    let cmd = match extract_bash_command(input) {
-        Some(c) => c,
-        None => return HookOutput::allow(),
+    let evaluation = evaluate(input);
+    output_from_evaluation(&evaluation)
+}
+
+pub fn evaluate(input: &HookInput) -> DbOpsEvaluation {
+    let tool = input.tool_name.clone();
+    let bash_tool = tool.as_deref().map_or(true, |tool| tool == "Bash");
+    let command = extract_bash_command(input).map(str::to_string);
+    let Some(cmd) = command.as_deref() else {
+        return DbOpsEvaluation {
+            tool,
+            command,
+            bash_tool,
+            command_present: false,
+            migration: false,
+            destructive: false,
+            database_operation: false,
+            production_target: false,
+            should_block: false,
+            decision: DbOpsDecision::Allow,
+            block_reason: None,
+        };
     };
 
-    let is_migration = DB_MIGRATION.is_match(cmd);
-    let is_destructive = DB_DESTRUCTIVE.is_match(cmd);
+    let migration = DB_MIGRATION.is_match(cmd);
+    let destructive = DB_DESTRUCTIVE.is_match(cmd);
+    let database_operation = migration || destructive;
+    let production_target = database_operation && PROD_INDICATOR.is_match(cmd);
+    let should_block = bash_tool && database_operation && production_target;
+    let block_reason = should_block.then(|| {
+        "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
+         NEVER run database migrations or destructive operations in production. \
+         NO EXCEPTIONS — even if Gary says it's okay."
+            .to_string()
+    });
 
-    if !is_migration && !is_destructive {
-        return HookOutput::allow();
+    DbOpsEvaluation {
+        tool,
+        command,
+        bash_tool,
+        command_present: true,
+        migration,
+        destructive,
+        database_operation,
+        production_target,
+        should_block,
+        decision: if should_block {
+            DbOpsDecision::Block
+        } else {
+            DbOpsDecision::Allow
+        },
+        block_reason,
     }
+}
 
-    // Check for production indicators
-    if PROD_INDICATOR.is_match(cmd) {
+pub fn output_from_evaluation(evaluation: &DbOpsEvaluation) -> HookOutput {
+    if evaluation.should_block {
         return HookOutput::deny(
-            "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
-             NEVER run database migrations or destructive operations in production. \
-             NO EXCEPTIONS — even if Gary says it's okay.",
+            evaluation
+                .block_reason
+                .clone()
+                .unwrap_or_else(|| "Database gate blocked without a reason".to_string()),
         );
     }
-
-    // Non-prod migrations/destructive ops: allow but warn
     HookOutput::allow()
 }
 

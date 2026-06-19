@@ -666,9 +666,15 @@ mod tests {
 
     #[test]
     fn test_map_linear_state_in_progress_family() {
-        assert_eq!(map_linear_state("In Progress"), Some(DesiredStatus::InProgress));
+        assert_eq!(
+            map_linear_state("In Progress"),
+            Some(DesiredStatus::InProgress)
+        );
         assert_eq!(map_linear_state("Started"), Some(DesiredStatus::InProgress));
-        assert_eq!(map_linear_state("Code Review"), Some(DesiredStatus::InProgress));
+        assert_eq!(
+            map_linear_state("Code Review"),
+            Some(DesiredStatus::InProgress)
+        );
         assert_eq!(DesiredStatus::InProgress.emoji(), "🔄");
         assert_eq!(DesiredStatus::InProgress.task_status(), "in_progress");
     }
@@ -676,8 +682,14 @@ mod tests {
     #[test]
     fn test_map_linear_state_completed_family() {
         assert_eq!(map_linear_state("Done"), Some(DesiredStatus::Completed));
-        assert_eq!(map_linear_state("Completed"), Some(DesiredStatus::Completed));
-        assert_eq!(map_linear_state("QA Testing"), Some(DesiredStatus::Completed));
+        assert_eq!(
+            map_linear_state("Completed"),
+            Some(DesiredStatus::Completed)
+        );
+        assert_eq!(
+            map_linear_state("QA Testing"),
+            Some(DesiredStatus::Completed)
+        );
         assert_eq!(map_linear_state("Merged"), Some(DesiredStatus::Completed));
         assert_eq!(DesiredStatus::Completed.emoji(), "✅");
         assert_eq!(DesiredStatus::Completed.task_status(), "completed");
@@ -950,19 +962,35 @@ LINEAR_API_KEY = "x"
             fn home_dir(&self) -> Option<PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn read_to_string(
+                &self,
+                p: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                p: &Path,
+                c: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 if let Some(par) = p.parent() {
-                    std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                    std::fs::create_dir_all(par)
+                        .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
                 }
                 std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn create_dir_all(
+                &self,
+                p: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                std::fs::create_dir_all(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(vec![])
             }
             fn exists(&self, p: &Path) -> bool {
@@ -971,10 +999,18 @@ LINEAR_API_KEY = "x"
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                p: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -996,7 +1032,11 @@ LINEAR_API_KEY = "x"
 
     #[test]
     fn test_compute_drifts_flags_completed_and_canceled_only() {
-        let tasks = vec![linked("1", "FIR-1"), linked("2", "FIR-2"), linked("3", "FIR-3")];
+        let tasks = vec![
+            linked("1", "FIR-1"),
+            linked("2", "FIR-2"),
+            linked("3", "FIR-3"),
+        ];
         let events = vec![
             transition("e1", "FIR-1", "Done"),
             transition("e2", "FIR-2", "In Progress"), // no drift
@@ -1074,19 +1114,35 @@ LINEAR_API_KEY = "x"
             fn home_dir(&self) -> Option<PathBuf> {
                 dirs::home_dir()
             }
-            fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
-                std::fs::read_to_string(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn read_to_string(
+                &self,
+                p: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                std::fs::read_to_string(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn write(
+                &self,
+                p: &Path,
+                c: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 if let Some(par) = p.parent() {
-                    std::fs::create_dir_all(par).map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
+                    std::fs::create_dir_all(par)
+                        .map_err(sentinel_domain::port_errors::FileSystemError::backend)?;
                 }
                 std::fs::write(p, c).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
-                std::fs::create_dir_all(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
+            fn create_dir_all(
+                &self,
+                p: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                std::fs::create_dir_all(p)
+                    .map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn read_dir(&self, _: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            fn read_dir(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
                 Ok(vec![])
             }
             fn exists(&self, p: &Path) -> bool {
@@ -1095,10 +1151,18 @@ LINEAR_API_KEY = "x"
             fn is_dir(&self, p: &Path) -> bool {
                 p.is_dir()
             }
-            fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            fn metadata(
+                &self,
+                p: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
                 std::fs::metadata(p).map_err(sentinel_domain::port_errors::FileSystemError::backend)
             }
-            fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
                 Ok(())
             }
         }
@@ -1110,7 +1174,11 @@ LINEAR_API_KEY = "x"
             "a just-recorded poll must throttle the next attempt"
         );
         // A marker far in the past → allowed.
-        std::fs::write(&marker, (now_unix() - POLL_INTERVAL.as_secs() - 10).to_string()).unwrap();
+        std::fs::write(
+            &marker,
+            (now_unix() - POLL_INTERVAL.as_secs() - 10).to_string(),
+        )
+        .unwrap();
         assert!(poll_allowed(&fs, &marker));
     }
 

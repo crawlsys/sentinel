@@ -4,23 +4,28 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use std::path::PathBuf;
 
 use sentinel_application::token_cost::scan_token_cost;
 
-pub fn run() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    let metrics = home.join(".claude").join("sentinel").join("metrics");
+pub async fn run() -> Result<()> {
+    let metrics = sentinel_infrastructure::paths::sentinel_root().join("metrics");
     let tokens_input = metrics.join("tokens-per-ticket.jsonl");
     let output = metrics.join("token-cost.json");
+    let graph_runs = output.with_extension("graph-runs.jsonl");
 
-    println!("{}", "Sentinel Token Cost (per-model, cached vs uncached)".bold());
+    println!(
+        "{}",
+        "Sentinel Token Cost (per-model, cached vs uncached)".bold()
+    );
     println!("Tokens input:   {}", tokens_input.display());
     println!("Output summary: {}", output.display());
+    println!("Graph audit:    {}", graph_runs.display());
     println!();
 
     let s = scan_token_cost(&tokens_input, &output).context("scan_token_cost failed")?;
+    let graph_audit = crate::token_cost_graph::run_token_cost_graph_audit(&s, &graph_runs)
+        .await
+        .context("token cost graph audit failed")?;
 
     if s.tickets == 0 {
         println!(
@@ -32,10 +37,15 @@ pub fn run() -> Result<()> {
     }
 
     println!("{}", "==== TOKEN COST ====".bold());
+    println!("  {} tickets · {:.2}B tokens", s.tickets, b(s.total_tokens));
     println!(
-        "  {} tickets · {:.2}B tokens",
-        s.tickets,
-        b(s.total_tokens)
+        "  graph decision {} · {}",
+        graph_audit.decision.bold(),
+        graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .expect("token cost graph audit requires checkpoint")
+            .dimmed()
     );
     println!(
         "  input {:.1}M · output {:.1}M · cache-write {:.2}B · cache-read {:.2}B",
@@ -75,7 +85,7 @@ pub fn run() -> Result<()> {
         println!(
             "{}",
             format!(
-                "  note: {:.2}B tokens had an unknown model — priced at the Opus rate (never under-reports).",
+                "  note: {:.2}B tokens had an unknown model and were not priced; graph decision should be unknown-model-risk.",
                 b(s.unknown_model_tokens)
             )
             .dimmed()

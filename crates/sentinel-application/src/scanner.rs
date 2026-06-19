@@ -2,9 +2,9 @@
 //!
 //! Scans the filesystem and builds a complete marketplace snapshot.
 //! Shared logic used by both `session_init` (for CLAUDE.md generation)
-//! and `sentinel scan` CLI command (for dashboard API).
+//! and `sentinel scan` CLI command (for the local API).
 //!
-//! Ported from `dashboard/server/scanner.cjs` into Rust.
+//! Ported from the old marketplace scanner script into Rust.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Dynamic component counts for CLAUDE.md generation and dashboard.
+/// Dynamic component counts for CLAUDE.md generation and local clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentCounts {
@@ -150,30 +150,28 @@ pub struct MarketplaceSnapshot {
 
 /// Count subdirectories in a path.
 pub fn count_subdirs(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map_or(0, |entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .filter(|e| {
-                    e.file_type().is_ok_and(|ft| ft.is_dir())
-                        && !e.file_name().to_string_lossy().starts_with('_')
-                })
-                .count()
-        })
+    fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_type().is_ok_and(|ft| ft.is_dir())
+                    && !e.file_name().to_string_lossy().starts_with('_')
+            })
+            .count()
+    })
 }
 
 /// Count files with a given extension in a directory (non-recursive).
 pub fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
-    fs::read_dir(dir)
-        .map_or(0, |entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .filter(|e| {
-                    e.file_type().is_ok_and(|ft| ft.is_file())
-                        && e.file_name().to_string_lossy().ends_with(ext)
-                })
-                .count()
-        })
+    fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_type().is_ok_and(|ft| ft.is_file())
+                    && e.file_name().to_string_lossy().ends_with(ext)
+            })
+            .count()
+    })
 }
 
 /// Count MCP servers from `~/.claude.json`.
@@ -216,16 +214,15 @@ pub fn count_declared_mcp_servers(root_dir: &Path) -> Option<usize> {
 pub fn count_repos_with_suffix(home_dir: &Path, suffix: &str) -> usize {
     let gh_dir = home_dir.join("Documents").join("GitHub");
 
-    fs::read_dir(gh_dir)
-        .map_or(0, |entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .filter(|e| {
-                    e.file_type().is_ok_and(|ft| ft.is_dir())
-                        && e.file_name().to_string_lossy().ends_with(suffix)
-                })
-                .count()
-        })
+    fs::read_dir(gh_dir).map_or(0, |entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.file_type().is_ok_and(|ft| ft.is_dir())
+                    && e.file_name().to_string_lossy().ends_with(suffix)
+            })
+            .count()
+    })
 }
 
 /// Count all marketplace components in `~/.claude/`.
@@ -871,7 +868,10 @@ fn scan_mcp_servers(mp_data: &serde_json::Value) -> Vec<McpServer> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("stdio")
                         .to_string(),
-                    optional: m.get("optional").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                    optional: m
+                        .get("optional")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                 })
                 .collect()
         })
@@ -1243,11 +1243,7 @@ fn validate_doc_counts(
 ///
 /// `skill_router` falls back to a bare detection message for skills without a banner, so
 /// this is flagged as `warn` (not `fail`) to track migration progress without breaking CI.
-fn validate_skill_banners(
-    root_dir: &Path,
-    skills: &[Skill],
-    results: &mut Vec<ValidationResult>,
-) {
+fn validate_skill_banners(root_dir: &Path, skills: &[Skill], results: &mut Vec<ValidationResult>) {
     for skill in skills {
         let skill_md = root_dir.join("skills").join(&skill.name).join("SKILL.md");
         let Ok(content) = fs::read_to_string(&skill_md) else {
@@ -1312,13 +1308,12 @@ pub fn count_extended(root_dir: &Path) -> ExtendedCounts {
 
 /// Count all non-hidden entries in a directory.
 fn count_all_non_hidden(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map_or(0, |entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .count()
-        })
+    fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .count()
+    })
 }
 
 /// Parse Browserbase tool count from marketplace.json MCP description.
@@ -1334,12 +1329,8 @@ fn parse_browserbase_tools(root_dir: &Path) -> usize {
     data.get("mcp")
         .and_then(|v| v.as_array())
         .and_then(|arr| {
-            arr.iter().find(|m| {
-                matches!(
-                    m.get("name").and_then(|n| n.as_str()),
-                    Some("browserbase" | "steel")
-                )
-            })
+            arr.iter()
+                .find(|m| matches!(m.get("name").and_then(|n| n.as_str()), Some("browserbase")))
         })
         .and_then(|entry| entry.get("description").and_then(|d| d.as_str()))
         .and_then(|desc| {
@@ -2015,7 +2006,11 @@ matcher = ["Edit", "Write"]
 
         // Hooks
         assert_eq!(snap.hooks.len(), 2);
-        let router = snap.hooks.iter().find(|h| h.name == "skill_router").unwrap();
+        let router = snap
+            .hooks
+            .iter()
+            .find(|h| h.name == "skill_router")
+            .unwrap();
         assert_eq!(router.event, "UserPromptSubmit");
         assert_eq!(router.engine, "sentinel");
         let hygiene = snap.hooks.iter().find(|h| h.name == "git_hygiene").unwrap();
@@ -2052,49 +2047,84 @@ matcher = ["Edit", "Write"]
         let v = &snap.validation;
 
         // No failures expected with our well-formed fixture
-        assert_eq!(v.failed, 0, "Unexpected failures: {:?}",
-            v.results.iter().filter(|r| r.status == "fail").collect::<Vec<_>>());
+        assert_eq!(
+            v.failed,
+            0,
+            "Unexpected failures: {:?}",
+            v.results
+                .iter()
+                .filter(|r| r.status == "fail")
+                .collect::<Vec<_>>()
+        );
 
         // Count Consistency: marketplace.json description mentions "2 skills", "2 hooks",
         // "1 agents", "1 MCP servers" — all match actuals, so all should pass.
-        let count_checks: Vec<_> = v.results.iter()
+        let count_checks: Vec<_> = v
+            .results
+            .iter()
             .filter(|r| r.category == "Count Consistency")
             .collect();
-        assert!(!count_checks.is_empty(), "Expected Count Consistency checks");
-        assert!(count_checks.iter().all(|r| r.status == "pass"),
-            "Some Count Consistency checks failed: {:?}", count_checks);
+        assert!(
+            !count_checks.is_empty(),
+            "Expected Count Consistency checks"
+        );
+        assert!(
+            count_checks.iter().all(|r| r.status == "pass"),
+            "Some Count Consistency checks failed: {:?}",
+            count_checks
+        );
 
         // File Cross-Reference: alpha + beta are both registered + have SKILL.md
-        let cross_ref: Vec<_> = v.results.iter()
+        let cross_ref: Vec<_> = v
+            .results
+            .iter()
             .filter(|r| r.category == "File Cross-Reference")
             .collect();
         assert!(!cross_ref.is_empty());
-        assert!(cross_ref.iter().all(|r| r.status == "pass"),
-            "Some File Cross-Reference checks failed: {:?}", cross_ref);
+        assert!(
+            cross_ref.iter().all(|r| r.status == "pass"),
+            "Some File Cross-Reference checks failed: {:?}",
+            cross_ref
+        );
 
         // Frontmatter: alpha=1.2.3 and beta=2.0.0 are valid semver → no fails
-        let fm_checks: Vec<_> = v.results.iter()
+        let fm_checks: Vec<_> = v
+            .results
+            .iter()
             .filter(|r| r.category == "Frontmatter")
             .collect();
         // No version failures (both are valid semver)
-        assert!(fm_checks.iter().all(|r| r.status != "fail"),
-            "Unexpected Frontmatter failures: {:?}", fm_checks);
+        assert!(
+            fm_checks.iter().all(|r| r.status != "fail"),
+            "Unexpected Frontmatter failures: {:?}",
+            fm_checks
+        );
 
         // Dependencies: alpha→beta is valid (beta exists); no self-reference
-        let dep_checks: Vec<_> = v.results.iter()
+        let dep_checks: Vec<_> = v
+            .results
+            .iter()
             .filter(|r| r.category == "Dependencies")
             .collect();
         // alpha→beta is valid — no results emitted for valid cross-deps (only fail/warn emitted)
-        assert!(dep_checks.iter().all(|r| r.status != "fail"),
-            "Unexpected dep failures: {:?}", dep_checks);
+        assert!(
+            dep_checks.iter().all(|r| r.status != "fail"),
+            "Unexpected dep failures: {:?}",
+            dep_checks
+        );
 
         // Skill Banner: both alpha and beta have "## Activation Banner"
-        let banner_checks: Vec<_> = v.results.iter()
+        let banner_checks: Vec<_> = v
+            .results
+            .iter()
             .filter(|r| r.category == "Skill Banner")
             .collect();
         assert_eq!(banner_checks.len(), 2);
-        assert!(banner_checks.iter().all(|r| r.status == "pass"),
-            "Expected all banner checks to pass: {:?}", banner_checks);
+        assert!(
+            banner_checks.iter().all(|r| r.status == "pass"),
+            "Expected all banner checks to pass: {:?}",
+            banner_checks
+        );
 
         // Summary counts
         assert!(v.passed > 0);
@@ -2130,9 +2160,14 @@ matcher = ["Edit", "Write"]
         let v = &snap.validation;
 
         // Should have at least one fail for "ghost" not existing on disk
-        let ghost_fail = v.results.iter()
+        let ghost_fail = v
+            .results
+            .iter()
             .find(|r| r.status == "fail" && r.message.contains("ghost"));
-        assert!(ghost_fail.is_some(), "Expected a fail for ghost skill missing from disk");
+        assert!(
+            ghost_fail.is_some(),
+            "Expected a fail for ghost skill missing from disk"
+        );
     }
 
     /// Golden: validation detects duplicate priorities (fail status).
@@ -2161,9 +2196,14 @@ matcher = ["Edit", "Write"]
 
         let snap = scan_marketplace(&root);
         let v = &snap.validation;
-        let dup_fail = v.results.iter()
+        let dup_fail = v
+            .results
+            .iter()
             .find(|r| r.status == "fail" && r.category == "Frontmatter" && r.message.contains("5"));
-        assert!(dup_fail.is_some(), "Expected a fail for duplicate priority 5");
+        assert!(
+            dup_fail.is_some(),
+            "Expected a fail for duplicate priority 5"
+        );
     }
 
     /// Golden: validation emits warn for skill missing activation banner.
@@ -2186,9 +2226,13 @@ icon: A
 
         let snap = scan_marketplace(&root);
         let v = &snap.validation;
-        let warn = v.results.iter()
-            .find(|r| r.category == "Skill Banner" && r.status == "warn" && r.rule.contains("alpha"));
-        assert!(warn.is_some(), "Expected a warn for alpha missing activation banner");
+        let warn = v.results.iter().find(|r| {
+            r.category == "Skill Banner" && r.status == "warn" && r.rule.contains("alpha")
+        });
+        assert!(
+            warn.is_some(),
+            "Expected a warn for alpha missing activation banner"
+        );
     }
 
     /// Golden: validation emits warn for invalid semver version.
@@ -2210,9 +2254,13 @@ icon: A
 
         let snap = scan_marketplace(&root);
         let v = &snap.validation;
-        let warn = v.results.iter()
-            .find(|r| r.category == "Frontmatter" && r.status == "warn" && r.message.contains("not-semver"));
-        assert!(warn.is_some(), "Expected a warn for invalid semver in alpha");
+        let warn = v.results.iter().find(|r| {
+            r.category == "Frontmatter" && r.status == "warn" && r.message.contains("not-semver")
+        });
+        assert!(
+            warn.is_some(),
+            "Expected a warn for invalid semver in alpha"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -2244,7 +2292,8 @@ icon: A
         // But the report should flag README.md as something that would change
         assert!(
             report.files_changed.iter().any(|f| f.contains("README")),
-            "Expected README.md in files_changed: {:?}", report.files_changed
+            "Expected README.md in files_changed: {:?}",
+            report.files_changed
         );
     }
 
@@ -2327,7 +2376,8 @@ icon: A
         // README.md has no count patterns → should NOT appear in changed_files
         assert!(
             !report.files_changed.iter().any(|f| f.contains("README")),
-            "README.md with no count patterns should not be touched, got: {:?}", report.files_changed
+            "README.md with no count patterns should not be touched, got: {:?}",
+            report.files_changed
         );
     }
 
@@ -2399,7 +2449,7 @@ Some text here.
         assert_eq!(infer_category("test"), "Quality & Testing");
         assert_eq!(infer_category("debug"), "Lifecycle");
         assert_eq!(infer_category("linear"), "AI & Integration");
-        assert_eq!(infer_category("unknown-skill"), "Other");
+        assert_eq!(infer_category("unregistered-skill"), "Other");
     }
 
     #[test]

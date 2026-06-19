@@ -56,7 +56,7 @@ pub struct StageDuration {
     pub sample_count: usize,
 }
 
-/// Confidence tier for a prediction. Drives how the dashboard renders the
+/// Confidence tier for a prediction. Drives how local clients render the
 /// number (high → display directly; low → display as "~", with a tooltip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -96,7 +96,7 @@ const PREDICTION_PATH: &[&str] = &["In Progress", "Code Review", "QA Testing"];
 /// `confidence = Low` when nothing matches.
 ///
 /// `team`, `priority`, and `estimate` are recorded on the result for the
-/// dashboard's audit trail but don't currently parametrize the lookup —
+/// client audit trail but don't currently parametrize the lookup —
 /// a future refinement can add priority-bucketed breakdowns once we have
 /// enough samples to support them.
 #[must_use]
@@ -112,8 +112,9 @@ pub fn predict_cycle_time(
 
     for stage_name in PREDICTION_PATH {
         let row = pick_breakdown_row(breakdown, team, stage_name);
-        let (p50, p75, samples) = row
-            .map_or((0.0, 0.0, 0), |r| (r.p50_hours, r.p75_hours, r.sample_count));
+        let (p50, p75, samples) = row.map_or((0.0, 0.0, 0), |r| {
+            (r.p50_hours, r.p75_hours, r.sample_count)
+        });
         per_stage.push(StageDuration {
             stage: (*stage_name).to_string(),
             p50_hours: p50,

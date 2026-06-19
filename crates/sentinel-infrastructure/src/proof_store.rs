@@ -22,7 +22,7 @@ fn compute_hmac(data: &[u8]) -> String {
 }
 
 /// Verify HMAC of data against expected signature string.
-/// Supports versioned (`v{N}:{hex}`) and legacy (`{hex}`) formats.
+/// Supports versioned signatures (`v{N}:{hex}`).
 fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
     crate::state_store::verify_hmac_for_proofs(data, sig_str)
 }
@@ -34,12 +34,12 @@ pub fn proof_dir_public() -> PathBuf {
 
 /// Proof storage directory
 ///
-/// **Attack #122 fix**: Panic instead of falling back to `"."` when HOME is unset.
-/// The `"."` fallback writes proof files to CWD (attacker-controlled project dir),
-/// letting an attacker plant forged proof files that sentinel will load as real.
+/// **Attack #122 fix**: Panic instead of writing to `"."` when HOME is unset.
+/// Writing proof files to CWD would put them in an attacker-controlled project
+/// directory, letting an attacker plant forged proof files that sentinel will
+/// load as real.
 fn proof_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
+    crate::paths::home_root_or_fatal()
         .join(".claude")
         .join("sentinel")
         .join("proofs")
@@ -48,8 +48,8 @@ fn proof_dir() -> PathBuf {
 /// Validate session ID for safe filesystem use.
 ///
 /// Delegates to `sentinel_domain::SessionId::validate` — the validation rules
-/// live in the domain layer; this wrapper preserves the legacy
-/// `anyhow::Result<()>` return type for existing call sites.
+/// live in the domain layer; this wrapper maps the domain validation error into
+/// the infrastructure layer's `anyhow::Result<()>`.
 ///
 /// **Attack #121 fix**: Without this, `session_id = "../../etc/passwd"` writes
 /// proof files outside the intended directory via path traversal.
@@ -104,7 +104,7 @@ pub fn load_chain(session_id: &str) -> Result<Option<ProofChain>> {
     let json = std::fs::read_to_string(&path)?;
 
     // Verify HMAC signature — reject unsigned or tampered chains.
-    // **Attack #147 fix**: Removed backward-compat acceptance of unsigned chains.
+    // **Attack #147 fix**: Unsigned chains are rejected.
     // An attacker could write a forged chain JSON without a .sig file and it would
     // be silently accepted. Now all chains MUST have valid HMAC signatures.
     let sig_path = proof_dir().join(format!("{session_id}-chain.json.sig"));
@@ -168,4 +168,48 @@ pub fn list_sessions() -> Result<Vec<String>> {
         }
     }
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_sentinel_home(value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var_os("SENTINEL_HOME");
+            std::env::set_var("SENTINEL_HOME", value);
+            Self { original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("SENTINEL_HOME", value),
+                None => std::env::remove_var("SENTINEL_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn proof_dir_uses_sentinel_home_root() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvGuard::set_sentinel_home(tmp.path());
+
+        assert_eq!(
+            proof_dir(),
+            tmp.path().join(".claude").join("sentinel").join("proofs")
+        );
+    }
 }

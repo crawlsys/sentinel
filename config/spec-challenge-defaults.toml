@@ -5,17 +5,17 @@
 # `~/.claude/sentinel/config/spec-challenge.toml`; the loader merges
 # operator overrides on top.
 #
-# Per the A13 design (`docs/a13-spec-challenge.md` §3), the safe
-# rollout posture is `ObserveOnly` until orchestrators reliably emit
-# `extra.spec_challenge` payloads on Irreversible+ tool calls.
-# After that, flip to `DefaultBlocking`. For high-stakes domains
-# where Irreversible work should also be semantically scored, use
-# `StrictBlocking`.
+# Enterprise production baseline is `DefaultBlocking`: Irreversible+
+# work must carry a complete spec challenge by default, and
+# Catastrophic-class challenges must pass semantic scoring. Operators may
+# explicitly choose `ObserveOnly` only for local diagnostics. For
+# high-stakes domains where Irreversible work should also be
+# semantically scored, use `StrictBlocking`.
 #
 # Mode values: ObserveOnly | DefaultBlocking | StrictBlocking.
 #
 # - `ObserveOnly`: hook runs the completeness check + logs would-be
-#   blocks via `tracing::info` but never returns `deny()`. Default.
+#   blocks via `tracing::info` but never returns `deny()`. Diagnostics only.
 # - `DefaultBlocking`: class-graded per spec §3. TriviallyReversible
 #   skipped, ReversibleWithEffort optional, Irreversible requires a
 #   complete challenge, Catastrophic also requires every scorer
@@ -25,7 +25,7 @@
 #   shallow alternatives or fake-empty categories is unacceptable.
 
 [spec_challenge_gate]
-mode = "ObserveOnly"
+mode = "DefaultBlocking"
 
 # Minimum per-axis score (0.0-1.0) the scorer must return for a
 # Catastrophic-class challenge to pass. Operators tune this per

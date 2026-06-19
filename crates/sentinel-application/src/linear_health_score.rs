@@ -208,7 +208,10 @@ fn load_issues(path: &Path) -> Result<Vec<Issue>> {
     for v in arr {
         // An issue must at least have an identifier to count (mirrors the
         // PM audit's parse so the two stay consistent).
-        if v.get("identifier").and_then(serde_json::Value::as_str).is_none() {
+        if v.get("identifier")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
             continue;
         }
         let estimate = v
@@ -272,22 +275,18 @@ mod tests {
 
     #[test]
     fn dimension_caps_sum_to_100() {
-        assert!(
-            (MAX_HYGIENE + MAX_STRUCTURE + MAX_DATA_QUALITY + MAX_FLOW - 100.0).abs() < 1e-9
-        );
+        assert!((MAX_HYGIENE + MAX_STRUCTURE + MAX_DATA_QUALITY + MAX_FLOW - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn clean_board_scores_high() {
         // All estimated (Fibonacci), all stated, no QA-Failed, and the only
         // open point is NOT in a QA lane → every dimension near/at cap.
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"A-1","estimate":3,"state":{"name":"Completed","type":"completed"}},
                 {"identifier":"A-2","estimate":5,"state":{"name":"Completed","type":"completed"}},
                 {"identifier":"A-3","estimate":2,"state":{"name":"In Progress","type":"started"}}
-            ]}"#,
-        );
+            ]}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_health_score(cache.path(), out.path()).unwrap();
         // hygiene 30 + structure 20 + data_quality 15 + flow 35 = 100.
@@ -303,14 +302,12 @@ mod tests {
     fn qa_failed_and_congestion_lower_the_score() {
         // Two QA-Failed (1 free → 1 penalized = -3 data_quality), and the
         // open points are heavily stuck in QA lanes → flow penalized.
-        let cache = tmp(
-            r#"{"issues":[
+        let cache = tmp(r#"{"issues":[
                 {"identifier":"B-1","estimate":5,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"B-2","estimate":5,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"B-3","estimate":5,"state":{"name":"QA Testing","type":"started"}},
                 {"identifier":"B-4","estimate":3,"state":{"name":"In Progress","type":"started"}}
-            ]}"#,
-        );
+            ]}"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_health_score(cache.path(), out.path()).unwrap();
         // data_quality: 15 - (2-1)*3 = 12.
@@ -326,12 +323,10 @@ mod tests {
     #[test]
     fn missing_estimates_drop_hygiene() {
         // Half estimated, half not → hygiene at half of its 30 cap.
-        let cache = tmp(
-            r#"[
+        let cache = tmp(r#"[
                 {"identifier":"C-1","estimate":3,"state":{"name":"Backlog","type":"backlog"}},
                 {"identifier":"C-2","state":{"name":"Backlog","type":"backlog"}}
-            ]"#,
-        );
+            ]"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_health_score(cache.path(), out.path()).unwrap();
         assert_eq!(s.hygiene_score, 15.0);
@@ -357,8 +352,7 @@ mod tests {
     #[test]
     fn data_quality_floors_at_zero() {
         // Many QA-Failed issues → penalty would go negative; must floor at 0.
-        let cache = tmp(
-            r#"[
+        let cache = tmp(r#"[
                 {"identifier":"E-1","estimate":3,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"E-2","estimate":3,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"E-3","estimate":3,"state":{"name":"QA Failed","type":"started"}},
@@ -366,8 +360,7 @@ mod tests {
                 {"identifier":"E-5","estimate":3,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"E-6","estimate":3,"state":{"name":"QA Failed","type":"started"}},
                 {"identifier":"E-7","estimate":3,"state":{"name":"QA Failed","type":"started"}}
-            ]"#,
-        );
+            ]"#);
         let out = tempfile::NamedTempFile::new().unwrap();
         let s = scan_health_score(cache.path(), out.path()).unwrap();
         assert_eq!(s.data_quality_score, 0.0);

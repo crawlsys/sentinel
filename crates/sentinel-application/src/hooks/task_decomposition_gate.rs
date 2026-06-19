@@ -15,16 +15,16 @@
 //!   - MUTATING tools (`Edit`, `Write`, `NotebookEdit`, and obvious
 //!     state-changing `Bash` commands) are blocked ONLY when no live task
 //!     list can be observed for the current session.
-//!   - The "is there a live task list" check is best-effort: it reads the
+//!   - The "is there a live task list" check reads the
 //!     session's on-disk task files (`~/.claude/tasks/{session_id}/*.json`,
 //!     the same files `task_persist` snapshots from). If that state cannot be
-//!     read (no session id, no home dir, unreadable dir) the gate **fails
-//!     open** — allow + log — rather than bricking the session.
+//!     read (no session id, no home dir, unreadable dir), the gate fails closed:
+//!     mutating tools block because compliance has not been proven.
 //!   - "Decomposed earlier" survives task completion. The task store prunes a
 //!     task's `*.json` file when it completes, so a session that correctly
 //!     finished all its tasks would otherwise present an empty dir and get
 //!     re-blocked on its next mutating tool — punishing the agent for closing
-//!     out its work. To avoid that false positive the gate also consults the
+//!     out its work. To avoid that false positive the gate also queries the
 //!     store's monotonic `.highwatermark` counter (the highest task id ever
 //!     issued this session, which persists across pruning): if it is `>= 1`
 //!     the session has decomposed at least once and the gate allows even when
@@ -105,6 +105,35 @@ const MUTATING_BASH_MARKERS: &[&str] = &[
     // command and wrongly flag those stderr forms as writes.
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskDecompositionDecision {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskDecompositionEvaluation {
+    pub tool: Option<String>,
+    pub session_id: Option<String>,
+    pub bash_command: Option<String>,
+    pub allowed_tool: bool,
+    pub bash_tool: bool,
+    pub bash_command_present: bool,
+    pub mutating_tool: bool,
+    pub task_state_readable: bool,
+    pub task_list_confirmed: bool,
+    pub unreadable_task_state: bool,
+    pub should_block: bool,
+    pub decision: TaskDecompositionDecision,
+}
+
+impl TaskDecompositionEvaluation {
+    #[must_use]
+    pub const fn graph_authority_required(&self) -> bool {
+        self.mutating_tool
+    }
+}
+
 /// Whether the tool is on the always-allow list.
 fn is_allowed_tool(tool_name: &str) -> bool {
     if ALLOWED_TOOLS.contains(&tool_name) {
@@ -166,9 +195,7 @@ fn strip_stderr_redirections(command: &str) -> String {
             // Optional `&` + target fd (`2>&1`, `2>&-`).
             if i < bytes.len() && bytes[i] == b'&' {
                 i += 1;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_digit() || bytes[i] == b'-')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'-') {
                     i += 1;
                 }
             } else {
@@ -214,7 +241,7 @@ fn is_mutating_tool(input: &HookInput, tool_name: &str) -> bool {
 ///   - `Some(false)` — the session dir is readable but shows no evidence the
 ///                     session ever decomposed (no task files, no highwatermark).
 ///   - `None`        — state could not be read (no session id, no home dir,
-///                     unreadable dir). Callers FAIL OPEN on `None`.
+///                     unreadable dir). Mutating callers fail closed on `None`.
 fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Option<bool> {
     let session_id = session_id.filter(|s| !s.is_empty())?;
     let home = fs.home_dir()?;
@@ -230,7 +257,7 @@ fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Opti
         return Some(true);
     }
     // No open task files — but completed tasks are pruned from disk, so an
-    // empty dir does NOT mean the session never decomposed. Consult the
+    // empty dir does NOT mean the session never decomposed. Query the
     // monotonic highwatermark: if the session ever issued a task id, the
     // decomposition discipline is established and we must not re-block.
     Some(decomposed_earlier(fs, &session_dir))
@@ -281,18 +308,56 @@ const DECOMPOSITION_GUIDANCE: &str = "Before mutating work, create a decomposed 
 
 /// `PreToolUse` handler — block mutating tools when no live decomposed task
 /// list can be observed for the session. Read tools / Task* tools always pass.
-/// Fails open (allow) when task state can't be read.
+/// Fails closed when task state can't be read.
 pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
+    let evaluation = evaluate(input, ctx);
+    output_from_evaluation(&evaluation)
+}
+
+#[must_use]
+pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> TaskDecompositionEvaluation {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
+    let tool = input.tool_name.clone();
+    let session_id = input.session_id.clone();
+    let bash_tool = tool_name == "Bash";
+    let bash_command = bash_tool.then(|| bash_command(input)).flatten();
+    let bash_command_present = bash_command.is_some();
 
     // Never gate read / task tools — they are the fix path.
     if is_allowed_tool(tool_name) {
-        return HookOutput::allow();
+        return TaskDecompositionEvaluation {
+            tool,
+            session_id,
+            bash_command,
+            allowed_tool: true,
+            bash_tool,
+            bash_command_present,
+            mutating_tool: false,
+            task_state_readable: false,
+            task_list_confirmed: false,
+            unreadable_task_state: false,
+            should_block: false,
+            decision: TaskDecompositionDecision::Allow,
+        };
     }
 
     // Only gate mutating operations.
-    if !is_mutating_tool(input, tool_name) {
-        return HookOutput::allow();
+    let mutating_tool = is_mutating_tool(input, tool_name);
+    if !mutating_tool {
+        return TaskDecompositionEvaluation {
+            tool,
+            session_id,
+            bash_command,
+            allowed_tool: false,
+            bash_tool,
+            bash_command_present,
+            mutating_tool,
+            task_state_readable: false,
+            task_list_confirmed: false,
+            unreadable_task_state: false,
+            should_block: false,
+            decision: TaskDecompositionDecision::Allow,
+        };
     }
 
     // Task-state check. FAIL CLOSED: the gate must fire for every mutating
@@ -303,12 +368,39 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // Previously `None` failed *open*, which is exactly why the gate skipped
     // intermittently; an unreadable task store is not evidence of compliance.
     let state = has_live_task_list(ctx.fs, input.session_id.as_deref());
-    if state == Some(true) {
+    let task_state_readable = state.is_some();
+    let task_list_confirmed = state == Some(true);
+    let unreadable_task_state = state.is_none();
+    let should_block = !task_list_confirmed;
+    TaskDecompositionEvaluation {
+        tool,
+        session_id,
+        bash_command,
+        allowed_tool: false,
+        bash_tool,
+        bash_command_present,
+        mutating_tool,
+        task_state_readable,
+        task_list_confirmed,
+        unreadable_task_state,
+        should_block,
+        decision: if should_block {
+            TaskDecompositionDecision::Block
+        } else {
+            TaskDecompositionDecision::Allow
+        },
+    }
+}
+
+#[must_use]
+pub fn output_from_evaluation(evaluation: &TaskDecompositionEvaluation) -> HookOutput {
+    if !matches!(evaluation.decision, TaskDecompositionDecision::Block) {
         return HookOutput::allow();
     }
-    // Both Some(false) and None block. Distinguish the message so an
-    // unreadable store is diagnosable.
-    let prefix = if state.is_none() {
+    let tool_name = evaluation.tool.as_deref().unwrap_or("");
+    // Both Some(false) and None block. Distinguish the message so an unreadable
+    // store is diagnosable.
+    let prefix = if evaluation.unreadable_task_state {
         "Task state could not be read (no session id, home dir, or readable \
          task store), so a decomposed task list cannot be confirmed. "
     } else {
@@ -339,19 +431,32 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
-        fn read_to_string(&self, p: &Path) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_to_string(p)?)
         }
-        fn write(&self, p: &Path, c: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             if let Some(par) = p.parent() {
                 std::fs::create_dir_all(par)?;
             }
             Ok(std::fs::write(p, c)?)
         }
-        fn create_dir_all(&self, p: &Path) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::create_dir_all(p)?)
         }
-        fn read_dir(&self, p: &Path) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::read_dir(p)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect())
@@ -362,10 +467,17 @@ mod tests {
         fn is_dir(&self, p: &Path) -> bool {
             p.is_dir()
         }
-        fn metadata(&self, p: &Path) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
             Ok(std::fs::metadata(p)?)
         }
-        fn append(&self, _: &Path, _: &[u8]) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+        fn append(
+            &self,
+            _: &Path,
+            _: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             Ok(())
         }
     }
@@ -460,7 +572,10 @@ mod tests {
     fn edit_write_are_mutating() {
         assert!(is_mutating_tool(&input("Edit", None), "Edit"));
         assert!(is_mutating_tool(&input("Write", None), "Write"));
-        assert!(is_mutating_tool(&input("NotebookEdit", None), "NotebookEdit"));
+        assert!(is_mutating_tool(
+            &input("NotebookEdit", None),
+            "NotebookEdit"
+        ));
     }
 
     #[test]
@@ -489,8 +604,8 @@ mod tests {
             "ls -la 2>&1",
             "find . -name '*.rs' 2>/dev/null",
             "grep foo bar.rs 2>&1 | head",
-            "cat f 2>>errs.log",       // stderr append to a sink — not tracked state
-            "command -v tool 2>&-",    // close stderr
+            "cat f 2>>errs.log",    // stderr append to a sink — not tracked state
+            "command -v tool 2>&-", // close stderr
             "node -e 'x' 2>&1",
         ] {
             assert!(
@@ -507,7 +622,7 @@ mod tests {
         for c in [
             "echo hi > out.txt",
             "cat a >> b",
-            "make 2>&1 > build.log",   // stdout file write alongside stderr dup
+            "make 2>&1 > build.log", // stdout file write alongside stderr dup
             "tool > result 2>/dev/null",
         ] {
             assert!(is_mutating_bash(c), "stdout write must be mutating: {c}");
@@ -655,11 +770,7 @@ mod tests {
     #[test]
     fn has_live_task_list_false_for_empty_session_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let session_dir = tmp
-            .path()
-            .join(".claude")
-            .join("tasks")
-            .join("sess-x");
+        let session_dir = tmp.path().join(".claude").join("tasks").join("sess-x");
         std::fs::create_dir_all(&session_dir).unwrap();
         let fs = ScopedHomeFs {
             home: tmp.path().to_path_buf(),

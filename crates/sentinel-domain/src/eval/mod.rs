@@ -9,7 +9,7 @@
 //! ## R5 quarantine boundary
 //!
 //! Per `docs/policy-replay-mining-quarantine.md`: eval scores feed
-//! operator dashboards, A2 appraisal counters (as deterministic
+//! reports, A2 appraisal counters (as deterministic
 //! dispatch input), and methodology decisions. Scores do NOT feed
 //! agent training pipelines or auto-promotion of prompt variants.
 //! The corpus has a private test split (not modeled at the type

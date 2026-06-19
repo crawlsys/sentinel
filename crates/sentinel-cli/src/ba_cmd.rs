@@ -12,26 +12,27 @@
 //!
 //! ## What this does
 //!
-//! 1. Build an [`AnthropicClient`] from env (`ANTHROPIC_API_KEY`).
+//! 1. Build an [`OpenRouterLlm`] from env (`OPENROUTER_API_KEY`).
 //! 2. Construct a [`BaDraftRequest`] from CLI args.
 //! 3. Call [`ba_orchestrator::draft`].
-//! 4. Print the result — pretty JSON to stdout.
+//! 4. Run the recommendation through the durable BA draft LangGraph.
+//! 5. Print the recommendation and graph audit evidence.
 //!
 //! ## What this does NOT do
 //!
 //! - It does not run sentinel's hooks. Hooks fire when the
 //!   recommendation is *used* downstream (serialized into a tool's
 //!   `extra` payload). The CLI's job stops at emitting the
-//!   envelope.
-//! - It does not persist the recommendation. Future phases add a
-//!   `--out` flag or hook into the proof chain.
+//!   envelope. The draft itself is still authorized by the BA draft
+//!   LangGraph before the CLI/MCP surface returns it.
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use sentinel_application::ba_orchestrator;
 use sentinel_domain::ba::{BaDraftRequest, BaRecommendation, StakeholderAudience};
 use sentinel_domain::ports::LlmPort;
-use sentinel_infrastructure::anthropic::AnthropicClient;
+use sentinel_infrastructure::openrouter_llm::OpenRouterLlm;
 
 /// Arguments for `sentinel ba draft`.
 pub struct DraftArgs {
@@ -42,17 +43,38 @@ pub struct DraftArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BaDraftRunResult {
+    pub workflow_authority: &'static str,
+    pub recommendation: BaRecommendation,
+    pub graph_audit: crate::ba_draft_graph::BaDraftGraphAudit,
+}
+
 /// `sentinel ba draft` — production entry point. Builds an
-/// [`AnthropicClient`] from env and delegates to [`draft_with`].
+/// [`OpenRouterLlm`] from env and delegates to [`draft_with`].
 pub async fn draft(args: DraftArgs) -> Result<()> {
-    let llm = AnthropicClient::from_env()
-        .context("failed to build Anthropic client from environment")?;
+    let llm =
+        OpenRouterLlm::from_env().context("failed to build OpenRouter LLM from environment")?;
     draft_with(args, &llm).await
 }
 
 /// Test seam — accepts a pre-built [`LlmPort`] so tests can inject
-/// a stub without env vars.
+/// a test double without env vars.
 pub async fn draft_with<L>(args: DraftArgs, llm: &L) -> Result<()>
+where
+    L: LlmPort + ?Sized,
+{
+    let json = args.json;
+    let result = draft_result_with(args, llm).await?;
+    if json {
+        render_json(&result);
+    } else {
+        render_summary(&result);
+    }
+    Ok(())
+}
+
+pub(crate) async fn draft_result_with<L>(args: DraftArgs, llm: &L) -> Result<BaDraftRunResult>
 where
     L: LlmPort + ?Sized,
 {
@@ -67,12 +89,20 @@ where
         .await
         .map_err(|e| anyhow::anyhow!("orchestrator failed: {e}"))?;
 
-    if args.json {
-        render_json(&recommendation);
-    } else {
-        render_summary(&recommendation);
-    }
-    Ok(())
+    let graph_jsonl = sentinel_infrastructure::paths::sentinel_root()
+        .join("metrics")
+        .join("ba-draft")
+        .join(format!(
+            "{}.graph-runs.jsonl",
+            recommendation.recommendation_id.as_str()
+        ));
+    let graph_audit =
+        crate::ba_draft_graph::run_ba_draft_graph_audit(&recommendation, &graph_jsonl).await?;
+    Ok(BaDraftRunResult {
+        workflow_authority: "langgraph",
+        recommendation,
+        graph_audit,
+    })
 }
 
 fn parse_audience(s: &str) -> Result<StakeholderAudience> {
@@ -80,9 +110,7 @@ fn parse_audience(s: &str) -> Result<StakeholderAudience> {
         "exec" => Ok(StakeholderAudience::Exec),
         "board" => Ok(StakeholderAudience::Board),
         "customer" => Ok(StakeholderAudience::Customer),
-        "internal_team" | "internal-team" | "internal" => {
-            Ok(StakeholderAudience::InternalTeam)
-        }
+        "internal_team" | "internal-team" | "internal" => Ok(StakeholderAudience::InternalTeam),
         other => anyhow::bail!(
             "unknown audience {other:?}; expected one of: \
              exec, board, customer, internal_team"
@@ -90,20 +118,42 @@ fn parse_audience(s: &str) -> Result<StakeholderAudience> {
     }
 }
 
-fn render_json(rec: &BaRecommendation) {
-    let out = serde_json::to_string_pretty(rec).unwrap_or_else(|_| "{}".to_string());
+fn render_json(result: &BaDraftRunResult) {
+    let out = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
     println!("{out}");
 }
 
-fn render_summary(rec: &BaRecommendation) {
-    println!("Recommendation {} ({})", rec.recommendation_id.as_str(), rec.stakeholder_audience.key());
+fn render_summary(result: &BaDraftRunResult) {
+    let rec = &result.recommendation;
+    println!(
+        "Recommendation {} ({})",
+        rec.recommendation_id.as_str(),
+        rec.stakeholder_audience.key()
+    );
     println!("  generated:  {}", rec.generated_at);
     println!("  agent:      {}", rec.agent_id);
-    println!("  citations:  {} ({} distinct)", rec.citations.len(), rec.distinct_citation_count());
+    println!(
+        "  citations:  {} ({} distinct)",
+        rec.citations.len(),
+        rec.distinct_citation_count()
+    );
     println!("  requirement_refs: {}", rec.requirement_refs.len());
     println!(
         "  structurally ready: {}",
         rec.is_structurally_ready_for_publication()
+    );
+    println!(
+        "  graph:     {} ({})",
+        result.graph_audit.decision,
+        result
+            .graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .unwrap_or("<missing checkpoint>")
+    );
+    println!(
+        "  graph log: {}",
+        result.graph_audit.graph_runs_path.display()
     );
     println!();
     println!("BRIEF:");
@@ -135,6 +185,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sentinel_domain::ports::{LlmPort, LlmRequest};
+    use std::path::Path;
 
     struct StubLlm {
         response: String,
@@ -142,8 +193,42 @@ mod tests {
 
     #[async_trait]
     impl LlmPort for StubLlm {
-        async fn complete(&self, _request: LlmRequest) -> Result<String, sentinel_domain::port_errors::LlmError> {
+        async fn complete(
+            &self,
+            _request: LlmRequest,
+        ) -> Result<String, sentinel_domain::port_errors::LlmError> {
             Ok(self.response.clone())
+        }
+    }
+
+    struct SentinelEnvGuard {
+        previous_home: Option<std::ffi::OsString>,
+        previous_backend: Option<std::ffi::OsString>,
+    }
+
+    impl SentinelEnvGuard {
+        fn set(path: &Path) -> Self {
+            let previous_home = std::env::var_os("SENTINEL_HOME");
+            let previous_backend = std::env::var_os("SENTINEL_DECISION_GRAPH_CHECKPOINTER");
+            std::env::set_var("SENTINEL_HOME", path);
+            std::env::set_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER", "sqlite");
+            Self {
+                previous_home,
+                previous_backend,
+            }
+        }
+    }
+
+    impl Drop for SentinelEnvGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("SENTINEL_HOME", value),
+                None => std::env::remove_var("SENTINEL_HOME"),
+            }
+            match self.previous_backend.take() {
+                Some(value) => std::env::set_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER", value),
+                None => std::env::remove_var("SENTINEL_DECISION_GRAPH_CHECKPOINTER"),
+            }
         }
     }
 
@@ -179,7 +264,12 @@ mod tests {
 
     #[tokio::test]
     async fn draft_with_well_formed_args_succeeds() {
-        let llm = StubLlm { response: good_response() };
+        let _guard = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _env = SentinelEnvGuard::set(tmp.path());
+        let llm = StubLlm {
+            response: good_response(),
+        };
         let args = DraftArgs {
             brief: "scale the platform".to_string(),
             audience: "exec".to_string(),
@@ -193,7 +283,12 @@ mod tests {
 
     #[tokio::test]
     async fn draft_summary_mode_succeeds() {
-        let llm = StubLlm { response: good_response() };
+        let _guard = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _env = SentinelEnvGuard::set(tmp.path());
+        let llm = StubLlm {
+            response: good_response(),
+        };
         let args = DraftArgs {
             brief: "scale".to_string(),
             audience: "board".to_string(),
@@ -206,8 +301,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_result_returns_langgraph_audit() {
+        let _guard = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _env = SentinelEnvGuard::set(tmp.path());
+        let llm = StubLlm {
+            response: good_response(),
+        };
+        let args = DraftArgs {
+            brief: "scale".to_string(),
+            audience: "exec".to_string(),
+            constraints: vec![],
+            agent_id: "ba".to_string(),
+            json: true,
+        };
+
+        let result = draft_result_with(args, &llm).await.expect("draft result");
+
+        assert_eq!(result.workflow_authority, "langgraph");
+        assert_eq!(result.graph_audit.workflow_authority, "langgraph");
+        assert_eq!(result.graph_audit.graph, "ba_draft");
+        assert_eq!(result.graph_audit.decision, "high-risk-ready");
+        assert!(result
+            .graph_audit
+            .authorization_checkpoint
+            .as_deref()
+            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert_eq!(result.graph_audit.run["topology"]["graph"], "ba_draft");
+        assert!(std::fs::read_to_string(&result.graph_audit.graph_runs_path)
+            .expect("graph jsonl")
+            .contains("\"workflow_authority\":\"langgraph\""));
+    }
+
+    #[tokio::test]
     async fn draft_rejects_unknown_audience() {
-        let llm = StubLlm { response: good_response() };
+        let llm = StubLlm {
+            response: good_response(),
+        };
         let args = DraftArgs {
             brief: "scale".to_string(),
             audience: "not-an-audience".to_string(),
@@ -221,7 +351,9 @@ mod tests {
 
     #[tokio::test]
     async fn draft_rejects_blank_brief_through_orchestrator() {
-        let llm = StubLlm { response: good_response() };
+        let llm = StubLlm {
+            response: good_response(),
+        };
         let args = DraftArgs {
             brief: "   ".to_string(),
             audience: "exec".to_string(),

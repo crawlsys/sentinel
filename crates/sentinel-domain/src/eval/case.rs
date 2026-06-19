@@ -103,7 +103,7 @@ impl std::error::Error for EvalIdError {}
 /// vs synthetic — wildly different signal qualities).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SourceCorpus {
-    /// Public consulting deliverables (`McKinsey` / Bain / BCG public
+    /// Public advisory deliverables (`McKinsey` / Bain / BCG public
     /// reports, academic case studies, public think-tank briefs).
     /// High availability, lower-quality outcome data.
     Public { url: String, license: String },
