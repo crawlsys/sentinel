@@ -132,6 +132,10 @@ fn phase_graph_runtime_snapshots_tenant_scope_from_compiled_graph() {
         "compiled phase graphs must expose env-free thread id derivation"
     );
     assert!(
+        !graph_source.contains("pub fn phase_thread_id("),
+        "sentinel-graph must not expose env-derived phase thread id helpers"
+    );
+    assert!(
         !graph_source.contains("tenant_scope_for_checkpointer_backend(&checkpointer_backend)?"),
         "phase graph compilation must not re-read process env for tenant scope"
     );

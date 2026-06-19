@@ -432,37 +432,6 @@ fn phase_thread_id_is_tenant_scoped_when_configured() {
 }
 
 #[test]
-fn public_phase_thread_id_ignores_tenant_for_local_sqlite_backend() {
-    with_phase_checkpointer_env(Some("sqlite"), None, None, Some("legatus_ai"), || {
-        let thread_id =
-            crate::phase_thread_id("linear", "session-123").expect("valid local thread id");
-
-        assert_eq!(thread_id, "sentinel.phase.linear.session-123");
-    });
-}
-
-#[test]
-fn public_phase_thread_id_uses_tenant_for_hosted_backend() {
-    with_phase_checkpointer_env_full(
-        Some("redis"),
-        None,
-        None,
-        Some("redis://localhost:6379/0"),
-        None,
-        Some("legatus_ai"),
-        || {
-            let thread_id =
-                crate::phase_thread_id("linear", "session-123").expect("valid hosted thread id");
-
-            assert_eq!(
-                thread_id,
-                "tenant:legatus_ai:sentinel.phase.linear.session-123"
-            );
-        },
-    );
-}
-
-#[test]
 fn phase_thread_id_rejects_malformed_tenant_scope() {
     let err = sentinel_domain::langgraph_thread::tenant_scoped_thread_id(
         "sentinel.phase.linear.session-123".to_string(),

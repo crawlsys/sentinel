@@ -115,18 +115,6 @@ fn tenant_scope_from_env() -> Result<Option<String>> {
     Ok(Some(tenant.to_string()))
 }
 
-/// Derive the durable LangGraph thread id for a Sentinel phase workflow.
-///
-/// This is the public projection helper for CLI/MCP/API evidence validation.
-/// It applies the current optional `SENTINEL_LANGGRAPH_TENANT` namespace for
-/// callers that need to validate hosted multi-tenant checkpoint evidence.
-pub fn phase_thread_id(skill: &str, session_id: &str) -> Result<String> {
-    let backend = phase_checkpointer_backend_from_env()?;
-    let tenant_scope = tenant_scope_for_checkpointer_backend(&backend)?;
-    sentinel_domain::langgraph_thread::phase_thread_id(skill, session_id, tenant_scope.as_deref())
-        .map_err(GraphEngineError::Checkpointer)
-}
-
 /// The verdict a judge returns for a phase. Serializable so it survives the
 /// checkpoint round-trip: the phase graph authority records it, then the
 /// conditional edge reads it on checkpoint-backed re-invocation.
