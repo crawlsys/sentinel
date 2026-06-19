@@ -1,6 +1,10 @@
 use std::path::{Component, Path, PathBuf};
 
-const RETIRED_CONTROL_PLANE_TERMS: &[&str] = &["consul", "republic", "dashboard"];
+const RETIRED_CONTROL_PLANE_TERMS: &[&str] = &[
+    concat!("con", "sul"),
+    concat!("re", "public"),
+    concat!("dash", "board"),
+];
 
 #[test]
 fn retired_control_plane_surfaces_stay_removed() {
