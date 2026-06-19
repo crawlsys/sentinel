@@ -9,8 +9,8 @@ use futures::StreamExt;
 use langgraph_core::application::services::{
     get_stream_writer, ChatModelStream, CheckpointEvent, CheckpointsTransformer, CompilationResult,
     CompiledGraphV3Ext, CustomEvent, CustomTransformer, DebugEvent, DebugTransformer,
-    GraphRunStream, LifecycleEvent, RunV3Options, StateSnapshot, StateUpdateEvent, SubgraphHandle,
-    TaskEvent, TasksTransformer, UpdatesTransformer, V3StreamTransformer,
+    GraphRunStream, LifecycleEvent, Projection, RunV3Options, StateSnapshot, StateUpdateEvent,
+    SubgraphHandle, TaskEvent, TasksTransformer, UpdatesTransformer, V3StreamTransformer,
 };
 use langgraph_core::domain::value_objects::{NodeError, END, START};
 use langgraph_core::ports::WriteHistoryEntry;
@@ -977,15 +977,136 @@ async fn drain_v3_messages(
 ) -> Result<V3ProjectionDrain, String> {
     let mut drain = V3ProjectionDrain::default();
     while let Some(message) = rx.recv().await {
+        let node_id = message.node_id.to_string();
         drain.push(decision_stream_part(
-            "Messages",
-            message.node_id.to_string(),
+            "MessageStreamStarted",
+            node_id.clone(),
             Utc::now().to_rfc3339(),
             0,
             "messages",
             serde_json::json!({
-                "node_id": message.node_id.to_string(),
+                "node_id": node_id.clone(),
                 "stream": "chat_model",
+            }),
+            Vec::new(),
+        ));
+        let text_rx = Projection::take(&message.text).map_err(|err| err.to_string())?;
+        let reasoning_rx = Projection::take(&message.reasoning).map_err(|err| err.to_string())?;
+        let tool_calls_rx = Projection::take(&message.tool_calls).map_err(|err| err.to_string())?;
+        let usage_rx = Projection::take(&message.usage).map_err(|err| err.to_string())?;
+        let output = message.output();
+        let (text, reasoning, tool_calls, usage, output) = tokio::join!(
+            drain_chat_message_text(node_id.clone(), text_rx),
+            drain_chat_message_reasoning(node_id.clone(), reasoning_rx),
+            drain_chat_message_tool_calls(node_id.clone(), tool_calls_rx),
+            drain_chat_message_usage(node_id.clone(), usage_rx),
+            output,
+        );
+        drain.extend(text?);
+        drain.extend(reasoning?);
+        drain.extend(tool_calls?);
+        drain.extend(usage?);
+
+        let output = output.map_err(|err| {
+            format!("decision graph message stream for node {node_id} closed without output: {err}")
+        })?;
+        drain.push(decision_stream_part(
+            "MessageOutput",
+            node_id,
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "channel": "output",
+                "message": stream_payload_json("message_output", &output)?,
+            }),
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_chat_message_text(
+    node_id: String,
+    mut rx: mpsc::Receiver<String>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(delta) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "MessageTextDelta",
+            node_id.clone(),
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "channel": "text",
+                "delta": delta,
+            }),
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_chat_message_reasoning(
+    node_id: String,
+    mut rx: mpsc::Receiver<String>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(delta) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "MessageReasoningDelta",
+            node_id.clone(),
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "channel": "reasoning",
+                "delta": delta,
+            }),
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_chat_message_tool_calls(
+    node_id: String,
+    mut rx: mpsc::Receiver<langgraph_core::domain::value_objects::ToolCall>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(tool_call) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "MessageToolCall",
+            node_id.clone(),
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "channel": "tool_calls",
+                "tool_call": stream_payload_json("message_tool_call", &tool_call)?,
+            }),
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_chat_message_usage(
+    node_id: String,
+    mut rx: mpsc::Receiver<langgraph_core::domain::value_objects::TokenUsage>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(usage) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "MessageUsage",
+            node_id.clone(),
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "channel": "usage",
+                "usage": stream_payload_json("message_usage", &usage)?,
             }),
             Vec::new(),
         ));
@@ -1030,9 +1151,14 @@ fn stream_part_rank(part: &DecisionGraphStreamPart) -> u8 {
         "SubgraphCompleted" => 7,
         "SubgraphFailed" => 8,
         "Subgraph" => 9,
-        "Messages" => 10,
-        "ExecutionComplete" => 11,
-        _ => 12,
+        "MessageStreamStarted" => 10,
+        "MessageTextDelta" => 11,
+        "MessageReasoningDelta" => 12,
+        "MessageToolCall" => 13,
+        "MessageUsage" => 14,
+        "MessageOutput" => 15,
+        "ExecutionComplete" => 16,
+        _ => 17,
     }
 }
 
@@ -2566,5 +2692,67 @@ mod tests {
         let err = required_decision_node_runtime_contract("severity", &missing_timeout)
             .expect_err("missing timeout must fail");
         assert!(err.contains("timeout policy"));
+    }
+
+    #[tokio::test]
+    async fn drain_v3_messages_records_all_chat_model_subchannels() {
+        use std::collections::HashMap;
+
+        use langgraph_core::domain::value_objects::{Message, TokenUsage, ToolCall};
+
+        let (stream, mut senders) = ChatModelStream::channels("llm_node");
+        senders.dispatch_text_delta("hello").await;
+        senders.dispatch_reasoning_delta("thinking").await;
+        senders
+            .dispatch_tool_call(ToolCall::new(
+                "call_1",
+                "lookup",
+                HashMap::from([("query".to_string(), serde_json::json!("rust"))]),
+            ))
+            .await;
+        senders.dispatch_usage(TokenUsage::new(5, 7, 12)).await;
+        senders.finalize(Message::assistant("done"));
+        drop(senders);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(stream).await.expect("send chat stream");
+        drop(tx);
+
+        let drain = drain_v3_messages(rx).await.expect("message drain");
+        let events: Vec<_> = drain
+            .stream
+            .iter()
+            .map(|part| part.event_type.as_str())
+            .collect();
+        for expected in [
+            "MessageStreamStarted",
+            "MessageTextDelta",
+            "MessageReasoningDelta",
+            "MessageToolCall",
+            "MessageUsage",
+            "MessageOutput",
+        ] {
+            assert!(
+                events.contains(&expected),
+                "missing {expected} in {events:?}"
+            );
+        }
+
+        assert!(drain.stream.iter().any(|part| {
+            part.event_type == "MessageTextDelta" && part.payload_json["delta"] == "hello"
+        }));
+        assert!(drain.stream.iter().any(|part| {
+            part.event_type == "MessageReasoningDelta" && part.payload_json["delta"] == "thinking"
+        }));
+        assert!(drain.stream.iter().any(|part| {
+            part.event_type == "MessageToolCall"
+                && part.payload_json["tool_call"]["name"] == "lookup"
+        }));
+        assert!(drain.stream.iter().any(|part| {
+            part.event_type == "MessageUsage" && part.payload_json["usage"]["total_tokens"] == 12
+        }));
+        assert!(drain.stream.iter().any(|part| {
+            part.event_type == "MessageOutput" && part.payload_json["message"]["content"] == "done"
+        }));
     }
 }
