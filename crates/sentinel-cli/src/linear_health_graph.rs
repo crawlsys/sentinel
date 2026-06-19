@@ -31,7 +31,7 @@ pub(crate) async fn run_linear_health_graph_audit(
         .ok_or_else(|| {
             anyhow::anyhow!("Linear health graph produced no authorization checkpoint")
         })?;
-    let authorization_checkpoint = Some(authorization.checkpoint_ref());
+    let authorization_checkpoint = authorization.checkpoint_ref();
     let decision = linear_health_decision_label(run.state.decision).to_string();
     let thread_id = run.thread_id.clone();
     let run_json = serde_json::to_value(&run)?;
@@ -101,10 +101,7 @@ mod tests {
         assert_eq!(audit.workflow_authority, "langgraph");
         assert_eq!(audit.graph, "linear_health");
         assert_eq!(audit.decision, "healthy");
-        assert!(audit
-            .authorization_checkpoint
-            .as_deref()
-            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert!(audit.authorization_checkpoint.contains('#'));
         assert_eq!(audit.run["topology"]["graph"], "linear_health");
         assert!(audit.run["checkpoints"]
             .as_array()

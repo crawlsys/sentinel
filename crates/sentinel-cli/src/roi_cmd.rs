@@ -46,11 +46,7 @@ pub async fn run() -> Result<()> {
         println!(
             "Graph decision:      {} ({})",
             graph_audit.decision.bold(),
-            graph_audit
-                .authorization_checkpoint
-                .as_deref()
-                .expect("roi graph audit requires checkpoint")
-                .dimmed()
+            graph_audit.authorization_checkpoint.as_str().dimmed()
         );
         println!();
         println!(
@@ -67,11 +63,7 @@ pub async fn run() -> Result<()> {
     println!(
         "  graph decision {} · {}",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("roi graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!(
         "  {}  {}",

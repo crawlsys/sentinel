@@ -16,7 +16,7 @@ pub(crate) struct CacheEfficiencyGraphAudit {
     pub graph: &'static str,
     pub graph_runs_path: PathBuf,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -42,7 +42,7 @@ pub(crate) async fn run_cache_efficiency_graph_audit(
         .ok_or_else(|| {
             anyhow::anyhow!("cache efficiency graph produced no authorization checkpoint")
         })?;
-    let authorization_checkpoint = Some(authorization.checkpoint_ref());
+    let authorization_checkpoint = authorization.checkpoint_ref();
     let decision = cache_efficiency_decision_label(run.state.decision).to_string();
     let thread_id = run.thread_id.clone();
     let run_json = serde_json::to_value(&run)?;
@@ -128,10 +128,7 @@ mod tests {
         assert_eq!(audit.workflow_authority, "langgraph");
         assert_eq!(audit.graph, "cache_efficiency");
         assert_eq!(audit.decision, "cache-excellent");
-        assert!(audit
-            .authorization_checkpoint
-            .as_deref()
-            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert!(audit.authorization_checkpoint.contains('#'));
         assert_eq!(audit.run["topology"]["graph"], "cache_efficiency");
         assert!(audit.run["checkpoints"]
             .as_array()

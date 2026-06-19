@@ -227,10 +227,7 @@ fn render_graph_summary(graph_audit: &crate::eval_graph::EvalGraphAudit) {
     println!(
         "  graph:     {} ({})",
         graph_audit.decision,
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .unwrap_or("<missing checkpoint>")
+        graph_audit.authorization_checkpoint.as_str()
     );
     println!("  graph log: {}", graph_audit.graph_runs_path.display());
 }

@@ -64,7 +64,7 @@ pub struct AggregateGraphAudit {
     pub graph: &'static str,
     pub graph_runs_path: PathBuf,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -310,7 +310,7 @@ pub struct LinearHealthGraphAudit {
     pub graph: &'static str,
     pub graph_runs_path: PathBuf,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -330,7 +330,7 @@ pub trait LinearHealthGraphAuditPort: Send + Sync {
 pub struct DevScorecardGraphAuditRun {
     pub identifier: String,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -366,7 +366,7 @@ pub struct TokenCostGraphAudit {
     pub graph: &'static str,
     pub graph_runs_path: PathBuf,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -2902,7 +2902,7 @@ mod step_tools_tests {
                 graph: "linear_health",
                 graph_runs_path: graph_jsonl.to_path_buf(),
                 decision,
-                authorization_checkpoint: Some(checkpoint),
+                authorization_checkpoint: checkpoint,
                 thread_id,
                 run,
             })
@@ -2985,7 +2985,7 @@ mod step_tools_tests {
                 runs.push(DevScorecardGraphAuditRun {
                     identifier: score.name.clone(),
                     decision: decision.to_string(),
-                    authorization_checkpoint: Some(checkpoint),
+                    authorization_checkpoint: checkpoint,
                     thread_id,
                     run,
                 });
@@ -3077,7 +3077,7 @@ mod step_tools_tests {
                 graph: "token_cost",
                 graph_runs_path: graph_jsonl.to_path_buf(),
                 decision,
-                authorization_checkpoint: Some(checkpoint),
+                authorization_checkpoint: checkpoint,
                 thread_id,
                 run,
             })
@@ -3152,7 +3152,7 @@ mod step_tools_tests {
                 graph: "token_usage",
                 graph_runs_path: graph_jsonl.to_path_buf(),
                 decision,
-                authorization_checkpoint: Some(checkpoint),
+                authorization_checkpoint: checkpoint,
                 thread_id,
                 run,
             })
@@ -3169,7 +3169,7 @@ mod step_tools_tests {
             graph,
             graph_runs_path: graph_jsonl.to_path_buf(),
             decision: "validated".to_string(),
-            authorization_checkpoint: Some(checkpoint),
+            authorization_checkpoint: checkpoint,
             thread_id: thread_id.clone(),
             run: serde_json::json!({
                 "thread_id": thread_id,
@@ -3379,7 +3379,7 @@ mod step_tools_tests {
                     graph: "eval",
                     graph_runs_path: graph_jsonl,
                     decision: "strong".to_string(),
-                    authorization_checkpoint: Some(checkpoint),
+                    authorization_checkpoint: checkpoint,
                     thread_id,
                     run: run_json,
                 },
@@ -3518,7 +3518,7 @@ mod step_tools_tests {
                     graph: "ba_draft",
                     graph_runs_path: graph_jsonl,
                     decision: "high-risk-ready".to_string(),
-                    authorization_checkpoint: Some(checkpoint),
+                    authorization_checkpoint: checkpoint,
                     thread_id,
                     run,
                 },

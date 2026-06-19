@@ -52,11 +52,7 @@ pub async fn run() -> Result<()> {
     println!(
         "  graph decision {} · {}",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("health graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!();
     println!("  {:14} {:.1} / 30", "hygiene", summary.hygiene_score);

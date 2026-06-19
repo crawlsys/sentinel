@@ -41,11 +41,7 @@ pub async fn run() -> Result<()> {
     println!(
         "  graph decision {} · {}",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("token cost graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!(
         "  input {:.1}M · output {:.1}M · cache-write {:.2}B · cache-read {:.2}B",

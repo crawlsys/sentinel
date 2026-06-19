@@ -121,11 +121,7 @@ pub async fn run_aggregate() -> Result<()> {
     println!(
         "  Graph decision: {} ({})",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("sla graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!();
 

@@ -145,11 +145,7 @@ fn render_summary(result: &BaDraftRunResult) {
     println!(
         "  graph:     {} ({})",
         result.graph_audit.decision,
-        result
-            .graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .unwrap_or("<missing checkpoint>")
+        result.graph_audit.authorization_checkpoint.as_str()
     );
     println!(
         "  graph log: {}",
@@ -322,11 +318,7 @@ mod tests {
         assert_eq!(result.graph_audit.workflow_authority, "langgraph");
         assert_eq!(result.graph_audit.graph, "ba_draft");
         assert_eq!(result.graph_audit.decision, "high-risk-ready");
-        assert!(result
-            .graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert!(result.graph_audit.authorization_checkpoint.contains('#'));
         assert_eq!(result.graph_audit.run["topology"]["graph"], "ba_draft");
         assert!(std::fs::read_to_string(&result.graph_audit.graph_runs_path)
             .expect("graph jsonl")

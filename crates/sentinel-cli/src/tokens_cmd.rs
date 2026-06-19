@@ -38,11 +38,7 @@ pub async fn run(top: usize) -> Result<()> {
     println!(
         "  Graph decision:    {} ({})",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("token usage graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!(
         "  Mapped to ticket:  {} ({:.1}%)",

@@ -34,11 +34,7 @@ pub async fn run(window_days: u32) -> Result<()> {
     println!(
         "  Graph decision:             {} ({})",
         graph_audit.decision.bold(),
-        graph_audit
-            .authorization_checkpoint
-            .as_deref()
-            .expect("PR review graph audit requires checkpoint")
-            .dimmed()
+        graph_audit.authorization_checkpoint.as_str().dimmed()
     );
     println!(
         "  Avg comments per PR:        {:.2}",

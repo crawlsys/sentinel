@@ -44,7 +44,7 @@ pub(crate) async fn run_dev_scorecard_graph_audit(
                     score.name
                 )
             })?;
-        let authorization_checkpoint = Some(authorization.checkpoint_ref());
+        let authorization_checkpoint = authorization.checkpoint_ref();
         let decision = dev_scorecard_decision_label(run.state.decision).to_string();
         match run.state.decision {
             DevScorecardDecision::AttributionDivergence => attribution_divergences += 1,
@@ -158,10 +158,7 @@ mod tests {
         assert_eq!(audit.attribution_divergences, 1);
         assert_eq!(audit.excellent, 1);
         assert_eq!(audit.runs[0].decision, "attribution-divergence");
-        assert!(audit.runs[0]
-            .authorization_checkpoint
-            .as_deref()
-            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert!(audit.runs[0].authorization_checkpoint.contains('#'));
         assert_eq!(audit.runs[0].run["topology"]["graph"], "dev_scorecard");
         assert!(audit.runs[0].run["checkpoints"]
             .as_array()

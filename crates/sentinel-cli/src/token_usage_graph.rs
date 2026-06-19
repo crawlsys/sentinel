@@ -16,7 +16,7 @@ pub(crate) struct TokenUsageGraphAudit {
     pub graph: &'static str,
     pub graph_runs_path: PathBuf,
     pub decision: String,
-    pub authorization_checkpoint: Option<String>,
+    pub authorization_checkpoint: String,
     pub thread_id: String,
     pub run: serde_json::Value,
 }
@@ -40,7 +40,7 @@ pub(crate) async fn run_token_usage_graph_audit(
         .token_usage_authorization()
         .map_err(|e| anyhow::anyhow!("token usage graph authorization failed: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("token usage graph produced no authorization checkpoint"))?;
-    let authorization_checkpoint = Some(authorization.checkpoint_ref());
+    let authorization_checkpoint = authorization.checkpoint_ref();
     let decision = token_usage_decision_label(run.state.decision).to_string();
     let thread_id = run.thread_id.clone();
     let run_json = serde_json::to_value(&run)?;
@@ -111,10 +111,7 @@ mod tests {
         assert_eq!(audit.workflow_authority, "langgraph");
         assert_eq!(audit.graph, "token_usage");
         assert_eq!(audit.decision, "healthy-usage");
-        assert!(audit
-            .authorization_checkpoint
-            .as_deref()
-            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert!(audit.authorization_checkpoint.contains('#'));
         assert_eq!(audit.run["topology"]["graph"], "token_usage");
         assert!(audit.run["checkpoints"]
             .as_array()
