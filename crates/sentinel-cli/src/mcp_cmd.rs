@@ -4643,6 +4643,10 @@ blocker = true
         assert_eq!(audit.skipped, 0);
         assert_eq!(audit.runs[0].identifier, "FPCRM-777");
         assert_eq!(audit.runs[0].decision, "set");
+        assert!(
+            audit.runs[0].terminal_checkpoint.contains('#'),
+            "severity audit must expose terminal graph checkpoint"
+        );
         assert!(audit.runs[0]
             .authorization_checkpoint
             .as_deref()

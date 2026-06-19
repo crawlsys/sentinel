@@ -49,6 +49,14 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} run report must carry durable checkpoint history"
         );
         assert!(
+            source.contains("terminal_decision_checkpoint_result("),
+            "{label} authorization must validate the terminal checkpoint through the shared helper"
+        );
+        assert!(
+            source.contains("validate_decision_graph_run("),
+            "{label} run report must validate terminal state, checkpoint history, writes, stream, and topology"
+        );
+        assert!(
             source.contains("run_thread_id_for_compiled("),
             "{label} must derive thread ids from compiled graph metadata"
         );
