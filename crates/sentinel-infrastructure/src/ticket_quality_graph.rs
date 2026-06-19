@@ -515,8 +515,12 @@ pub async fn run_ticket_quality_decision_report(
     compiled: &TicketQualityGraph,
     state: TicketQualityState,
 ) -> Result<TicketQualityGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("ticket_quality", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "ticket_quality",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "ticket_quality", &identifier, state).await?;

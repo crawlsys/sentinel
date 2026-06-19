@@ -433,7 +433,12 @@ pub async fn run_eval_decision_report(
     compiled: &EvalGraph,
     state: EvalRunState,
 ) -> Result<EvalRunGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id("eval", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "eval",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = stream_decision_run(compiled, &thread_id, "eval", &identifier, state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

@@ -342,7 +342,12 @@ pub async fn run_linear_health_decision_report(
     compiled: &LinearHealthGraph,
     state: LinearHealthState,
 ) -> Result<LinearHealthGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id("linear_health", "board", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "linear_health",
+        "board",
+        &state,
+    )?;
     let streamed =
         stream_decision_run(compiled, &thread_id, "linear_health", "board", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

@@ -49,6 +49,10 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} run report must carry durable checkpoint history"
         );
         assert!(
+            source.contains("run_thread_id_for_compiled("),
+            "{label} must derive thread ids from compiled graph metadata"
+        );
+        assert!(
             source.contains("topology("),
             "{label} run report must carry LangGraph topology evidence"
         );
@@ -63,6 +67,10 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
         assert!(
             !source.contains("get_stream_writer("),
             "{label} must use emit_decision_node_event instead of direct stream-writer calls"
+        );
+        assert!(
+            !source.contains("decision_graph_store::run_thread_id("),
+            "{label} must not derive runtime thread ids from process env"
         );
         assert!(
             !source.contains(".execute("),

@@ -424,8 +424,12 @@ pub async fn run_pr_merge_decision_report(
     compiled: &PrMergeGraph,
     state: PrMergeState,
 ) -> Result<PrMergeGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("pr_merge", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "pr_merge",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "pr_merge", &identifier, state).await?;

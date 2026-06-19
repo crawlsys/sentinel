@@ -383,8 +383,12 @@ pub async fn run_decision_report(
     compiled: &langgraph_core::application::services::CompilationResult<EscalationState>,
     state: EscalationState,
 ) -> Result<EscalationGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("enforcement", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "enforcement",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "enforcement", &identifier, state).await?;
@@ -750,9 +754,13 @@ mod tests {
             judge_confirmed: Some(true),
             decision: Decision::Clear,
         };
-        let thread_id =
-            crate::decision_graph_store::run_thread_id("enforcement", &state.identifier, &state)
-                .expect("thread id");
+        let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &compiled,
+            "enforcement",
+            &state.identifier,
+            &state,
+        )
+        .expect("thread id");
         let run = run_decision_report(&compiled, state).await.expect("runs");
         assert_eq!(run.thread_id, thread_id);
         assert_eq!(run.state.decision, Decision::Revert);
@@ -920,9 +928,13 @@ mod tests {
 
         let ready = readiness("started", Some(3.0), true, true);
         let seed = EscalationState::from_readiness(&ready);
-        let thread_id =
-            crate::decision_graph_store::run_thread_id("enforcement", &seed.identifier, &seed)
-                .expect("thread id");
+        let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &compiled,
+            "enforcement",
+            &seed.identifier,
+            &seed,
+        )
+        .expect("thread id");
 
         let run = evaluate_ticket_report(&PanicLlm, &compiled, &ready)
             .await
@@ -963,7 +975,8 @@ mod tests {
         let unready = readiness("started", None, true, true);
         let mut stale_clear_state = EscalationState::from_readiness(&unready);
         stale_clear_state.judge_confirmed = Some(false);
-        let stale_clear_thread_id = crate::decision_graph_store::run_thread_id(
+        let stale_clear_thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &compiled,
             "enforcement",
             &stale_clear_state.identifier,
             &stale_clear_state,

@@ -567,7 +567,12 @@ pub async fn run_pr_review_decision_report(
     compiled: &PrReviewGraph,
     state: PrReviewState,
 ) -> Result<PrReviewGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id("pr_review", "aggregate", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "pr_review",
+        "aggregate",
+        &state,
+    )?;
     let streamed =
         stream_decision_run(compiled, &thread_id, "pr_review", "aggregate", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

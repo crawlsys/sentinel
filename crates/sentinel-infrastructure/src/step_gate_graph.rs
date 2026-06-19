@@ -773,8 +773,12 @@ pub async fn run_step_gate_decision_report(
     compiled: &StepGateGraph,
     state: StepGateState,
 ) -> Result<StepGateGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("step_gate", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "step_gate",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "step_gate", &identifier, state).await?;

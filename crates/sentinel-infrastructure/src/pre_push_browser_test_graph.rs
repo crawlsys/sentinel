@@ -550,7 +550,8 @@ pub async fn run_pre_push_browser_decision_report(
     compiled: &PrePushBrowserGraph,
     state: PrePushBrowserState,
 ) -> Result<PrePushBrowserGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "pre_push_browser_test",
         &state.identifier,
         &state,

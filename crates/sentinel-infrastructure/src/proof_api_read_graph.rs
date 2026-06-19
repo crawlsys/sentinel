@@ -441,8 +441,12 @@ pub async fn run_proof_api_read_decision_report(
     compiled: &ProofApiReadGraph,
     state: ProofApiReadState,
 ) -> Result<ProofApiReadGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("proof_api_read", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "proof_api_read",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "proof_api_read", &identifier, state).await?;

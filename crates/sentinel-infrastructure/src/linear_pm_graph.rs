@@ -903,8 +903,12 @@ pub async fn run_linear_pm_decision_report(
     compiled: &LinearPmGraph,
     state: LinearPmState,
 ) -> Result<LinearPmGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("linear_pm", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "linear_pm",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "linear_pm", &identifier, state).await?;

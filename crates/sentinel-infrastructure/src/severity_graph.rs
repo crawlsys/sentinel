@@ -326,8 +326,12 @@ pub async fn run_severity_mutation_decision_report(
     compiled: &SeverityMutationGraph,
     state: SeverityMutationState,
 ) -> Result<SeverityMutationRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("severity", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "severity",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "severity", &identifier, state).await?;

@@ -427,8 +427,12 @@ pub async fn run_plan_title_decision_report(
     compiled: &PlanTitleGraph,
     state: PlanTitleState,
 ) -> Result<PlanTitleGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("plan_title", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "plan_title",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "plan_title", &identifier, state).await?;

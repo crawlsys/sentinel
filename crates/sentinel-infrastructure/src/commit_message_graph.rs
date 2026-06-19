@@ -614,8 +614,12 @@ pub async fn run_commit_message_decision_report(
     compiled: &CommitMessageGraph,
     state: CommitMessageState,
 ) -> Result<CommitMessageGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("commit_message", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "commit_message",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "commit_message", &identifier, state).await?;

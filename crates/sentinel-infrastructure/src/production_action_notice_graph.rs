@@ -409,7 +409,8 @@ pub async fn run_production_action_notice_decision_report(
     compiled: &ProductionActionNoticeGraph,
     state: ProductionActionNoticeState,
 ) -> Result<ProductionActionNoticeGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "production_action_notice",
         &state.identifier,
         &state,

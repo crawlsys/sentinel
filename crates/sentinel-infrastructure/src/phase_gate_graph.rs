@@ -494,8 +494,12 @@ pub async fn run_phase_gate_decision_report(
     compiled: &PhaseGateGraph,
     state: PhaseGateState,
 ) -> Result<PhaseGateGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("phase_gate", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "phase_gate",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "phase_gate", &identifier, state).await?;

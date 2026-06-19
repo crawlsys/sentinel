@@ -584,7 +584,12 @@ pub async fn run_roi_decision_report(
     compiled: &RoiGraph,
     state: RoiState,
 ) -> Result<RoiGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id("roi", "aggregate", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "roi",
+        "aggregate",
+        &state,
+    )?;
     let streamed = stream_decision_run(compiled, &thread_id, "roi", "aggregate", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;
     let write_history = write_history(compiled, &thread_id, None).await?;

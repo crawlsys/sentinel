@@ -322,8 +322,12 @@ pub async fn run_delegation_decision_report(
     compiled: &DelegationGraph,
     state: DelegationState,
 ) -> Result<DelegationGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("delegation", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "delegation",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "delegation", &identifier, state).await?;

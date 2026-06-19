@@ -410,8 +410,12 @@ pub async fn run_session_api_stats_decision_report(
     compiled: &SessionApiStatsGraph,
     state: SessionApiStatsState,
 ) -> Result<SessionApiStatsGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("session_api_stats", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "session_api_stats",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = stream_decision_run(
         compiled,

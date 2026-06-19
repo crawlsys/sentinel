@@ -427,7 +427,8 @@ pub async fn run_production_override_decision_report(
     compiled: &ProductionOverrideGraph,
     state: ProductionOverrideState,
 ) -> Result<ProductionOverrideGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "production_override",
         &state.identifier,
         &state,

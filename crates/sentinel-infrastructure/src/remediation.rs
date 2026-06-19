@@ -1155,8 +1155,12 @@ pub async fn run_remediation_decision_report(
     compiled: &langgraph_core::application::services::CompilationResult<RemediationState>,
     state: RemediationState,
 ) -> Result<RemediationGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("remediation", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "remediation",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = crate::decision_graph_introspection::stream_decision_run(
         compiled,
@@ -1761,9 +1765,13 @@ mod tests {
             proposal_failed: false,
             outcome: RemediationOutcome::Clear,
         };
-        let thread_id =
-            crate::decision_graph_store::run_thread_id("remediation", &s.identifier, &s)
-                .expect("thread id");
+        let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &g,
+            "remediation",
+            &s.identifier,
+            &s,
+        )
+        .expect("thread id");
         let run = run_remediation_decision_report(&g, s).await.expect("runs");
         assert_eq!(run.thread_id, thread_id);
         assert_eq!(run.state.outcome, RemediationOutcome::Clear);

@@ -514,8 +514,12 @@ pub async fn run_doppler_auth0_decision_report(
     compiled: &DopplerAuth0Graph,
     state: DopplerAuth0State,
 ) -> Result<DopplerAuth0GraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("doppler_auth0", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "doppler_auth0",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "doppler_auth0", &identifier, state).await?;

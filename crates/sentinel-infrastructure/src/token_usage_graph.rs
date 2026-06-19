@@ -506,7 +506,12 @@ pub async fn run_token_usage_decision_report(
     compiled: &TokenUsageGraph,
     state: TokenUsageState,
 ) -> Result<TokenUsageGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id("token_usage", "aggregate", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "token_usage",
+        "aggregate",
+        &state,
+    )?;
     let streamed =
         stream_decision_run(compiled, &thread_id, "token_usage", "aggregate", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

@@ -413,8 +413,12 @@ pub async fn run_db_ops_decision_report(
     compiled: &DbOpsGraph,
     state: DbOpsState,
 ) -> Result<DbOpsGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("db_ops", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "db_ops",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = stream_decision_run(compiled, &thread_id, "db_ops", &identifier, state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

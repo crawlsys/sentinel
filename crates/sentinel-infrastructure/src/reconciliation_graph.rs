@@ -413,8 +413,12 @@ pub async fn run_recon_decision_report(
     compiled: &langgraph_core::application::services::CompilationResult<ReconState>,
     state: ReconState,
 ) -> Result<ReconGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("reconciliation", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "reconciliation",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "reconciliation", &identifier, state).await?;
@@ -728,9 +732,13 @@ mod tests {
             .expect("graph builds");
         let mut state = ReconState::new("FPROUTE-durable", "dead optimizer", "no caller");
         state.verdict = Some(ReconVerdict::DeadCode);
-        let thread_id =
-            crate::decision_graph_store::run_thread_id("reconciliation", &state.identifier, &state)
-                .expect("thread id");
+        let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &compiled,
+            "reconciliation",
+            &state.identifier,
+            &state,
+        )
+        .expect("thread id");
         let run = run_recon_decision_report(&compiled, state)
             .await
             .expect("runs");
@@ -891,7 +899,8 @@ mod tests {
         let state = ReconState::new("FPROUTE-fail", "claimed thing", "evidence");
         let mut stale_clear_state = state.clone();
         stale_clear_state.verdict = Some(ReconVerdict::Unverifiable);
-        let stale_clear_thread_id = crate::decision_graph_store::run_thread_id(
+        let stale_clear_thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+            &compiled,
             "reconciliation",
             &stale_clear_state.identifier,
             &stale_clear_state,

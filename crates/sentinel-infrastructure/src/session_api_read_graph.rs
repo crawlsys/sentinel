@@ -422,8 +422,12 @@ pub async fn run_session_api_read_decision_report(
     compiled: &SessionApiReadGraph,
     state: SessionApiReadState,
 ) -> Result<SessionApiReadGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("session_api_read", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "session_api_read",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "session_api_read", &identifier, state).await?;

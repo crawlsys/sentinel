@@ -684,7 +684,8 @@ pub async fn run_operational_api_read_decision_report(
     compiled: &OperationalApiReadGraph,
     state: OperationalApiReadState,
 ) -> Result<OperationalApiReadGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "operational_api_read",
         &state.identifier,
         &state,

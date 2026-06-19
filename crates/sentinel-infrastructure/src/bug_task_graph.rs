@@ -445,8 +445,12 @@ pub async fn run_bug_task_decision_report(
     compiled: &BugTaskGraph,
     state: BugTaskState,
 ) -> Result<BugTaskGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("bug_task", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "bug_task",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "bug_task", &identifier, state).await?;

@@ -578,8 +578,12 @@ pub async fn run_mcp_proof_read_decision_report(
     compiled: &McpProofReadGraph,
     state: McpProofReadState,
 ) -> Result<McpProofReadGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("mcp_proof_read", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "mcp_proof_read",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "mcp_proof_read", &identifier, state).await?;

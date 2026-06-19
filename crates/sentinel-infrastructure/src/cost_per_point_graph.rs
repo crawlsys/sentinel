@@ -584,8 +584,12 @@ pub async fn run_cost_per_point_decision_report(
     compiled: &CostPerPointGraph,
     state: CostPerPointState,
 ) -> Result<CostPerPointGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("cost_per_point", "aggregate", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "cost_per_point",
+        "aggregate",
+        &state,
+    )?;
     let streamed =
         stream_decision_run(compiled, &thread_id, "cost_per_point", "aggregate", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

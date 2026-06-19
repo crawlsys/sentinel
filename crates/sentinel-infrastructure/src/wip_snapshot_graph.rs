@@ -350,8 +350,12 @@ pub async fn run_wip_snapshot_decision_report(
     compiled: &WipSnapshotGraph,
     state: WipSnapshotState,
 ) -> Result<WipSnapshotGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("wip_snapshot", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "wip_snapshot",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "wip_snapshot", &identifier, state).await?;

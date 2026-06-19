@@ -632,8 +632,12 @@ pub async fn run_dry_run_decision_report(
     compiled: &DryRunGraph,
     state: DryRunState,
 ) -> Result<DryRunGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("dry_run", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "dry_run",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = stream_decision_run(compiled, &thread_id, "dry_run", &identifier, state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

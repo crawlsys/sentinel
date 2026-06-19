@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
+use langgraph_core::application::services::CompilationResult;
 use langgraph_core::ports::CheckpointSaver;
 use sentinel_domain::langgraph_thread::{
     tenant_scoped_thread_id as tenant_scoped_langgraph_thread_id, validate_tenant_scope,
     LANGGRAPH_TENANT_ENV,
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
 
 #[cfg(feature = "postgres")]
@@ -16,6 +17,8 @@ use langgraph_core::PostgresCheckpointer;
 use langgraph_core::RedisCheckpointer;
 #[cfg(feature = "sqlite")]
 use langgraph_core::SqliteCheckpointer;
+
+const CHECKPOINTER_BACKEND_METADATA: &str = "sentinel.checkpointer_backend";
 
 /// Runtime backend selector for durable infrastructure decision-graph checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,7 +380,37 @@ async fn redis_checkpointer(
 /// Hosted distributed checkpointers require `SENTINEL_LANGGRAPH_TENANT` and
 /// include it in the thread id so shared storage cannot resume across tenant
 /// boundaries. Local SQLite ids stay unscoped even if a tenant env var is set.
+#[cfg(test)]
 pub(crate) fn run_thread_id<T: Serialize>(
+    graph_name: &str,
+    identifier: &str,
+    input: &T,
+) -> Result<String, String> {
+    let backend = decision_checkpointer_backend_from_env()?;
+    run_thread_id_for_backend(&backend, graph_name, identifier, input)
+}
+
+/// Derive a checkpoint thread id from the compiled graph's backend metadata.
+///
+/// Production decision graph runs use this helper so thread identity follows
+/// the graph that is actually executing, not a mutable process env value that
+/// may differ from an explicitly supplied checkpointer.
+pub(crate) fn run_thread_id_for_compiled<S, T>(
+    compiled: &CompilationResult<S>,
+    graph_name: &str,
+    identifier: &str,
+    input: &T,
+) -> Result<String, String>
+where
+    S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+    T: Serialize,
+{
+    let backend = compiled_checkpointer_backend(graph_name, compiled)?;
+    run_thread_id_for_backend(&backend, graph_name, identifier, input)
+}
+
+fn run_thread_id_for_backend<T: Serialize>(
+    backend: &str,
     graph_name: &str,
     identifier: &str,
     input: &T,
@@ -386,9 +419,72 @@ pub(crate) fn run_thread_id<T: Serialize>(
         .map_err(|e| format!("failed to serialize {graph_name} graph input: {e}"))?;
     let digest = Sha256::digest(&bytes);
     let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
-    let backend = decision_checkpointer_backend_from_env()?;
-    let tenant_scope = tenant_scope_for_checkpointer_backend(&backend)?;
+    let tenant_scope = tenant_scope_for_checkpointer_backend(backend)?;
     tenant_scoped_thread_id(base, tenant_scope.as_deref())
+}
+
+fn compiled_checkpointer_backend<S>(
+    graph_name: &str,
+    compiled: &CompilationResult<S>,
+) -> Result<String, String>
+where
+    S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    if compiled.checkpointer.is_none() {
+        return Err(format!(
+            "decision graph {graph_name} thread_id requires a configured LangGraph checkpointer"
+        ));
+    }
+
+    let mut backend: Option<String> = None;
+    let mut saw_node = false;
+    for node_id in compiled.graph.node_ids() {
+        saw_node = true;
+        let node = compiled
+            .graph
+            .node_introspection(node_id.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "{graph_name} decision graph node '{}' is missing compiled introspection",
+                    node_id.as_str()
+                )
+            })?;
+        let node_backend = node
+            .metadata
+            .get(CHECKPOINTER_BACKEND_METADATA)
+            .ok_or_else(|| {
+                format!(
+                    "{graph_name} decision graph node '{}' is missing {CHECKPOINTER_BACKEND_METADATA} metadata",
+                    node.id
+                )
+            })?;
+        match backend.as_deref() {
+            Some(existing) if existing != *node_backend => {
+                return Err(format!(
+                    "{graph_name} decision graph has inconsistent checkpointer backend metadata: expected {existing}, node '{}' had {node_backend}",
+                    node.id
+                ));
+            }
+            Some(_) => {}
+            None => backend = Some((*node_backend).to_string()),
+        }
+    }
+
+    if !saw_node {
+        return Err(format!(
+            "{graph_name} decision graph must contain at least one node with {CHECKPOINTER_BACKEND_METADATA} metadata"
+        ));
+    }
+
+    let backend = backend.ok_or_else(|| {
+        format!("{graph_name} decision graph is missing {CHECKPOINTER_BACKEND_METADATA} metadata")
+    })?;
+    match backend.as_str() {
+        "sqlite" | "postgres" | "redis" => Ok(backend),
+        other => Err(format!(
+            "unsupported decision graph checkpointer backend '{other}' from compiled {graph_name} metadata"
+        )),
+    }
 }
 
 fn tenant_scoped_thread_id(base: String, tenant: Option<&str>) -> Result<String, String> {

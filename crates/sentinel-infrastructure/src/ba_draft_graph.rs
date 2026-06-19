@@ -398,8 +398,12 @@ pub async fn run_ba_draft_decision_report(
     compiled: &BaDraftGraph,
     state: BaDraftState,
 ) -> Result<BaDraftGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("ba_draft", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "ba_draft",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "ba_draft", &identifier, state).await?;

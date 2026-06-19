@@ -671,8 +671,12 @@ pub async fn run_git_hygiene_decision_report(
     compiled: &GitHygieneGraph,
     state: GitHygieneState,
 ) -> Result<GitHygieneGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("git_hygiene", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "git_hygiene",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "git_hygiene", &identifier, state).await?;

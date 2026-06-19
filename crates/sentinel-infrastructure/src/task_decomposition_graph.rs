@@ -474,7 +474,8 @@ pub async fn run_task_decomposition_decision_report(
     compiled: &TaskDecompositionGraph,
     state: TaskDecompositionState,
 ) -> Result<TaskDecompositionGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "task_decomposition",
         &state.identifier,
         &state,

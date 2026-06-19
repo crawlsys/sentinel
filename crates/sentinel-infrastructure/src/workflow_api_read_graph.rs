@@ -509,8 +509,12 @@ pub async fn run_workflow_api_read_decision_report(
     compiled: &WorkflowApiReadGraph,
     state: WorkflowApiReadState,
 ) -> Result<WorkflowApiReadGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("workflow_api_read", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "workflow_api_read",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed = stream_decision_run(
         compiled,

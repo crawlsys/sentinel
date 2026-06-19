@@ -505,8 +505,12 @@ pub async fn run_tasks_md_guard_decision_report(
     compiled: &TasksMdGuardGraph,
     state: TasksMdGuardState,
 ) -> Result<TasksMdGuardGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("tasks_md_guard", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "tasks_md_guard",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "tasks_md_guard", &identifier, state).await?;

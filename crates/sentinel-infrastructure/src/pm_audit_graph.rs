@@ -351,8 +351,12 @@ pub async fn run_pm_audit_decision_report(
     compiled: &PmAuditGraph,
     state: PmAuditState,
 ) -> Result<PmAuditGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("pm_audit", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "pm_audit",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "pm_audit", &identifier, state).await?;

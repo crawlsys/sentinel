@@ -625,7 +625,8 @@ pub async fn run_pre_commit_verification_decision_report(
     compiled: &PreCommitVerificationGraph,
     state: PreCommitVerificationState,
 ) -> Result<PreCommitVerificationGraphRun, String> {
-    let thread_id = crate::decision_graph_store::run_thread_id(
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
         "pre_commit_verification",
         &state.identifier,
         &state,

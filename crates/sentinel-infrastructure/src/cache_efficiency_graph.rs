@@ -606,8 +606,12 @@ pub async fn run_cache_efficiency_decision_report(
     compiled: &CacheEfficiencyGraph,
     state: CacheEfficiencyState,
 ) -> Result<CacheEfficiencyGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("cache_efficiency", "aggregate", &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "cache_efficiency",
+        "aggregate",
+        &state,
+    )?;
     let streamed =
         stream_decision_run(compiled, &thread_id, "cache_efficiency", "aggregate", state).await?;
     let checkpoints = checkpoint_history(compiled, &thread_id).await?;

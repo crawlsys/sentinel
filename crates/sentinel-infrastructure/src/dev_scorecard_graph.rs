@@ -384,8 +384,12 @@ pub async fn run_dev_scorecard_decision_report(
     compiled: &DevScorecardGraph,
     state: DevScorecardState,
 ) -> Result<DevScorecardGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("dev_scorecard", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "dev_scorecard",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "dev_scorecard", &identifier, state).await?;

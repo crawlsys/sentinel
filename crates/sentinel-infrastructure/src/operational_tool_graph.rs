@@ -323,8 +323,12 @@ pub async fn run_operational_tool_decision_report(
     compiled: &OperationalToolGraph,
     state: OperationalToolState,
 ) -> Result<OperationalToolGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("operational_tool", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "operational_tool",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "operational_tool", &identifier, state).await?;

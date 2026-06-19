@@ -835,8 +835,12 @@ pub async fn run_tool_usage_decision_report(
     compiled: &ToolUsageGraph,
     state: ToolUsageState,
 ) -> Result<ToolUsageGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("tool_usage", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "tool_usage",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "tool_usage", &identifier, state).await?;

@@ -406,8 +406,12 @@ pub async fn run_capability_route_decision_report(
     compiled: &CapabilityRouteGraph,
     state: CapabilityRouteState,
 ) -> Result<CapabilityRouteGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("capability_route", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "capability_route",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "capability_route", &identifier, state).await?;

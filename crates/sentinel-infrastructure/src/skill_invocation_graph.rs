@@ -498,8 +498,12 @@ pub async fn run_skill_invocation_decision_report(
     compiled: &SkillInvocationGraph,
     state: SkillInvocationState,
 ) -> Result<SkillInvocationGraphRun, String> {
-    let thread_id =
-        crate::decision_graph_store::run_thread_id("skill_invocation", &state.identifier, &state)?;
+    let thread_id = crate::decision_graph_store::run_thread_id_for_compiled(
+        compiled,
+        "skill_invocation",
+        &state.identifier,
+        &state,
+    )?;
     let identifier = state.identifier.clone();
     let streamed =
         stream_decision_run(compiled, &thread_id, "skill_invocation", &identifier, state).await?;
