@@ -34,7 +34,9 @@ use tracing::{debug, warn};
 
 // ── Config ───────────────────────────────────────────────────────────
 
-/// Default command to invoke. `MEMORY_MCP_CMD` overrides (space-separated).
+/// Default command to invoke. `MEMORY_MCP_CMD` overrides with a shell-like
+/// argv string: whitespace separates tokens, quotes preserve whitespace, and
+/// backslash escapes one following character. No shell expansion is performed.
 const DEFAULT_CMD: &str = "mcp-router --single memory-mcp";
 
 /// Default call timeout. Covers spawn + initialise + tool invocation.
@@ -57,7 +59,7 @@ pub struct MemoryMcpConfig {
 impl Default for MemoryMcpConfig {
     fn default() -> Self {
         Self {
-            argv: shell_split(DEFAULT_CMD),
+            argv: shell_split(DEFAULT_CMD).expect("default MEMORY_MCP_CMD must parse"),
             timeout: DEFAULT_TIMEOUT,
         }
     }
@@ -81,13 +83,14 @@ impl MemoryMcpConfig {
                 if cmd.trim().is_empty() {
                     return Err(anyhow!("MEMORY_MCP_CMD is set but empty"));
                 }
-                let argv = shell_split(&cmd);
+                let argv = shell_split(&cmd)
+                    .with_context(|| "failed to parse MEMORY_MCP_CMD argv string")?;
                 if argv.is_empty() {
                     return Err(anyhow!("MEMORY_MCP_CMD produced no argv tokens"));
                 }
                 argv
             }
-            None => shell_split(DEFAULT_CMD),
+            None => shell_split(DEFAULT_CMD).expect("default MEMORY_MCP_CMD must parse"),
         };
         let timeout = match timeout_secs {
             Some(raw) => {
@@ -116,13 +119,56 @@ fn read_optional_env(name: &str) -> Result<Option<String>> {
     }
 }
 
-/// Very small shell-splitter — whitespace-delimited tokens, no quoting
-/// support. Sufficient for `mcp-router --single memory-mcp`; if callers
-/// need a path with spaces they can set `MEMORY_MCP_CMD` to a single
-/// quoted command plus args as separate `MEMORY_MCP_ARG_N` env vars
-/// (not implemented; open a task if needed).
-fn shell_split(s: &str) -> Vec<String> {
-    s.split_whitespace().map(String::from).collect()
+/// Parse the `MEMORY_MCP_CMD` argv string without invoking a shell.
+///
+/// This intentionally implements only argv splitting: whitespace separates
+/// tokens outside quotes, single/double quotes preserve whitespace, and a
+/// backslash escapes the next character. It does not expand variables,
+/// globs, command substitutions, or redirects.
+fn shell_split(s: &str) -> Result<Vec<String>> {
+    let mut argv = Vec::new();
+    let mut token = String::new();
+    let mut token_started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                token_started = true;
+                let escaped = chars
+                    .next()
+                    .ok_or_else(|| anyhow!("MEMORY_MCP_CMD ends with an unterminated escape"))?;
+                token.push(escaped);
+            }
+            '\'' | '"' if quote == Some(ch) => {
+                quote = None;
+                token_started = true;
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(ch);
+                token_started = true;
+            }
+            ch if ch.is_whitespace() && quote.is_none() => {
+                if token_started {
+                    argv.push(std::mem::take(&mut token));
+                    token_started = false;
+                }
+            }
+            ch => {
+                token_started = true;
+                token.push(ch);
+            }
+        }
+    }
+
+    if let Some(quote) = quote {
+        return Err(anyhow!("MEMORY_MCP_CMD has unterminated {quote} quote"));
+    }
+    if token_started {
+        argv.push(token);
+    }
+    Ok(argv)
 }
 
 // ── Client ───────────────────────────────────────────────────────────
@@ -377,9 +423,58 @@ mod tests {
 
     #[test]
     fn shell_split_basic() {
-        assert_eq!(shell_split("a b c"), vec!["a", "b", "c"]);
-        assert_eq!(shell_split("mcp-router --single memory-mcp").len(), 3);
-        assert!(shell_split("").is_empty());
+        assert_eq!(shell_split("a b c").unwrap(), vec!["a", "b", "c"]);
+        assert_eq!(
+            shell_split("mcp-router --single memory-mcp").unwrap().len(),
+            3
+        );
+        assert!(shell_split("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn shell_split_supports_quoted_paths_and_spaces() {
+        assert_eq!(
+            shell_split(r#""/Applications/Memory MCP/mcp-router" --single 'memory mcp'"#).unwrap(),
+            vec![
+                "/Applications/Memory MCP/mcp-router",
+                "--single",
+                "memory mcp"
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_split_supports_backslash_escapes() {
+        assert_eq!(
+            shell_split(r#"/opt/memory\ tools/router --label memory\ mcp"#).unwrap(),
+            vec!["/opt/memory tools/router", "--label", "memory mcp"]
+        );
+    }
+
+    #[test]
+    fn shell_split_rejects_malformed_quotes_and_escapes() {
+        let err = shell_split(r#""unterminated"#).unwrap_err();
+        assert!(err.to_string().contains("unterminated"));
+
+        let err = shell_split(r#"mcp-router\"#).unwrap_err();
+        assert!(err.to_string().contains("unterminated escape"));
+    }
+
+    #[test]
+    fn config_from_env_parses_quoted_command() {
+        let cfg = MemoryMcpConfig::from_env_values(
+            Some(r#""/Applications/Memory MCP/mcp-router" --single memory-mcp"#.to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.argv,
+            vec![
+                "/Applications/Memory MCP/mcp-router",
+                "--single",
+                "memory-mcp"
+            ]
+        );
     }
 
     #[test]
