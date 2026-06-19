@@ -39,6 +39,46 @@ fn sentinel_binary_defaults_include_enterprise_langgraph_checkpointers() {
 }
 
 #[test]
+fn graph_crate_defaults_include_enterprise_langgraph_checkpointers() {
+    for (crate_name, manifest_source) in [
+        (
+            "sentinel-graph",
+            include_str!("../../sentinel-graph/Cargo.toml"),
+        ),
+        (
+            "sentinel-infrastructure",
+            include_str!("../../sentinel-infrastructure/Cargo.toml"),
+        ),
+    ] {
+        let manifest: toml::Value = toml::from_str(manifest_source)
+            .unwrap_or_else(|err| panic!("{crate_name} Cargo.toml should parse: {err}"));
+        let features = manifest["features"]
+            .as_table()
+            .unwrap_or_else(|| panic!("{crate_name} Cargo.toml should declare features"));
+
+        let default = feature_values(features, "default");
+        assert!(
+            default.contains(&"sqlite"),
+            "{crate_name} default features must keep the local durable SQLite checkpointer"
+        );
+        assert!(
+            default.contains(&"postgres"),
+            "{crate_name} default features must include enterprise Postgres LangGraph support"
+        );
+        assert_eq!(
+            feature_values(features, "sqlite"),
+            vec!["langgraph-core/sqlite"],
+            "{crate_name} sqlite feature must forward to langgraph-core"
+        );
+        assert_eq!(
+            feature_values(features, "postgres"),
+            vec!["langgraph-core/postgres"],
+            "{crate_name} postgres feature must forward to langgraph-core"
+        );
+    }
+}
+
+#[test]
 fn langgraph_dependencies_do_not_enable_backend_defaults_implicitly() {
     let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml"))
         .expect("sentinel-cli Cargo.toml should parse");

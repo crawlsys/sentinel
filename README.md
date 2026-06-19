@@ -137,10 +137,18 @@ config/
 
 ### LangGraph Checkpoints
 
-Sentinel uses LangGraph Rust checkpoints as workflow authority. Local runs use
-SQLite by default; production can opt into Postgres explicitly. If Postgres is
-selected and its URL is missing or unusable, Sentinel fails closed instead of
-switching back to SQLite.
+Sentinel uses LangGraph Rust checkpoints as workflow authority. SQLite and
+Postgres checkpoint backends are compiled into the default build. Local runs use
+SQLite unless a backend is selected; production selects Postgres explicitly at
+runtime. If Postgres is selected and its URL, tenant scope, or schema config is
+invalid, Sentinel fails closed instead of switching back to SQLite.
+
+Hosted Postgres deployments must set a tenant namespace so every LangGraph
+`thread_id` is scoped, for example `tenant:legatus_ai:...`:
+
+```bash
+SENTINEL_LANGGRAPH_TENANT=legatus_ai
+```
 
 Phase/workflow graph:
 
