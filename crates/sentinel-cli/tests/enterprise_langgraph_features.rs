@@ -114,6 +114,22 @@ fn langgraph_dependencies_do_not_enable_backend_defaults_implicitly() {
             "{dependency} backend features must be selected by sentinel-cli features"
         );
     }
+
+    let workspace_manifest: toml::Value = toml::from_str(include_str!("../../../Cargo.toml"))
+        .expect("workspace Cargo.toml should parse");
+    let workspace_dependencies = workspace_manifest["workspace"]["dependencies"]
+        .as_table()
+        .expect("workspace Cargo.toml should declare dependencies");
+    let infrastructure = workspace_dependencies["sentinel-infrastructure"]
+        .as_table()
+        .expect("workspace sentinel-infrastructure dependency should be a table");
+    assert_eq!(
+        infrastructure
+            .get("default-features")
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "workspace sentinel-infrastructure dependency must not re-enable LangGraph backend defaults"
+    );
 }
 
 #[test]

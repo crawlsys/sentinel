@@ -22,7 +22,7 @@ rust-version = "1.87"
 # Internal crates
 sentinel-domain = { path = "crates/sentinel-domain" }
 sentinel-application = { path = "crates/sentinel-application" }
-sentinel-infrastructure = { path = "crates/sentinel-infrastructure" }
+sentinel-infrastructure = { path = "crates/sentinel-infrastructure", default-features = false }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
