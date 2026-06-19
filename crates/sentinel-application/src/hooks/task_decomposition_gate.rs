@@ -239,19 +239,33 @@ fn is_mutating_tool(input: &HookInput, tool_name: &str) -> bool {
 ///                     live), OR the session decomposed earlier this session
 ///                     (the `.highwatermark` counter is `>= 1`) even if every
 ///                     task has since completed and its file was pruned.
-///   - `Some(false)` — the session dir is readable but shows no evidence the
-///                     session ever decomposed (no task files, no highwatermark).
-///   - `None`        — state could not be read (no session id, no home dir,
-///                     unreadable dir). Mutating callers fail closed on `None`.
+///   - `Some(false)` — the session dir EXISTS and is readable but shows no
+///                     evidence the session ever decomposed (present, but no
+///                     task files and no highwatermark). Definitive
+///                     non-compliance -> block.
+///   - `None`        — state could not be confirmed: no session id, no home
+///                     dir, the resolved session dir is MISSING, or the dir
+///                     read errored. Mutating callers FAIL OPEN on `None`.
+///
+/// Why a MISSING dir is `None`, not `Some(false)`: `super::session_task_dir`
+/// already resolves BOTH harness naming forms, so a still-missing dir means the
+/// native store wrote nowhere we can see this run — NOT that the agent skipped
+/// decomposition. Treating that as definitive `Some(false)` BRICKS the session
+/// (every mutating tool blocked, the dir-creating native `TaskCreate` invisible,
+/// no fix path). So we report it honestly as "unconfirmable" and fail open,
+/// while still hard-blocking the genuine "dir present, empty, no tasks" case.
 fn has_live_task_list(fs: &dyn FileSystemPort, session_id: Option<&str>) -> Option<bool> {
     let session_id = session_id.filter(|s| !s.is_empty())?;
     let home = fs.home_dir()?;
     let session_dir = super::session_task_dir(fs, &home, session_id);
     if !fs.is_dir(&session_dir) {
-        // Dir doesn't exist yet — no tasks created this session. This is a
-        // *readable* answer (the absence is definitive), so return Some(false)
-        // rather than None: a brand-new session with no tasks SHOULD be gated.
-        return Some(false);
+        // Dir resolved by `session_task_dir` (both naming forms) still doesn't
+        // exist -> the native store has not written here this run. This is
+        // UNCONFIRMABLE, not definitive non-decomposition, so return `None`
+        // (fail open) rather than `Some(false)`: a missing store we don't own
+        // must never brick the session. The genuine "never decomposed" case is
+        // caught below as a *present-but-empty* dir -> `Some(false)`.
+        return None;
     }
     let entries = fs.read_dir(&session_dir).ok()?;
     if entries.iter().any(is_task_json) {
@@ -361,18 +375,21 @@ pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> TaskDecompositionEv
         };
     }
 
-    // Task-state check. FAIL CLOSED: the gate must fire for every mutating
-    // tool unless we can positively confirm a decomposed task list is live.
-    // `Some(true)` (a list exists or the session decomposed earlier) is the
-    // ONLY allow path; both `Some(false)` (readable, no decomposition) and
-    // `None` (state unreadable — no session id / no home / read error) block.
-    // Previously `None` failed *open*, which is exactly why the gate skipped
-    // intermittently; an unreadable task store is not evidence of compliance.
+    // Task-state check. Block ONLY on `Some(false)` — a session dir that EXISTS,
+    // is readable, and positively shows no decomposition (no task files, no
+    // highwatermark). `Some(true)` (live list / decomposed earlier) allows;
+    // `None` (UNCONFIRMABLE — no session id / no home / MISSING resolved dir /
+    // read error) FAILS OPEN. The resolver (`session_task_dir`) already tries
+    // both harness naming forms, so a still-missing dir is a store/gate desync
+    // we don't own, NOT skipped decomposition — failing closed on it bricks the
+    // session with no fix path. The teeth that matter (an agent skipping
+    // decomposition while the store is healthy) are preserved by the
+    // present-but-empty `Some(false)` block.
     let state = has_live_task_list(ctx.fs, input.session_id.as_deref());
     let task_state_readable = state.is_some();
     let task_list_confirmed = state == Some(true);
     let unreadable_task_state = state.is_none();
-    let should_block = !task_list_confirmed;
+    let should_block = state == Some(false);
     TaskDecompositionEvaluation {
         tool,
         session_id,
@@ -518,6 +535,14 @@ mod tests {
         let dir = home.join(".claude").join("tasks").join(session);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".highwatermark"), value).unwrap();
+    }
+
+    /// Create a PRESENT but EMPTY session task dir (no task files, no
+    /// highwatermark) — the genuine "session never decomposed" case that must
+    /// still BLOCK, as opposed to a MISSING dir (which now fails open).
+    fn seed_empty_dir(home: &Path, session: &str) {
+        let dir = home.join(".claude").join("tasks").join(session);
+        std::fs::create_dir_all(&dir).unwrap();
     }
 
     fn input(tool: &str, session: Option<&str>) -> HookInput {
@@ -672,10 +697,11 @@ mod tests {
         let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
             home: tmp.path().to_path_buf(),
         }));
+        seed_empty_dir(tmp.path(), "sess-empty");
         let ctx = ctx_with_fs(fs);
-        // No task dir seeded → Some(false) → block.
+        // Dir PRESENT but EMPTY → Some(false) → block (genuine non-decomposition).
         let out = process(&input("Edit", Some("sess-empty")), &ctx);
-        assert_eq!(out.blocked, Some(true), "Edit with no tasks must block");
+        assert_eq!(out.blocked, Some(true), "Edit with a present-but-empty task dir must block");
         assert!(out
             .reason
             .as_ref()
@@ -717,12 +743,13 @@ mod tests {
         let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
             home: tmp.path().to_path_buf(),
         }));
+        seed_empty_dir(tmp.path(), "sess-empty");
         let ctx = ctx_with_fs(fs);
         let out = process(&bash_input("git commit -m wip", Some("sess-empty")), &ctx);
         assert_eq!(
             out.blocked,
             Some(true),
-            "mutating bash with no tasks must block"
+            "mutating bash with a present-but-empty task dir must block"
         );
     }
 
@@ -742,23 +769,48 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_when_no_session_id() {
-        // No session id → has_live_task_list returns None → the gate must FAIL
-        // CLOSED (block). An unreadable task store is not evidence of
-        // compliance; the gate must fire for every mutating tool.
+    fn fails_open_when_no_session_id() {
+        // No session id → has_live_task_list returns None (UNCONFIRMABLE) → the
+        // gate must FAIL OPEN (allow). The gate must never brick a session over
+        // state it cannot read; only a present-but-empty dir (`Some(false)`)
+        // blocks. An unreadable/absent task store is not evidence of skipped
+        // decomposition.
         let ctx = stub_ctx();
         let out = process(&input("Edit", None), &ctx);
-        assert_eq!(
-            out.blocked,
-            Some(true),
-            "missing session id must FAIL CLOSED (block) — the gate must always fire"
+        assert!(
+            out.blocked.is_none(),
+            "missing session id must FAIL OPEN (allow) — never brick on unconfirmable state"
         );
-        // The block message should explain the unreadable-state case.
-        assert!(out
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("could not be read"));
+    }
+
+    #[test]
+    fn edit_with_missing_task_dir_allows() {
+        // THE deadlock case: session id present, but the resolved task dir does
+        // NOT exist (native store wrote nowhere we can see). has_live_task_list
+        // → None → fail OPEN. Must NOT block, or the session is bricked with no
+        // fix path (TaskCreate can't create a dir the gate would see).
+        let tmp = tempfile::tempdir().unwrap();
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        let ctx = ctx_with_fs(fs);
+        // No dir seeded for "sess-missing" → missing → None → allow.
+        let out = process(&input("Edit", Some("sess-missing")), &ctx);
+        assert!(
+            out.blocked.is_none(),
+            "Edit with a MISSING task dir must fail OPEN (allow) — never deadlock"
+        );
+    }
+
+    #[test]
+    fn has_live_task_list_none_for_missing_dir() {
+        // Unit-level: a session whose dir was never created resolves to None
+        // (unconfirmable), not Some(false) (definitive non-decomposition).
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        assert!(has_live_task_list(&fs, Some("never-created")).is_none());
     }
 
     #[test]
@@ -873,6 +925,7 @@ mod tests {
         let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
             home: tmp.path().to_path_buf(),
         }));
+        seed_empty_dir(tmp.path(), "sess-empty");
         let ctx = ctx_with_fs(fs);
         let out = process(&input("Write", Some("sess-empty")), &ctx);
         let reason = out.reason.expect("block reason present");

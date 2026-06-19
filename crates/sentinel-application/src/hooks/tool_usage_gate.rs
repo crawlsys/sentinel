@@ -235,6 +235,45 @@ pub fn process(
     output_from_evaluation(&evaluation)
 }
 
+/// True when a `sequential-thinking` MCP server is registered in
+/// `~/.claude.json` — checked in BOTH the top-level `mcpServers` map AND every
+/// `projects.*.mcpServers` map (Claude Code stores user-scope servers at the
+/// top level and project-scope servers under the project path). Matching is
+/// case-insensitive on the server key containing `"sequential"`, so both
+/// `sequential-thinking` and `sequentialthinking` register.
+///
+/// When this returns `false` the `mcp__sequential-thinking__sequentialthinking`
+/// tool cannot be called this session, so the gate must NOT hard-block on a
+/// signal that can never be produced. Any IO/parse failure returns `false`
+/// (treat an unreadable config as "not registered" -> fail open, don't block).
+fn sequential_thinking_mcp_registered(fs: &dyn FileSystemPort) -> bool {
+    let Some(home) = fs.home_dir() else {
+        return false;
+    };
+    let Ok(content) = fs.read_to_string(&home.join(".claude.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let has_seq_key = |servers: &serde_json::Value| -> bool {
+        servers.as_object().is_some_and(|m| {
+            m.keys()
+                .any(|k| k.to_ascii_lowercase().contains("sequential"))
+        })
+    };
+    if json.get("mcpServers").is_some_and(has_seq_key) {
+        return true;
+    }
+    json.get("projects")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|projects| {
+            projects
+                .values()
+                .any(|proj| proj.get("mcpServers").is_some_and(has_seq_key))
+        })
+}
+
 pub fn evaluate(
     input: &HookInput,
     fs: &dyn FileSystemPort,
@@ -353,10 +392,25 @@ pub fn evaluate(
     evaluation.in_progress_task_present = tasks.iter().any(|task| task.status == "in_progress");
     evaluation.pending_task_hint = pending_task_hint(&tasks);
 
+    // DEADLOCK GUARD: only demand sequential thinking when the
+    // `sequential-thinking` MCP server is actually registered in
+    // `~/.claude.json` (so `mcp__sequential-thinking__sequentialthinking` can be
+    // called and the transcript signal can be earned). When it is NOT
+    // registered, the tool does not exist this session — denying on its absence
+    // bricks every code edit with no fix path (the exact self-bricking class the
+    // task_decomposition_gate had). When the server is absent we record the skip
+    // and allow rather than demand a tool that cannot be called.
     if !transcript.sequential_thinking_used {
-        evaluation.should_deny = true;
-        evaluation.decision = ToolUsageDecision::DenyMissingSequentialThinking;
-        return evaluation;
+        if sequential_thinking_mcp_registered(fs) {
+            evaluation.should_deny = true;
+            evaluation.decision = ToolUsageDecision::DenyMissingSequentialThinking;
+            return evaluation;
+        }
+        eprintln!(
+            "[sentinel] tool_usage_gate: sequential-thinking MCP not registered in \
+             ~/.claude.json — skipping the seq-thinking requirement (cannot demand a \
+             tool that does not exist this session)."
+        );
     }
 
     if tasks.is_empty() {
@@ -593,6 +647,22 @@ mod tests {
         path
     }
 
+    /// Write a `~/.claude.json` into the test home that registers a
+    /// `sequential-thinking` MCP server, so `sequential_thinking_mcp_registered`
+    /// sees it as available and Check 1 hard-blocks (rather than failing open).
+    fn seed_claude_json_with_sequential(home: &Path) {
+        fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "sequential-thinking": { "command": "mcp-router --single sequential-thinking-mcp" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     fn edit_input(session_id: &str, transcript: &NamedTempFile) -> HookInput {
         HookInput {
             tool_name: Some("Edit".to_string()),
@@ -720,6 +790,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
         let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
         let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
         seed_task(home, "sess", "1", "Active", "in_progress");
 
@@ -732,6 +803,41 @@ mod tests {
         );
         assert_eq!(output.blocked, Some(true));
         assert!(deny_reason(&output).contains("sequential-thinking"));
+    }
+
+    #[test]
+    fn allows_when_sequential_thinking_mcp_not_registered() {
+        // DEADLOCK GUARD: seq-thinking NOT used and the MCP NOT registered in
+        // ~/.claude.json (no such file in this temp home). The gate must NOT
+        // demand a tool that cannot be called — Check 1 fails open and the
+        // request proceeds (here it reaches the plan/task checks). Specifically
+        // it must NOT deny with the sequential-thinking message.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        // No .claude.json seeded → MCP unregistered.
+        let transcript = write_transcript(&[
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        // The seq-thinking requirement is skipped; with a plan + active task the
+        // request is allowed. Crucially, it is NOT blocked for sequential-thinking.
+        let denied_for_seq = output
+            .blocked
+            .unwrap_or(false)
+            && deny_reason(&output).contains("sequential-thinking");
+        assert!(
+            !denied_for_seq,
+            "must NOT block on sequential-thinking when its MCP is unregistered"
+        );
     }
 
     #[test]
