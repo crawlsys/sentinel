@@ -1509,7 +1509,7 @@ where
     Ok(())
 }
 
-pub(crate) fn terminal_decision_checkpoint_result<'a, S>(
+pub fn terminal_decision_checkpoint_result<'a, S>(
     graph_name: &str,
     thread_id: &str,
     terminal_state: &S,

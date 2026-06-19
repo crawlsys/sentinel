@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use sentinel_application::mcp_handler::{SeverityGraphAudit, SeverityGraphAuditRun};
 use sentinel_application::severity::SeverityProposal;
+use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::severity_graph::{
     build_severity_mutation_graph, run_severity_mutation_decision_report, SeverityMutationState,
 };
@@ -58,6 +59,15 @@ pub(crate) async fn audit_severity_proposals(
             .apply_authorization()
             .map_err(|e| anyhow::anyhow!("severity graph authorization failed: {e}"))?
             .map(|auth| auth.checkpoint_ref());
+        let terminal_checkpoint = terminal_decision_checkpoint_result(
+            "severity",
+            &run.thread_id,
+            &run.state,
+            &run.checkpoints,
+            &run.write_history,
+        )
+        .map_err(|e| anyhow::anyhow!("severity graph terminal checkpoint failed: {e}"))?
+        .checkpoint_ref();
         let decision = format!("{:?}", run.state.decision).to_ascii_lowercase();
         if authorization_checkpoint.is_some() {
             authorized_sets += 1;
@@ -69,6 +79,7 @@ pub(crate) async fn audit_severity_proposals(
         let row = severity_graph_row(
             &proposal.identifier,
             &decision,
+            &terminal_checkpoint,
             authorization_checkpoint.as_deref(),
             &thread_id,
             None,
@@ -91,6 +102,7 @@ pub(crate) async fn audit_severity_proposals(
         runs.push(SeverityGraphAuditRun {
             identifier: proposal.identifier.clone(),
             decision,
+            terminal_checkpoint,
             authorization_checkpoint,
             thread_id,
             run: row["run"].clone(),
@@ -114,6 +126,7 @@ pub(crate) async fn audit_severity_proposals(
 pub(crate) fn severity_graph_row(
     identifier: &str,
     decision: &str,
+    terminal_checkpoint: &str,
     authorization_checkpoint: Option<&str>,
     thread_id: &str,
     applied: Option<bool>,
@@ -124,6 +137,7 @@ pub(crate) fn severity_graph_row(
         "graph": "severity",
         "identifier": identifier,
         "decision": decision,
+        "terminal_checkpoint": terminal_checkpoint,
         "authorization_checkpoint": authorization_checkpoint,
         "thread_id": thread_id,
         "run": run,
@@ -183,6 +197,7 @@ mod tests {
         assert_eq!(audit.skipped, 0);
         assert_eq!(audit.runs[0].identifier, "FPCRM-777");
         assert_eq!(audit.runs[0].decision, "set");
+        assert!(audit.runs[0].terminal_checkpoint.contains('#'));
         assert!(audit.runs[0]
             .authorization_checkpoint
             .as_deref()
@@ -192,6 +207,7 @@ mod tests {
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("graph jsonl");
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"severity\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
 
         restore_env("SENTINEL_HOME", prev_sentinel_home);
         restore_env("SENTINEL_DECISION_GRAPH_CHECKPOINTER", prev_backend);

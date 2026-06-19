@@ -19,6 +19,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use sentinel_application::severity::{scan_severity, SeverityProposal};
+use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::openrouter_llm::OpenRouterLlm;
 use sentinel_infrastructure::severity_graph::{
     apply_severity_proposal, build_severity_mutation_graph,
@@ -178,6 +179,15 @@ async fn apply_gap_fills(
             .authorization
             .as_ref()
             .map(|authorization| authorization.checkpoint_ref());
+        let terminal_checkpoint = terminal_decision_checkpoint_result(
+            "severity",
+            &result.run.thread_id,
+            &result.run.state,
+            &result.run.checkpoints,
+            &result.run.write_history,
+        )
+        .map_err(|e| anyhow::anyhow!("severity graph terminal checkpoint failed: {e}"))?
+        .checkpoint_ref();
         let decision = format!("{:?}", result.run.state.decision).to_ascii_lowercase();
         let thread_id = result.run.thread_id.clone();
         if authorization_checkpoint.is_some() {
@@ -188,6 +198,7 @@ async fn apply_gap_fills(
         let audit_row = severity_graph_row(
             &proposal.identifier,
             &decision,
+            &terminal_checkpoint,
             authorization_checkpoint.as_deref(),
             &thread_id,
             Some(result.applied),

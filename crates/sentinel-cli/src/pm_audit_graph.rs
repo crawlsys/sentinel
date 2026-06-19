@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use sentinel_application::linear_pm_audit::PmFlag;
 use sentinel_application::mcp_handler::{PmAuditGraphAudit, PmAuditGraphAuditRun};
+use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::pm_audit_graph::{
     build_pm_audit_graph, pm_audit_decision_label, run_pm_audit_decision_report, PmAuditDecision,
     PmAuditState,
@@ -43,6 +44,20 @@ pub(crate) async fn run_pm_audit_graph_audit(
                 )
             })?
             .map(|authorization| authorization.checkpoint_ref());
+        let terminal_checkpoint = terminal_decision_checkpoint_result(
+            "pm_audit",
+            &run.thread_id,
+            &run.state,
+            &run.checkpoints,
+            &run.write_history,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "PM audit graph terminal checkpoint failed for {}: {e}",
+                flag.identifier
+            )
+        })?
+        .checkpoint_ref();
         let decision = pm_audit_decision_label(run.state.decision).to_string();
         match run.state.decision {
             PmAuditDecision::HardViolation => hard_violations += 1,
@@ -57,6 +72,7 @@ pub(crate) async fn run_pm_audit_graph_audit(
             "identifier": flag.identifier.clone(),
             "category": flag.category.clone(),
             "decision": decision.clone(),
+            "terminal_checkpoint": terminal_checkpoint.clone(),
             "authorization_checkpoint": authorization_checkpoint.clone(),
             "thread_id": thread_id.clone(),
             "run": run_json,
@@ -79,6 +95,7 @@ pub(crate) async fn run_pm_audit_graph_audit(
             identifier: flag.identifier.clone(),
             category: flag.category.clone(),
             decision,
+            terminal_checkpoint,
             authorization_checkpoint,
             thread_id,
             run: row["run"].clone(),
@@ -143,6 +160,7 @@ mod tests {
         assert_eq!(audit.hard_violations, 1);
         assert_eq!(audit.advisory_flags, 1);
         assert_eq!(audit.runs[0].decision, "hard-violation");
+        assert!(audit.runs[0].terminal_checkpoint.contains('#'));
         assert!(audit.runs[0]
             .authorization_checkpoint
             .as_deref()
@@ -151,9 +169,9 @@ mod tests {
         assert!(audit.runs[0].run["checkpoints"]
             .as_array()
             .is_some_and(|entries| !entries.is_empty()));
-        assert!(std::fs::read_to_string(&graph_jsonl)
-            .expect("PM graph jsonl")
-            .contains("\"workflow_authority\":\"langgraph\""));
+        let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("PM graph jsonl");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
 
         match previous_home {
             Some(value) => std::env::set_var("SENTINEL_HOME", value),

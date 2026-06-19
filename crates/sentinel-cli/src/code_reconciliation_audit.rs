@@ -7,6 +7,7 @@ use sentinel_application::linear_code_audit::CodeFlag;
 use sentinel_application::mcp_handler::{
     CodeReconciliationGraphAudit, CodeReconciliationGraphAuditRun,
 };
+use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::reconciliation_graph::{
     build_reconciliation_graph, run_recon_decision_report, ReconState, ReconVerdict,
 };
@@ -61,6 +62,20 @@ pub(crate) async fn run_code_reconciliation_graph_audit(
                 )
             })?
             .map(|authorization| authorization.checkpoint_ref());
+        let terminal_checkpoint = terminal_decision_checkpoint_result(
+            "reconciliation",
+            &run.thread_id,
+            &run.state,
+            &run.checkpoints,
+            &run.write_history,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "reconciliation graph terminal checkpoint failed for {}: {e}",
+                flag.identifier
+            )
+        })?
+        .checkpoint_ref();
         let decision = format!("{:?}", run.state.decision).to_ascii_lowercase();
         if authorization_checkpoint.is_some() {
             authorized_flags += 1;
@@ -74,6 +89,7 @@ pub(crate) async fn run_code_reconciliation_graph_audit(
             "graph": "reconciliation",
             "identifier": flag.identifier,
             "decision": decision.clone(),
+            "terminal_checkpoint": terminal_checkpoint.clone(),
             "authorization_checkpoint": authorization_checkpoint.clone(),
             "thread_id": thread_id.clone(),
             "run": run_json,
@@ -95,6 +111,7 @@ pub(crate) async fn run_code_reconciliation_graph_audit(
         runs.push(CodeReconciliationGraphAuditRun {
             identifier: flag.identifier.clone(),
             decision,
+            terminal_checkpoint,
             authorization_checkpoint,
             thread_id,
             run: row["run"].clone(),
@@ -148,6 +165,7 @@ mod tests {
         assert_eq!(audit.authorized_flags, 1);
         assert_eq!(audit.runs[0].identifier, "FPCRM-888");
         assert_eq!(audit.runs[0].decision, "flag");
+        assert!(audit.runs[0].terminal_checkpoint.contains('#'));
         assert!(audit.runs[0]
             .authorization_checkpoint
             .as_deref()
@@ -156,9 +174,9 @@ mod tests {
         assert!(audit.runs[0].run["checkpoints"]
             .as_array()
             .is_some_and(|entries| !entries.is_empty()));
-        assert!(std::fs::read_to_string(&graph_jsonl)
-            .expect("graph jsonl")
-            .contains("\"workflow_authority\":\"langgraph\""));
+        let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("graph jsonl");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
 
         match previous_home {
             Some(value) => std::env::set_var("SENTINEL_HOME", value),

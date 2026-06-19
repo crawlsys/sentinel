@@ -236,6 +236,7 @@ pub trait SlaGraphAuditPort: Send + Sync {
 pub struct SeverityGraphAuditRun {
     pub identifier: String,
     pub decision: String,
+    pub terminal_checkpoint: String,
     pub authorization_checkpoint: Option<String>,
     pub thread_id: String,
     pub run: serde_json::Value,
@@ -273,6 +274,7 @@ pub struct PmAuditGraphAuditRun {
     pub identifier: String,
     pub category: String,
     pub decision: String,
+    pub terminal_checkpoint: String,
     pub authorization_checkpoint: Option<String>,
     pub thread_id: String,
     pub run: serde_json::Value,
@@ -386,6 +388,7 @@ pub trait TokenCostGraphAuditPort: Send + Sync {
 pub struct CodeReconciliationGraphAuditRun {
     pub identifier: String,
     pub decision: String,
+    pub terminal_checkpoint: String,
     pub authorization_checkpoint: Option<String>,
     pub thread_id: String,
     pub run: serde_json::Value,
@@ -2677,15 +2680,11 @@ mod step_tools_tests {
             for proposal in proposals {
                 let authorize = proposal.action == "set" && proposal.issue_id.is_some();
                 let decision = if authorize { "set" } else { "skip" }.to_string();
-                let checkpoint = authorize.then(|| {
-                    format!(
-                        "sentinel.decision.severity.{}#checkpoint-1",
-                        proposal.identifier
-                    )
-                });
+                let thread_id = format!("sentinel.decision.severity.{}", proposal.identifier);
+                let terminal_checkpoint = format!("{thread_id}#checkpoint-1");
+                let authorization_checkpoint = authorize.then(|| terminal_checkpoint.clone());
                 authorized_sets += usize::from(authorize);
                 skipped += usize::from(!authorize);
-                let thread_id = format!("sentinel.decision.severity.{}", proposal.identifier);
                 let run = serde_json::json!({
                     "thread_id": thread_id.clone(),
                     "state": {
@@ -2718,14 +2717,16 @@ mod step_tools_tests {
                     "graph": "severity",
                     "identifier": proposal.identifier.clone(),
                     "decision": decision.clone(),
-                    "authorization_checkpoint": checkpoint.clone(),
+                    "terminal_checkpoint": terminal_checkpoint.clone(),
+                    "authorization_checkpoint": authorization_checkpoint.clone(),
                     "thread_id": thread_id.clone(),
                     "run": run.clone(),
                 }));
                 runs.push(SeverityGraphAuditRun {
                     identifier: proposal.identifier.clone(),
                     decision,
-                    authorization_checkpoint: checkpoint,
+                    terminal_checkpoint,
+                    authorization_checkpoint,
                     thread_id,
                     run,
                 });
@@ -2812,6 +2813,7 @@ mod step_tools_tests {
                     "identifier": flag.identifier.clone(),
                     "category": flag.category.clone(),
                     "decision": decision,
+                    "terminal_checkpoint": checkpoint.clone(),
                     "authorization_checkpoint": checkpoint.clone(),
                     "thread_id": thread_id.clone(),
                     "run": run.clone(),
@@ -2820,6 +2822,7 @@ mod step_tools_tests {
                     identifier: flag.identifier.clone(),
                     category: flag.category.clone(),
                     decision: decision.to_string(),
+                    terminal_checkpoint: checkpoint.clone(),
                     authorization_checkpoint: Some(checkpoint),
                     thread_id,
                     run,
@@ -3573,13 +3576,15 @@ mod step_tools_tests {
                     "graph": "reconciliation",
                     "identifier": flag.identifier,
                     "decision": "flag",
-                    "authorization_checkpoint": checkpoint,
+                    "terminal_checkpoint": checkpoint.clone(),
+                    "authorization_checkpoint": checkpoint.clone(),
                     "thread_id": thread_id,
                     "run": run,
                 }));
                 runs.push(CodeReconciliationGraphAuditRun {
                     identifier: flag.identifier.clone(),
                     decision: "flag".to_string(),
+                    terminal_checkpoint: checkpoint.clone(),
                     authorization_checkpoint: Some(checkpoint),
                     thread_id,
                     run,
@@ -3955,6 +3960,9 @@ mod step_tools_tests {
         assert_eq!(content["graph_audit"]["flags_audited"], 2);
         assert_eq!(content["graph_audit"]["hard_violations"], 1);
         assert_eq!(content["graph_audit"]["advisory_flags"], 1);
+        assert!(content["graph_audit"]["runs"][0]["terminal_checkpoint"]
+            .as_str()
+            .is_some_and(|checkpoint| checkpoint.contains("checkpoint-1")));
         assert_eq!(
             content["graph_audit"]["runs"][0]["run"]["topology"]["graph"],
             "pm_audit"
@@ -3969,6 +3977,7 @@ mod step_tools_tests {
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("pm graph jsonl");
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"pm_audit\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
     }
 
     #[tokio::test]
@@ -4482,6 +4491,9 @@ mod step_tools_tests {
         assert_eq!(content["graph_audit"]["authorized_sets"], 1);
         assert_eq!(content["graph_audit"]["runs"][0]["identifier"], "FPCRM-777");
         assert_eq!(content["graph_audit"]["runs"][0]["decision"], "set");
+        assert!(content["graph_audit"]["runs"][0]["terminal_checkpoint"]
+            .as_str()
+            .is_some_and(|checkpoint| checkpoint.contains("checkpoint-1")));
         assert!(
             content["graph_audit"]["runs"][0]["authorization_checkpoint"]
                 .as_str()
@@ -4501,6 +4513,7 @@ mod step_tools_tests {
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("graph audit jsonl");
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"severity\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
     }
 
     #[tokio::test]
@@ -4572,6 +4585,11 @@ mod step_tools_tests {
             content["reconciliation_audit"]["runs"][0]["decision"],
             "flag"
         );
+        assert!(
+            content["reconciliation_audit"]["runs"][0]["terminal_checkpoint"]
+                .as_str()
+                .is_some_and(|checkpoint| checkpoint.contains("checkpoint-1"))
+        );
         assert_eq!(
             content["reconciliation_audit"]["runs"][0]["run"]["topology"]["graph"],
             "reconciliation"
@@ -4586,6 +4604,7 @@ mod step_tools_tests {
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("reconciliation jsonl");
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"reconciliation\""));
+        assert!(graph_rows.contains("\"terminal_checkpoint\""));
     }
 
     async fn handler_with_chain() -> McpHandler {
