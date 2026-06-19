@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 sentinel-domain = { path = "../sentinel-domain" }
 sentinel-application = { path = "../sentinel-application" }
-sentinel-infrastructure = { path = "../sentinel-infrastructure" }
+sentinel-infrastructure = { path = "../sentinel-infrastructure", default-features = false }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

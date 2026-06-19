@@ -130,6 +130,35 @@ fn langgraph_dependencies_do_not_enable_backend_defaults_implicitly() {
         Some(false),
         "workspace sentinel-infrastructure dependency must not re-enable LangGraph backend defaults"
     );
+
+    for (crate_name, manifest_source) in [
+        (
+            "sentinel-git-interceptor",
+            include_str!("../../sentinel-git-interceptor/Cargo.toml"),
+        ),
+        (
+            "sentinel-npx-interceptor",
+            include_str!("../../sentinel-npx-interceptor/Cargo.toml"),
+        ),
+    ] {
+        let manifest: toml::Value = toml::from_str(manifest_source)
+            .unwrap_or_else(|err| panic!("{crate_name} Cargo.toml should parse: {err}"));
+        let dependencies = manifest["dependencies"]
+            .as_table()
+            .unwrap_or_else(|| panic!("{crate_name} Cargo.toml should declare dependencies"));
+        let infrastructure = dependencies["sentinel-infrastructure"]
+            .as_table()
+            .unwrap_or_else(|| {
+                panic!("{crate_name} sentinel-infrastructure dependency should be a table")
+            });
+        assert_eq!(
+            infrastructure
+                .get("default-features")
+                .and_then(toml::Value::as_bool),
+            Some(false),
+            "{crate_name} must not pull LangGraph backend features into non-graph interceptor binaries"
+        );
+    }
 }
 
 #[test]
