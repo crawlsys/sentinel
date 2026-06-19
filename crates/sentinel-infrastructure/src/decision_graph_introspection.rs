@@ -543,30 +543,11 @@ where
             "decision graph stream for thread {thread_id} closed without ExecutionComplete"
         ));
     }
-    if !run.stream.iter().any(|part| part.payload_kind == "values") {
-        return Err(format!(
-            "decision graph stream for thread {thread_id} omitted LangGraph values payloads"
-        ));
-    }
-    if !run.stream.iter().any(|part| part.payload_kind == "updates") {
-        return Err(format!(
-            "decision graph stream for thread {thread_id} omitted LangGraph v3 updates payloads"
-        ));
-    }
-    if !run.stream.iter().any(|part| part.payload_kind == "tasks") {
-        return Err(format!(
-            "decision graph stream for thread {thread_id} omitted LangGraph v3 task payloads"
-        ));
-    }
-    if !run
-        .stream
-        .iter()
-        .any(|part| part.payload_kind == "checkpoints")
-    {
-        return Err(format!(
-            "decision graph stream for thread {thread_id} omitted LangGraph checkpoint payloads"
-        ));
-    }
+    require_decision_stream_payload_kind(&run.stream, thread_id, "values", "values")?;
+    require_decision_stream_payload_kind(&run.stream, thread_id, "updates", "v3 updates")?;
+    require_decision_stream_payload_kind(&run.stream, thread_id, "tasks", "v3 task")?;
+    require_decision_stream_payload_kind(&run.stream, thread_id, "checkpoints", "checkpoint")?;
+    require_decision_stream_payload_kind(&run.stream, thread_id, "debug", "v3 debug")?;
     if !run.stream.iter().any(|part| {
         part.payload_kind == "custom" && part.payload_json["type"] == "sentinel.decision_node"
     }) {
@@ -577,6 +558,21 @@ where
     validate_decision_custom_stream_events(&run.stream, thread_id, graph_name, identifier)?;
 
     Ok(run)
+}
+
+fn require_decision_stream_payload_kind(
+    stream: &[DecisionGraphStreamPart],
+    thread_id: &str,
+    payload_kind: &str,
+    label: &str,
+) -> Result<(), String> {
+    if stream.iter().any(|part| part.payload_kind == payload_kind) {
+        Ok(())
+    } else {
+        Err(format!(
+            "decision graph stream for thread {thread_id} omitted LangGraph {label} payloads"
+        ))
+    }
 }
 
 fn validate_decision_custom_stream_events(
@@ -2361,6 +2357,33 @@ mod tests {
         assert!(err.contains("stream node 'classify'"));
     }
 
+    #[test]
+    fn require_decision_stream_payload_kind_rejects_missing_registered_debug_projection() {
+        let latest = checkpoint(
+            "thread-1",
+            "checkpoint-1",
+            1,
+            serde_json::json!({
+                "identifier": "FPCRM-1",
+                "decision": "Set"
+            }),
+            "set",
+        );
+        let stream = vec![
+            checkpoint_part(&latest),
+            custom_part("set", "severity", "FPCRM-1"),
+        ];
+
+        let err = require_decision_stream_payload_kind(&stream, "thread-1", "debug", "v3 debug")
+            .expect_err("missing debug projection must fail");
+        assert!(err.contains("omitted LangGraph v3 debug payloads"));
+
+        let mut with_debug = stream;
+        with_debug.push(debug_part("set"));
+        require_decision_stream_payload_kind(&with_debug, "thread-1", "debug", "v3 debug")
+            .expect("debug projection evidence passes");
+    }
+
     fn checkpoint(
         thread_id: &str,
         checkpoint_id: &str,
@@ -2408,6 +2431,22 @@ mod tests {
                     "type": checkpoint.source_type.as_deref().expect("source type"),
                 },
                 "state": checkpoint.state,
+            }),
+            subgraph_namespace: Vec::new(),
+        }
+    }
+
+    fn debug_part(node_id: &str) -> DecisionGraphStreamPart {
+        DecisionGraphStreamPart {
+            stream_protocol: DECISION_STREAM_PROTOCOL.to_string(),
+            event_type: "Debug".to_string(),
+            node_id: node_id.to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            superstep: 1,
+            payload_kind: "debug".to_string(),
+            payload_json: serde_json::json!({
+                "node": node_id,
+                "status": "complete",
             }),
             subgraph_namespace: Vec::new(),
         }
