@@ -2,17 +2,24 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
+use chrono::Utc;
 use futures::StreamExt;
 use langgraph_core::application::services::{
-    get_stream_writer, CompilationResult, ExecutableGraph,
+    get_stream_writer, ChatModelStream, CheckpointEvent, CheckpointsTransformer, CompilationResult,
+    CompiledGraphV3Ext, CustomEvent, CustomTransformer, DebugEvent, DebugTransformer,
+    GraphRunStream, LifecycleEvent, RunV3Options, StateSnapshot, StateUpdateEvent, SubgraphHandle,
+    TaskEvent, TasksTransformer, UpdatesTransformer, V3StreamTransformer,
 };
-use langgraph_core::domain::value_objects::{
-    NodeError, StreamEventType, StreamMode, StreamPart, StreamPartPayload, END, START,
-};
+use langgraph_core::domain::value_objects::{NodeError, END, START};
 use langgraph_core::ports::WriteHistoryEntry;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+
+const DECISION_STREAM_PROTOCOL: &str = "v3";
+const STATE_SNAPSHOT_NODE: &str = "__state__";
 
 /// Serializable view of one checkpoint write recorded by LangGraph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,12 +46,14 @@ pub struct DecisionGraphWriteHistoryEntry {
 /// Serializable view of one LangGraph stream part emitted during a decision run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionGraphStreamPart {
+    pub stream_protocol: String,
     pub event_type: String,
     pub node_id: String,
     pub timestamp: String,
     pub superstep: u64,
     pub payload_kind: String,
     pub payload_json: serde_json::Value,
+    pub subgraph_namespace: Vec<String>,
 }
 
 /// Terminal state plus the exact LangGraph stream parts observed for a run.
@@ -489,76 +498,85 @@ pub async fn stream_decision_run<S>(
 where
     S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    let checkpointer = compiled.checkpointer.as_ref().ok_or_else(|| {
+        format!("decision graph {graph_name} stream requires a configured LangGraph checkpointer")
+    })?;
     let config = serde_json::json!({
         "configurable": {
             "thread_id": thread_id,
         }
     });
-    let mut rx = compiled
-        .stream_v2_with_config(state, &config, decision_stream_modes())
+    let handle = compiled
+        .graph
+        .stream_events_v3_with_options(
+            state,
+            decision_v3_transformers(),
+            RunV3Options::new()
+                .with_checkpointer(Arc::clone(checkpointer))
+                .with_thread_id(thread_id.to_string())
+                .with_config(config),
+        )
         .await
         .map_err(|err| err.to_string())?;
+    let run = collect_v3_decision_stream(handle, thread_id).await?;
 
-    let mut stream = Vec::new();
-    let mut terminal_state = None;
-    let mut saw_execution_complete = false;
-    let mut node_error = None;
-
-    while let Some(part) = rx.recv().await {
-        if part.event_type() == StreamEventType::NodeError {
-            node_error = Some(part.node_id().to_string());
-        }
-        if part.event_type() == StreamEventType::ExecutionComplete {
-            saw_execution_complete = true;
-        }
-        if let StreamPartPayload::Values(state) = part.payload() {
-            terminal_state = Some(state.clone());
-        }
-
-        let view = stream_part_view(part)?;
-        if view.payload_kind == "tasks"
-            && view
-                .payload_json
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                == Some("error")
-        {
-            node_error = Some(view.node_id.clone());
-        }
-        stream.push(view);
-    }
-
-    if let Some(node_id) = node_error {
-        return Err(format!("decision graph stream failed at node {node_id}"));
-    }
-    if stream.is_empty() {
+    if run.stream.is_empty() {
         return Err(format!(
             "decision graph stream emitted no parts for thread {thread_id}"
         ));
     }
-    if !saw_execution_complete {
+    if !run
+        .stream
+        .iter()
+        .all(|part| part.stream_protocol == DECISION_STREAM_PROTOCOL)
+    {
+        return Err(format!(
+            "decision graph stream for thread {thread_id} emitted non-v3 LangGraph stream evidence"
+        ));
+    }
+    if !run
+        .stream
+        .iter()
+        .any(|part| part.event_type == "ExecutionComplete")
+    {
         return Err(format!(
             "decision graph stream for thread {thread_id} closed without ExecutionComplete"
         ));
     }
-    if !stream.iter().any(|part| part.payload_kind == "checkpoints") {
+    if !run.stream.iter().any(|part| part.payload_kind == "values") {
+        return Err(format!(
+            "decision graph stream for thread {thread_id} omitted LangGraph values payloads"
+        ));
+    }
+    if !run.stream.iter().any(|part| part.payload_kind == "updates") {
+        return Err(format!(
+            "decision graph stream for thread {thread_id} omitted LangGraph v3 updates payloads"
+        ));
+    }
+    if !run.stream.iter().any(|part| part.payload_kind == "tasks") {
+        return Err(format!(
+            "decision graph stream for thread {thread_id} omitted LangGraph v3 task payloads"
+        ));
+    }
+    if !run
+        .stream
+        .iter()
+        .any(|part| part.payload_kind == "checkpoints")
+    {
         return Err(format!(
             "decision graph stream for thread {thread_id} omitted LangGraph checkpoint payloads"
         ));
     }
-    if !stream.iter().any(|part| {
+    if !run.stream.iter().any(|part| {
         part.payload_kind == "custom" && part.payload_json["type"] == "sentinel.decision_node"
     }) {
         return Err(format!(
             "decision graph stream for thread {thread_id} omitted Sentinel custom decision-node payloads"
         ));
     }
-    validate_decision_custom_stream_events(&stream, thread_id, graph_name, identifier)?;
-    let state = terminal_state.ok_or_else(|| {
-        format!("decision graph stream for thread {thread_id} did not emit terminal values payload")
-    })?;
+    validate_decision_custom_stream_events(&run.stream, thread_id, graph_name, identifier)?;
 
-    Ok(DecisionGraphStreamRun { state, stream })
+    Ok(run)
 }
 
 fn validate_decision_custom_stream_events(
@@ -627,46 +645,362 @@ fn validate_decision_custom_stream_events(
     Ok(())
 }
 
-fn decision_stream_modes() -> Vec<StreamMode> {
+fn decision_v3_transformers() -> Vec<Arc<dyn V3StreamTransformer>> {
     vec![
-        StreamMode::Values,
-        StreamMode::Updates,
-        StreamMode::Checkpoints,
-        StreamMode::Tasks,
-        StreamMode::Messages,
-        StreamMode::Debug,
-        StreamMode::Custom,
+        Arc::new(UpdatesTransformer),
+        Arc::new(CheckpointsTransformer),
+        Arc::new(TasksTransformer),
+        Arc::new(DebugTransformer),
+        Arc::new(CustomTransformer),
     ]
 }
 
-fn stream_part_view<S>(part: StreamPart<S>) -> Result<DecisionGraphStreamPart, String>
+async fn collect_v3_decision_stream<S>(
+    handle: GraphRunStream<S>,
+    thread_id: &str,
+) -> Result<DecisionGraphStreamRun<S>, String>
+where
+    S: Clone + Serialize + Send + 'static,
+{
+    let values_rx = handle.values().take().map_err(|err| err.to_string())?;
+    let updates_rx = handle.updates().take().map_err(|err| err.to_string())?;
+    let checkpoints_rx = handle.checkpoints().take().map_err(|err| err.to_string())?;
+    let tasks_rx = handle.tasks().take().map_err(|err| err.to_string())?;
+    let debug_rx = handle.debug().take().map_err(|err| err.to_string())?;
+    let custom_rx = handle.custom().take().map_err(|err| err.to_string())?;
+    let lifecycle_rx = handle.lifecycle().take().map_err(|err| err.to_string())?;
+    let subgraphs_rx = handle.subgraphs().take().map_err(|err| err.to_string())?;
+    let messages_rx = handle.messages().take().map_err(|err| err.to_string())?;
+
+    let output = handle.output();
+    let (
+        values,
+        updates,
+        checkpoints,
+        tasks,
+        debug,
+        custom,
+        lifecycle,
+        subgraphs,
+        messages,
+        output,
+    ) = tokio::join!(
+        drain_v3_values(values_rx),
+        drain_v3_updates(updates_rx),
+        drain_v3_checkpoints(checkpoints_rx),
+        drain_v3_tasks(tasks_rx),
+        drain_v3_debug(debug_rx),
+        drain_v3_custom(custom_rx),
+        drain_v3_lifecycle(lifecycle_rx),
+        drain_v3_subgraphs(subgraphs_rx),
+        drain_v3_messages(messages_rx),
+        output,
+    );
+
+    let mut drain = V3ProjectionDrain::default();
+    drain.extend(values?);
+    drain.extend(updates?);
+    drain.extend(checkpoints?);
+    drain.extend(tasks?);
+    drain.extend(debug?);
+    drain.extend(custom?);
+    drain.extend(lifecycle?);
+    drain.extend(subgraphs?);
+    drain.extend(messages?);
+
+    if let Some(node_id) = drain.node_error {
+        return Err(format!("decision graph stream failed at node {node_id}"));
+    }
+
+    let state = output.map_err(|err| {
+        format!(
+            "decision graph stream for thread {thread_id} closed without ExecutionComplete: {err}"
+        )
+    })?;
+    let superstep = drain
+        .stream
+        .iter()
+        .map(|part| part.superstep)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    drain.stream.push(decision_stream_part(
+        "ExecutionComplete",
+        END,
+        Utc::now().to_rfc3339(),
+        superstep,
+        "values",
+        stream_payload_json("values", &state)?,
+        Vec::new(),
+    ));
+    drain.stream.sort_by(|left, right| {
+        left.superstep
+            .cmp(&right.superstep)
+            .then_with(|| left.timestamp.cmp(&right.timestamp))
+            .then_with(|| stream_part_rank(left).cmp(&stream_part_rank(right)))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+            .then_with(|| left.payload_kind.cmp(&right.payload_kind))
+    });
+
+    Ok(DecisionGraphStreamRun {
+        state,
+        stream: drain.stream,
+    })
+}
+
+#[derive(Default)]
+struct V3ProjectionDrain {
+    stream: Vec<DecisionGraphStreamPart>,
+    node_error: Option<String>,
+}
+
+impl V3ProjectionDrain {
+    fn push(&mut self, part: DecisionGraphStreamPart) {
+        if part.payload_kind == "tasks"
+            && part
+                .payload_json
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+        {
+            self.node_error = Some(part.node_id.clone());
+        }
+        if part.event_type == "SubgraphFailed" {
+            self.node_error = Some(part.node_id.clone());
+        }
+        self.stream.push(part);
+    }
+
+    fn extend(&mut self, other: V3ProjectionDrain) {
+        if self.node_error.is_none() {
+            self.node_error = other.node_error;
+        }
+        self.stream.extend(other.stream);
+    }
+}
+
+async fn drain_v3_values<S>(
+    mut rx: mpsc::Receiver<StateSnapshot<S>>,
+) -> Result<V3ProjectionDrain, String>
 where
     S: Serialize,
 {
-    let event_type = format!("{:?}", part.event_type());
-    let node_id = part.node_id().to_string();
-    let timestamp = part.timestamp().to_rfc3339();
-    let superstep = part.superstep();
-    let (payload_kind, payload_json) = match part.payload() {
-        StreamPartPayload::Lifecycle => ("lifecycle", serde_json::Value::Null),
-        StreamPartPayload::Values(state) => ("values", stream_payload_json("values", state)?),
-        StreamPartPayload::Updates(update) => ("updates", stream_payload_json("updates", update)?),
-        StreamPartPayload::Debug(debug) => ("debug", stream_payload_json("debug", debug)?),
-        StreamPartPayload::Tasks(value) => ("tasks", value.clone()),
-        StreamPartPayload::Checkpoints(value) => ("checkpoints", value.clone()),
-        StreamPartPayload::Messages(value) => ("messages", value.clone()),
-        StreamPartPayload::Custom(value) => ("custom", value.clone()),
-        _ => return Err("unsupported LangGraph decision stream payload kind".to_string()),
-    };
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(snapshot) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Values",
+            STATE_SNAPSHOT_NODE,
+            Utc::now().to_rfc3339(),
+            snapshot.superstep(),
+            "values",
+            stream_payload_json("values", snapshot.state())?,
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
 
-    Ok(DecisionGraphStreamPart {
-        event_type,
-        node_id,
+async fn drain_v3_updates(
+    mut rx: mpsc::Receiver<StateUpdateEvent>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Updates",
+            event.node_id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.superstep,
+            "updates",
+            event.payload,
+            namespace_strings(&event.subgraph_namespace),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_checkpoints(
+    mut rx: mpsc::Receiver<CheckpointEvent>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Checkpoint",
+            event.node_id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.superstep,
+            "checkpoints",
+            event.payload,
+            namespace_strings(&event.subgraph_namespace),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_tasks(mut rx: mpsc::Receiver<TaskEvent>) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Task",
+            event.node_id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.superstep,
+            "tasks",
+            event.payload,
+            namespace_strings(&event.subgraph_namespace),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_debug(mut rx: mpsc::Receiver<DebugEvent>) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Debug",
+            event.node_id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.superstep,
+            "debug",
+            stream_payload_json("debug", &event.info)?,
+            namespace_strings(&event.subgraph_namespace),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_custom(mut rx: mpsc::Receiver<CustomEvent>) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Custom",
+            event.node_id.to_string(),
+            event.timestamp.to_rfc3339(),
+            event.superstep,
+            "custom",
+            event.payload,
+            namespace_strings(&event.subgraph_namespace),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_lifecycle(
+    mut rx: mpsc::Receiver<LifecycleEvent>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(event) = rx.recv().await {
+        let (event_type, node_id) = match &event {
+            LifecycleEvent::SubgraphStarted { node_id, .. } => ("SubgraphStarted", node_id),
+            LifecycleEvent::SubgraphCompleted { node_id, .. } => ("SubgraphCompleted", node_id),
+            LifecycleEvent::SubgraphFailed { node_id, .. } => ("SubgraphFailed", node_id),
+            _ => {
+                return Err(
+                    "unsupported non-exhaustive LangGraph v3 lifecycle event in decision stream"
+                        .to_string(),
+                );
+            }
+        };
+        drain.push(decision_stream_part(
+            event_type,
+            node_id.to_string(),
+            Utc::now().to_rfc3339(),
+            0,
+            "lifecycle",
+            stream_payload_json("lifecycle", &event)?,
+            namespace_strings(event.subgraph_namespace()),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_subgraphs(
+    mut rx: mpsc::Receiver<SubgraphHandle>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(handle) = rx.recv().await {
+        let full_path = handle
+            .full_path()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        drain.push(decision_stream_part(
+            "Subgraph",
+            handle.node_id().to_string(),
+            Utc::now().to_rfc3339(),
+            0,
+            "subgraphs",
+            serde_json::json!({
+                "node_id": handle.node_id().to_string(),
+                "full_path": full_path,
+            }),
+            namespace_strings(handle.subgraph_namespace()),
+        ));
+    }
+    Ok(drain)
+}
+
+async fn drain_v3_messages(
+    mut rx: mpsc::Receiver<ChatModelStream>,
+) -> Result<V3ProjectionDrain, String> {
+    let mut drain = V3ProjectionDrain::default();
+    while let Some(message) = rx.recv().await {
+        drain.push(decision_stream_part(
+            "Messages",
+            message.node_id.to_string(),
+            Utc::now().to_rfc3339(),
+            0,
+            "messages",
+            serde_json::json!({
+                "node_id": message.node_id.to_string(),
+                "stream": "chat_model",
+            }),
+            Vec::new(),
+        ));
+    }
+    Ok(drain)
+}
+
+fn decision_stream_part(
+    event_type: impl Into<String>,
+    node_id: impl Into<String>,
+    timestamp: String,
+    superstep: u64,
+    payload_kind: impl Into<String>,
+    payload_json: serde_json::Value,
+    subgraph_namespace: Vec<String>,
+) -> DecisionGraphStreamPart {
+    DecisionGraphStreamPart {
+        stream_protocol: DECISION_STREAM_PROTOCOL.to_string(),
+        event_type: event_type.into(),
+        node_id: node_id.into(),
         timestamp,
         superstep,
-        payload_kind: payload_kind.to_string(),
+        payload_kind: payload_kind.into(),
         payload_json,
-    })
+        subgraph_namespace,
+    }
+}
+
+fn namespace_strings(namespace: &[langgraph_core::domain::value_objects::NodeId]) -> Vec<String> {
+    namespace.iter().map(ToString::to_string).collect()
+}
+
+fn stream_part_rank(part: &DecisionGraphStreamPart) -> u8 {
+    match part.event_type.as_str() {
+        "Values" => 0,
+        "Updates" => 1,
+        "Task" => 2,
+        "Debug" => 3,
+        "Custom" => 4,
+        "Checkpoint" => 5,
+        "SubgraphStarted" => 6,
+        "SubgraphCompleted" => 7,
+        "SubgraphFailed" => 8,
+        "Subgraph" => 9,
+        "Messages" => 10,
+        "ExecutionComplete" => 11,
+        _ => 12,
+    }
 }
 
 fn stream_payload_json<T: Serialize + ?Sized>(
@@ -882,6 +1216,15 @@ where
                 pair[1].step_number
             ));
         }
+    }
+    if let Some(part) = stream
+        .iter()
+        .find(|part| part.stream_protocol != DECISION_STREAM_PROTOCOL)
+    {
+        return Err(format!(
+            "{graph_name} decision graph stream for thread '{thread_id}' contains {} evidence, expected {DECISION_STREAM_PROTOCOL}",
+            part.stream_protocol
+        ));
     }
 
     let terminal_json = serde_json::to_value(terminal_state).map_err(|err| {
@@ -1581,6 +1924,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_decision_graph_run_rejects_non_v3_stream_evidence() {
+        let terminal = serde_json::json!({
+            "identifier": "FPCRM-1",
+            "decision": "Set"
+        });
+        let latest = checkpoint("thread-1", "checkpoint-2", 2, terminal.clone(), "set");
+        let writes = vec![write_entry("checkpoint-2", 2, "set", terminal.clone())];
+        let mut stream = vec![
+            checkpoint_part(&latest),
+            custom_part("set", "severity", "FPCRM-1"),
+        ];
+        stream[0].stream_protocol = "v2".to_string();
+
+        let err = validate_decision_graph_run(
+            "severity",
+            "thread-1",
+            &terminal,
+            &stream,
+            &[latest],
+            &writes,
+        )
+        .expect_err("non-v3 stream evidence must fail");
+        assert!(err.contains("expected v3"));
+    }
+
+    #[test]
     fn validate_decision_graph_run_rejects_out_of_order_write_history() {
         let terminal = serde_json::json!({
             "identifier": "FPCRM-1",
@@ -1864,6 +2233,7 @@ mod tests {
     ) -> DecisionGraphStreamPart {
         let source_node = checkpoint.source_node.as_deref().expect("source node");
         DecisionGraphStreamPart {
+            stream_protocol: DECISION_STREAM_PROTOCOL.to_string(),
             event_type: "Checkpoint".to_string(),
             node_id: source_node.to_string(),
             timestamp: checkpoint.created_at.clone(),
@@ -1880,11 +2250,13 @@ mod tests {
                 },
                 "state": checkpoint.state,
             }),
+            subgraph_namespace: Vec::new(),
         }
     }
 
     fn custom_part(node_id: &str, graph: &str, identifier: &str) -> DecisionGraphStreamPart {
         DecisionGraphStreamPart {
+            stream_protocol: DECISION_STREAM_PROTOCOL.to_string(),
             event_type: "Custom".to_string(),
             node_id: node_id.to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
@@ -1896,6 +2268,7 @@ mod tests {
                 "node_id": node_id,
                 "identifier": identifier,
             }),
+            subgraph_namespace: Vec::new(),
         }
     }
 

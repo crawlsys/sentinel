@@ -518,8 +518,20 @@ mod tests {
             "stream must expose LangGraph execution completion"
         );
         assert!(
+            run.stream.iter().all(|part| part.stream_protocol == "v3"),
+            "stream must expose the LangGraph v3 typed protocol"
+        );
+        assert!(
             run.stream.iter().any(|part| part.payload_kind == "values"),
             "stream must expose LangGraph values payloads"
+        );
+        assert!(
+            run.stream.iter().any(|part| part.payload_kind == "updates"),
+            "stream must expose LangGraph v3 update payloads"
+        );
+        assert!(
+            run.stream.iter().any(|part| part.payload_kind == "tasks"),
+            "stream must expose LangGraph v3 task payloads"
         );
         assert!(
             run.stream

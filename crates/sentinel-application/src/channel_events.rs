@@ -41,7 +41,7 @@ fn events_base_dir(fs: &dyn FileSystemPort) -> std::path::PathBuf {
 
 fn concrete_session_id(session_id: &str) -> Option<&str> {
     let session_id = session_id.trim();
-    if session_id == "unknown" {
+    if session_id.eq_ignore_ascii_case("unknown") || session_id.eq_ignore_ascii_case("default") {
         return None;
     }
     sentinel_domain::SessionId::validate(session_id).ok()?;
@@ -391,6 +391,9 @@ mod tests {
 
         assert!(events_dir_for_session(&fs, None).is_none());
         assert!(events_dir_for_session(&fs, Some("unknown")).is_none());
+        assert!(events_dir_for_session(&fs, Some(" UNKNOWN ")).is_none());
+        assert!(events_dir_for_session(&fs, Some("default")).is_none());
+        assert!(events_dir_for_session(&fs, Some(" Default ")).is_none());
         assert!(events_dir_for_session(&fs, Some("../escape")).is_none());
     }
 
@@ -525,6 +528,66 @@ mod tests {
             .join("events")
             .join("real-session")
             .exists());
+    }
+
+    #[test]
+    fn emit_rejects_explicit_default_without_env_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env =
+            crate::hooks::test_support::StubEnv::with(&[("CLAUDE_SESSION_ID", "real-session")]);
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent completed",
+            serde_json::Map::new(),
+            Some(" Default "),
+            Some("/tmp/sentinel"),
+            Some("tester"),
+        );
+
+        let events_root = tmp.path().join(".claude").join("sentinel").join("events");
+        assert!(
+            !events_root.join("real-session").exists(),
+            "synthetic explicit session must not fall back to env session"
+        );
+        assert!(
+            !events_root.join("Default").exists(),
+            "synthetic default session must not create durable event authority"
+        );
+    }
+
+    #[test]
+    fn emit_rejects_default_env_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::with(&[("CLAUDE_SESSION_ID", " default ")]);
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent completed",
+            serde_json::Map::new(),
+            None,
+            Some("/tmp/sentinel"),
+            Some("tester"),
+        );
+
+        assert!(
+            !tmp.path()
+                .join(".claude")
+                .join("sentinel")
+                .join("events")
+                .exists(),
+            "synthetic env session must not create durable event authority"
+        );
     }
 
     #[test]
