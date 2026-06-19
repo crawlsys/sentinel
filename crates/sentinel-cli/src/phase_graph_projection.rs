@@ -121,7 +121,16 @@ pub(crate) async fn graph_checkpoint_projection(
             .phase_writes_history(session_id, None)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        validate_phase_graph_projection(skill, session_id, &snapshots, &writes)?;
+        let expected_thread_id = graph
+            .thread_id_for_session(session_id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )?;
     }
     let entries: Vec<serde_json::Value> = snapshots
         .iter()
@@ -182,7 +191,10 @@ pub(crate) async fn graph_history_projection(
         .phase_writes_history(session_id, None)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    validate_phase_graph_projection(skill, session_id, &snapshots, &writes)?;
+    let expected_thread_id = graph
+        .thread_id_for_session(session_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    validate_phase_graph_projection(skill, session_id, &expected_thread_id, &snapshots, &writes)?;
 
     let history = graph
         .phase_history(session_id)
@@ -231,7 +243,16 @@ pub(crate) async fn graph_writes_projection(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if channel.is_none() || channel == Some("state") {
-        validate_phase_graph_projection(skill, session_id, &snapshots, &writes)?;
+        let expected_thread_id = graph
+            .thread_id_for_session(session_id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )?;
     }
     Ok(Some(serde_json::json!(writes)))
 }
@@ -281,13 +302,17 @@ async fn validated_latest_phase_graph_state(
         .phase_writes_history(session_id, None)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    validate_phase_graph_projection(skill, session_id, &snapshots, &writes)?;
+    let expected_thread_id = graph
+        .thread_id_for_session(session_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    validate_phase_graph_projection(skill, session_id, &expected_thread_id, &snapshots, &writes)?;
     Ok(snapshots.last().map(|snapshot| snapshot.state.clone()))
 }
 
 fn validate_phase_graph_projection(
     skill: &str,
     session_id: &str,
+    expected_thread_id: &str,
     snapshots: &[PhaseGraphCheckpointSnapshot],
     write_history: &[PhaseGraphWriteHistoryEntry],
 ) -> Result<()> {
@@ -296,8 +321,6 @@ fn validate_phase_graph_projection(
             "LangGraph phase projection for '{skill}' omitted checkpoint history"
         ));
     };
-    let expected_thread_id =
-        sentinel_graph::phase_thread_id(skill, session_id).map_err(|e| anyhow::anyhow!("{e}"))?;
     if latest.thread_id != expected_thread_id {
         return Err(anyhow::anyhow!(
             "LangGraph phase projection latest checkpoint thread mismatch for '{skill}': expected '{expected_thread_id}', got '{}'",
@@ -444,7 +467,16 @@ pub(crate) async fn project_phase_graph_workflows(
                     .phase_writes_history(&session_id, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                validate_phase_graph_projection(skill, &session_id, &snapshots, &writes)?;
+                let expected_thread_id = graph
+                    .thread_id_for_session(&session_id)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                validate_phase_graph_projection(
+                    skill,
+                    &session_id,
+                    &expected_thread_id,
+                    &snapshots,
+                    &writes,
+                )?;
                 let graph_state = snapshots
                     .last()
                     .expect("non-empty snapshots must have a latest entry")
@@ -503,7 +535,10 @@ pub(crate) async fn activate_phase_graph_workflow(
         .phase_writes_history(&session_id, None)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    validate_phase_graph_projection(skill, &session_id, &snapshots, &writes)?;
+    let expected_thread_id = graph
+        .thread_id_for_session(&session_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    validate_phase_graph_projection(skill, &session_id, &expected_thread_id, &snapshots, &writes)?;
     let latest = snapshots
         .last()
         .ok_or_else(|| anyhow::anyhow!("LangGraph activation omitted checkpoint history"))?;
@@ -566,6 +601,10 @@ mod tests {
         state.completed_phases = completed.iter().map(|phase| (*phase).to_string()).collect();
         state.complete = completed.contains(&"claim");
         state
+    }
+
+    fn expected_thread_id(skill: &str, session_id: &str) -> String {
+        format!("sentinel.phase.{skill}.{session_id}")
     }
 
     fn checkpoint(
@@ -641,8 +680,15 @@ mod tests {
             write_entry("checkpoint-2", 2, "claim", latest_json),
         ];
 
-        validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect("matching latest checkpoint and write must project");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect("matching latest checkpoint and write must project");
     }
 
     #[test]
@@ -665,8 +711,15 @@ mod tests {
             serde_json::to_value(phase_state(skill, session_id, &[])).expect("json"),
         )];
 
-        let err = validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect_err("forged latest state write must fail");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        let err = validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect_err("forged latest state write must fail");
         assert!(
             err.to_string()
                 .contains("latest state-channel write mismatch"),
@@ -696,8 +749,15 @@ mod tests {
             serde_json::to_value(latest_state).expect("json"),
         )];
 
-        let err = validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect_err("missing latest state write metadata must fail");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        let err = validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect_err("missing latest state write metadata must fail");
         assert!(
             err.to_string()
                 .contains("omitted state-channel write metadata"),
@@ -726,8 +786,15 @@ mod tests {
         )];
         writes[0].thread_id = "sentinel.phase.linear.other-session".to_string();
 
-        let err = validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect_err("mismatched write thread must fail");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        let err = validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect_err("mismatched write thread must fail");
         assert!(
             err.to_string().contains("write history") && err.to_string().contains("other-session"),
             "unexpected error: {err}"
@@ -773,8 +840,15 @@ mod tests {
             ),
         ];
 
-        let err = validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect_err("out-of-order write history must fail");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        let err = validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect_err("out-of-order write history must fail");
         assert!(
             err.to_string().contains("write history")
                 && err.to_string().contains("not oldest-first"),
@@ -821,8 +895,15 @@ mod tests {
             ),
         ];
 
-        let err = validate_phase_graph_projection(skill, session_id, &snapshots, &writes)
-            .expect_err("out-of-order checkpoint history must fail");
+        let expected_thread_id = expected_thread_id(skill, session_id);
+        let err = validate_phase_graph_projection(
+            skill,
+            session_id,
+            &expected_thread_id,
+            &snapshots,
+            &writes,
+        )
+        .expect_err("out-of-order checkpoint history must fail");
         assert!(
             err.to_string().contains("not oldest-first"),
             "unexpected error: {err}"

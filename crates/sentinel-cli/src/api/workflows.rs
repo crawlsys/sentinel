@@ -839,6 +839,7 @@ description = "Claim"
             durable_checkpointer: true,
             checkpointer_backend: "sqlite".into(),
             checkpointer_scope: "database_path:/tmp/sentinel-phase.db".into(),
+            checkpointer_tenant_scope: None,
             auto_checkpoint: true,
             max_iterations: 100,
             schemas: sentinel_graph::PhaseGraphSchemas {

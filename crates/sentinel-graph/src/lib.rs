@@ -89,6 +89,9 @@ pub type Result<T> = std::result::Result<T, GraphEngineError>;
 const PHASE_GRAPH_NAME: &str = "phase";
 const PHASE_STREAM_PROTOCOL: &str = "v3";
 const STATE_SNAPSHOT_NODE: &str = "__state__";
+const CHECKPOINTER_BACKEND_METADATA: &str = "sentinel.checkpointer_backend";
+const CHECKPOINTER_SCOPE_METADATA: &str = "sentinel.checkpointer_scope";
+const CHECKPOINTER_TENANT_SCOPE_METADATA: &str = "sentinel.checkpointer_tenant_scope";
 pub const LANGGRAPH_TENANT_ENV: &str = sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV;
 
 fn tenant_scope_from_env() -> Result<Option<String>> {
@@ -277,6 +280,8 @@ pub struct PhaseGraphIntrospection {
     pub durable_checkpointer: bool,
     pub checkpointer_backend: String,
     pub checkpointer_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpointer_tenant_scope: Option<String>,
     pub auto_checkpoint: bool,
     pub max_iterations: usize,
     pub schemas: PhaseGraphSchemas,
@@ -492,6 +497,7 @@ pub struct PhaseCheckpointer {
     saver: Arc<dyn CheckpointSaver>,
     backend: &'static str,
     scope: String,
+    tenant_scope: Option<String>,
 }
 
 impl PhaseCheckpointer {
@@ -503,6 +509,16 @@ impl PhaseCheckpointer {
     #[must_use]
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    #[must_use]
+    pub fn tenant_scope(&self) -> Option<&str> {
+        self.tenant_scope.as_deref()
+    }
+
+    #[must_use]
+    pub fn tenant_scope_metadata_value(&self) -> &str {
+        self.tenant_scope().unwrap_or("")
     }
 
     #[must_use]
@@ -724,6 +740,68 @@ fn tenant_scope_for_checkpointer_backend(backend: &str) -> Result<Option<String>
     }
 }
 
+fn tenant_scope_for_phase_checkpointer_config(
+    config: &PhaseCheckpointerConfig,
+) -> Result<Option<String>> {
+    match config {
+        PhaseCheckpointerConfig::Sqlite { .. } => Ok(None),
+        PhaseCheckpointerConfig::Postgres { .. } => {
+            tenant_scope_for_postgres_phase_checkpointer_config()
+        }
+        PhaseCheckpointerConfig::Redis { .. } => tenant_scope_for_redis_phase_checkpointer_config(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn tenant_scope_for_postgres_phase_checkpointer_config() -> Result<Option<String>> {
+    tenant_scope_for_checkpointer_backend("postgres")
+}
+
+#[cfg(not(feature = "postgres"))]
+fn tenant_scope_for_postgres_phase_checkpointer_config() -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(feature = "redis")]
+fn tenant_scope_for_redis_phase_checkpointer_config() -> Result<Option<String>> {
+    tenant_scope_for_checkpointer_backend("redis")
+}
+
+#[cfg(not(feature = "redis"))]
+fn tenant_scope_for_redis_phase_checkpointer_config() -> Result<Option<String>> {
+    Ok(None)
+}
+
+fn validate_phase_checkpointer_tenant_scope(
+    backend: &str,
+    tenant_scope: Option<&str>,
+) -> Result<()> {
+    match backend {
+        "sqlite" => {
+            if tenant_scope.is_some() {
+                Err(GraphEngineError::Checkpointer(
+                    "SQLite phase graph must not carry hosted tenant metadata".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        "postgres" | "redis" => {
+            let tenant = tenant_scope.ok_or_else(|| {
+                GraphEngineError::Checkpointer(format!(
+                    "phase graph {backend} checkpointer requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
+                ))
+            })?;
+            sentinel_domain::langgraph_thread::validate_tenant_scope(tenant)
+                .map_err(GraphEngineError::Checkpointer)?;
+            Ok(())
+        }
+        other => Err(GraphEngineError::Checkpointer(format!(
+            "unsupported phase graph checkpointer backend '{other}'"
+        ))),
+    }
+}
+
 /// Build a durable sqlite [`CheckpointSaver`] for a session. The database path
 /// is the caller's responsibility (it lives under sentinel's state dir); pass
 /// `":memory:"` for tests.
@@ -756,6 +834,7 @@ pub async fn phase_checkpointer(database_path: &str) -> Result<PhaseCheckpointer
         saver: phase_saver(database_path).await?,
         backend: "sqlite",
         scope: format!("database_path:{database_path}"),
+        tenant_scope: None,
     })
 }
 
@@ -768,6 +847,7 @@ pub async fn phase_checkpointer_for_config(
 ) -> Result<PhaseCheckpointer> {
     let backend = config.backend_name();
     let scope = config.scope_name();
+    let tenant_scope = tenant_scope_for_phase_checkpointer_config(&config)?;
     let saver = match config {
         PhaseCheckpointerConfig::Sqlite { database_path } => phase_saver(&database_path).await,
         PhaseCheckpointerConfig::Postgres {
@@ -783,6 +863,7 @@ pub async fn phase_checkpointer_for_config(
         saver,
         backend,
         scope,
+        tenant_scope,
     })
 }
 
@@ -1225,7 +1306,14 @@ pub fn compile_skill_graph_with_checkpointer(
 ) -> Result<CompiledPhaseGraph> {
     let backend = checkpointer.backend().to_string();
     let scope = checkpointer.scope().to_string();
-    compile_skill_graph_with_backend(workflow, checkpointer.into_saver(), backend, scope)
+    let tenant_scope = checkpointer.tenant_scope().map(ToOwned::to_owned);
+    compile_skill_graph_with_backend(
+        workflow,
+        checkpointer.into_saver(),
+        backend,
+        scope,
+        tenant_scope,
+    )
 }
 
 fn compile_skill_graph_with_backend(
@@ -1233,13 +1321,16 @@ fn compile_skill_graph_with_backend(
     checkpointer: Arc<dyn CheckpointSaver>,
     checkpointer_backend: String,
     checkpointer_scope: String,
+    tenant_scope: Option<String>,
 ) -> Result<CompiledPhaseGraph> {
     if workflow.phases.is_empty() {
         return Err(GraphEngineError::EmptyWorkflow(workflow.skill.clone()));
     }
+    validate_phase_checkpointer_tenant_scope(&checkpointer_backend, tenant_scope.as_deref())?;
 
     let phase_ids: Vec<String> = workflow.phases.iter().map(|p| p.id.clone()).collect();
     let schema = phase_graph_state_schema(workflow, &phase_ids);
+    let checkpointer_tenant_scope = tenant_scope.as_deref().unwrap_or("").to_string();
     let mut builder = StateGraphBuilder::<PhaseGraphState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema);
@@ -1256,12 +1347,13 @@ fn compile_skill_graph_with_backend(
             .with_metadata("sentinel.skill", workflow.skill.clone())
             .with_metadata("sentinel.phase", phase_id.clone())
             .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)));
-        node_config = node_config.with_metadata(
-            "sentinel.checkpointer_backend",
-            checkpointer_backend.clone(),
-        );
-        node_config =
-            node_config.with_metadata("sentinel.checkpointer_scope", checkpointer_scope.clone());
+        node_config = node_config
+            .with_metadata(CHECKPOINTER_BACKEND_METADATA, checkpointer_backend.clone())
+            .with_metadata(CHECKPOINTER_SCOPE_METADATA, checkpointer_scope.clone())
+            .with_metadata(
+                CHECKPOINTER_TENANT_SCOPE_METADATA,
+                checkpointer_tenant_scope.clone(),
+            );
         let phase_id_for_event = phase_id.clone();
         let phase_id_for_handler = phase_id.clone();
         builder = builder.add_async_node_with_config_and_error_handler(
@@ -1361,7 +1453,6 @@ fn compile_skill_graph_with_backend(
         compiled = compiled.with_interrupt(phase_id.as_str(), InterruptConfig::after());
     }
     compilation.graph = compiled;
-    let tenant_scope = tenant_scope_for_checkpointer_backend(&checkpointer_backend)?;
 
     Ok(CompiledPhaseGraph {
         inner: compilation,
@@ -1463,20 +1554,29 @@ fn required_phase_node_runtime_contract(
     nodes: &[PhaseGraphNodeInfo],
     checkpointer_backend: &str,
     checkpointer_scope: &str,
+    checkpointer_tenant_scope: Option<&str>,
 ) -> Result<()> {
+    validate_phase_checkpointer_tenant_scope(checkpointer_backend, checkpointer_tenant_scope)?;
     required_phase_node_metadata(
         skill,
         nodes,
-        "sentinel.checkpointer_backend",
+        CHECKPOINTER_BACKEND_METADATA,
         "checkpointer backend",
         checkpointer_backend,
     )?;
     required_phase_node_metadata(
         skill,
         nodes,
-        "sentinel.checkpointer_scope",
+        CHECKPOINTER_SCOPE_METADATA,
         "checkpointer scope",
         checkpointer_scope,
+    )?;
+    required_phase_node_metadata(
+        skill,
+        nodes,
+        CHECKPOINTER_TENANT_SCOPE_METADATA,
+        "checkpointer tenant scope",
+        checkpointer_tenant_scope.unwrap_or(""),
     )?;
 
     let expected_nodes: BTreeSet<&str> = phase_ids.iter().map(String::as_str).collect();
@@ -1678,6 +1778,15 @@ impl CompiledPhaseGraph {
         .map_err(GraphEngineError::Checkpointer)
     }
 
+    /// Derive the durable thread id from this compiled graph's captured
+    /// checkpointer backend and tenant scope.
+    ///
+    /// This is the runtime-safe variant of [`phase_thread_id`]: it does not
+    /// re-read process environment after the graph has been compiled.
+    pub fn thread_id_for_session(&self, session_id: &str) -> Result<String> {
+        self.thread_id(session_id)
+    }
+
     /// The ordered phase ids of this workflow.
     #[must_use]
     pub fn phase_ids(&self) -> &[String] {
@@ -1715,6 +1824,7 @@ impl CompiledPhaseGraph {
             &nodes,
             &self.checkpointer_backend,
             &self.checkpointer_scope,
+            self.tenant_scope.as_deref(),
         )?;
 
         let edges: Vec<PhaseGraphEdgeInfo> = graph
@@ -1751,6 +1861,7 @@ impl CompiledPhaseGraph {
             durable_checkpointer,
             checkpointer_backend: self.checkpointer_backend.clone(),
             checkpointer_scope: self.checkpointer_scope.clone(),
+            checkpointer_tenant_scope: self.tenant_scope.clone(),
             auto_checkpoint,
             max_iterations,
             schemas: PhaseGraphSchemas {

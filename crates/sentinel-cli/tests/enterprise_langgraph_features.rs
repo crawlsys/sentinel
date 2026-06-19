@@ -116,6 +116,47 @@ fn langgraph_dependencies_do_not_enable_backend_defaults_implicitly() {
     }
 }
 
+#[test]
+fn phase_graph_runtime_snapshots_tenant_scope_from_compiled_graph() {
+    let graph_source = include_str!("../../sentinel-graph/src/lib.rs");
+    assert!(
+        graph_source.contains("sentinel.checkpointer_tenant_scope"),
+        "phase graph nodes must stamp compiled checkpointer tenant scope metadata"
+    );
+    assert!(
+        graph_source.contains("checkpointer_tenant_scope: Option<String>"),
+        "phase graph topology must expose hosted checkpointer tenant scope"
+    );
+    assert!(
+        graph_source.contains("pub fn thread_id_for_session"),
+        "compiled phase graphs must expose env-free thread id derivation"
+    );
+    assert!(
+        !graph_source.contains("tenant_scope_for_checkpointer_backend(&checkpointer_backend)?"),
+        "phase graph compilation must not re-read process env for tenant scope"
+    );
+
+    let projection_source = include_str!("../src/phase_graph_projection.rs");
+    assert!(
+        projection_source.contains(".thread_id_for_session("),
+        "CLI/API phase graph projection must derive thread ids from the compiled graph"
+    );
+    assert!(
+        !projection_source.contains("sentinel_graph::phase_thread_id("),
+        "CLI/API phase graph projection must not re-read env for compiled graph evidence"
+    );
+
+    let mcp_source = include_str!("../src/mcp_cmd.rs");
+    assert!(
+        mcp_source.contains(".thread_id_for_session("),
+        "MCP phase graph evidence must derive thread ids from the compiled graph"
+    );
+    assert!(
+        !mcp_source.contains("sentinel_graph::phase_thread_id("),
+        "MCP phase graph evidence must not re-read env for compiled graph evidence"
+    );
+}
+
 fn feature_values<'a>(
     features: &'a toml::map::Map<String, toml::Value>,
     name: &str,

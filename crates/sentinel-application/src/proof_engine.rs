@@ -142,8 +142,9 @@ fn test_graph_topology(skill: &str, session_id: &str, phase_order: &[&str]) -> s
                     "sentinel.node": phase,
                     "sentinel.skill": skill,
                     "sentinel.phase": phase,
-                    "sentinel.checkpointer_backend": "test",
-                    "sentinel.checkpointer_scope": "memory:test"
+                    "sentinel.checkpointer_backend": "sqlite",
+                    "sentinel.checkpointer_scope": "database_path::memory:",
+                    "sentinel.checkpointer_tenant_scope": ""
                 },
                 "has_error_handler": true,
                 "has_timeout_policy": true,
@@ -169,8 +170,8 @@ fn test_graph_topology(skill: &str, session_id: &str, phase_order: &[&str]) -> s
         "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
         "phase_order": phase_order,
         "durable_checkpointer": true,
-        "checkpointer_backend": "test",
-        "checkpointer_scope": "memory:test",
+        "checkpointer_backend": "sqlite",
+        "checkpointer_scope": "database_path::memory:",
         "auto_checkpoint": true,
         "max_iterations": 100,
         "schemas": {
@@ -687,6 +688,7 @@ impl ProofEngine {
         Ok(graph_result)
     }
 
+    #[cfg(test)]
     fn langgraph_tenant_scope_from_env() -> Result<Option<String>> {
         let value = match std::env::var(sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV) {
             Ok(value) => value,
@@ -704,6 +706,7 @@ impl ProofEngine {
         Ok(Some(tenant.to_string()))
     }
 
+    #[cfg(test)]
     fn phase_checkpointer_backend_from_env() -> Result<&'static str> {
         let backend = match std::env::var("SENTINEL_PHASE_GRAPH_CHECKPOINTER") {
             Ok(value) => {
@@ -733,6 +736,7 @@ impl ProofEngine {
         }
     }
 
+    #[cfg(test)]
     fn langgraph_tenant_scope_for_phase_backend_from_env() -> Result<Option<String>> {
         match Self::phase_checkpointer_backend_from_env()? {
             "sqlite" => Ok(None),
@@ -743,6 +747,7 @@ impl ProofEngine {
         }
     }
 
+    #[cfg(test)]
     fn expected_phase_thread_id(skill: &str, session_id: &str) -> Result<String> {
         sentinel_domain::langgraph_thread::phase_thread_id(
             skill,
@@ -883,7 +888,13 @@ impl ProofEngine {
                     "LangGraph phase evidence for '{skill}/{phase_id}' omitted checkpoint history"
                 )
             })?;
-        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
+        let expected_thread_id = Self::validate_graph_topology(
+            graph,
+            skill,
+            session_id,
+            phase_id,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
         Self::validate_checkpoint_history_evidence(
             latest_checkpoint,
             checkpoints,
@@ -900,14 +911,6 @@ impl ProofEngine {
             state_value,
             &format!("phase evidence for '{skill}/{phase_id}'"),
         )?;
-        Self::validate_graph_topology(
-            graph,
-            skill,
-            session_id,
-            phase_id,
-            &format!("phase evidence for '{skill}/{phase_id}'"),
-        )?;
-
         let stream = graph
             .get("stream")
             .and_then(serde_json::Value::as_array)
@@ -1117,7 +1120,7 @@ impl ProofEngine {
         session_id: &str,
         phase_id: &str,
         evidence_label: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let topology = graph
             .get("graph_topology")
             .and_then(serde_json::Value::as_object)
@@ -1137,12 +1140,6 @@ impl ProofEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("LangGraph {evidence_label} topology omitted thread_id")
             })?;
-        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
-        if thread_id != expected_thread_id {
-            bail!(
-                "LangGraph {evidence_label} topology thread mismatch: got '{thread_id}', expected '{expected_thread_id}'"
-            );
-        }
         if topology
             .get("durable_checkpointer")
             .and_then(serde_json::Value::as_bool)
@@ -1235,6 +1232,45 @@ impl ProofEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("LangGraph {evidence_label} topology omitted checkpointer scope")
             })?;
+        let topology_tenant_scope = topology
+            .get("checkpointer_tenant_scope")
+            .and_then(serde_json::Value::as_str);
+        let tenant_scope = match backend {
+            "sqlite" => {
+                if topology_tenant_scope.is_some_and(|tenant| !tenant.is_empty()) {
+                    bail!(
+                        "LangGraph {evidence_label} SQLite topology must not carry hosted tenant metadata"
+                    );
+                }
+                None
+            }
+            "postgres" | "redis" => {
+                let tenant = topology_tenant_scope
+                    .filter(|tenant| !tenant.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "LangGraph {evidence_label} {backend} topology omitted checkpointer tenant scope"
+                        )
+                    })?;
+                sentinel_domain::langgraph_thread::validate_tenant_scope(tenant)
+                    .map_err(anyhow::Error::msg)?;
+                Some(tenant)
+            }
+            other => {
+                bail!(
+                    "LangGraph {evidence_label} topology used unsupported checkpointer backend '{other}'"
+                );
+            }
+        };
+        let expected_thread_id =
+            sentinel_domain::langgraph_thread::phase_thread_id(skill, session_id, tenant_scope)
+                .map_err(anyhow::Error::msg)?;
+        if thread_id != expected_thread_id {
+            bail!(
+                "LangGraph {evidence_label} topology thread mismatch: got '{thread_id}', expected '{expected_thread_id}'"
+            );
+        }
+        let expected_tenant_scope_metadata = tenant_scope.unwrap_or("");
         let nodes = topology
             .get("nodes")
             .and_then(serde_json::Value::as_array)
@@ -1282,6 +1318,13 @@ impl ProofEngine {
             if metadata_value("sentinel.checkpointer_scope") != Some(scope) {
                 bail!(
                     "LangGraph {evidence_label} topology node '{phase}' omitted matching checkpointer scope metadata"
+                );
+            }
+            if metadata_value("sentinel.checkpointer_tenant_scope")
+                != Some(expected_tenant_scope_metadata)
+            {
+                bail!(
+                    "LangGraph {evidence_label} topology node '{phase}' omitted matching checkpointer tenant scope metadata"
                 );
             }
             if node
@@ -1379,7 +1422,7 @@ impl ProofEngine {
                 );
             }
         }
-        Ok(())
+        Ok(expected_thread_id)
     }
 
     /// Obtain the completion verdict for a phase. When `dual` is set, run the
@@ -1761,7 +1804,13 @@ impl ProofEngine {
                     "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted checkpoint history"
                 )
             })?;
-        let expected_thread_id = Self::expected_phase_thread_id(skill, session_id)?;
+        let expected_thread_id = Self::validate_graph_topology(
+            graph,
+            skill,
+            session_id,
+            phase_id,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
         Self::validate_checkpoint_history_evidence(
             latest_checkpoint,
             checkpoints,
@@ -1776,13 +1825,6 @@ impl ProofEngine {
             checkpoint_id,
             &expected_thread_id,
             state_value,
-            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
-        )?;
-        Self::validate_graph_topology(
-            graph,
-            skill,
-            session_id,
-            phase_id,
             &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
         )?;
         Ok(())
@@ -2192,6 +2234,109 @@ mod step_evidence_tests {
                 .contains(sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV));
             assert!(err.to_string().contains("invalid characters"));
         });
+    }
+
+    fn hosted_topology(skill: &str, session_id: &str, phase_id: &str) -> serde_json::Value {
+        let mut topology = test_graph_topology(skill, session_id, &[phase_id]);
+        topology["thread_id"] = serde_json::json!(format!(
+            "tenant:legatus_ai:sentinel.phase.{skill}.{session_id}"
+        ));
+        topology["checkpointer_backend"] = serde_json::json!("redis");
+        topology["checkpointer_scope"] = serde_json::json!("ttl_seconds:none");
+        topology["checkpointer_tenant_scope"] = serde_json::json!("legatus_ai");
+        topology["nodes"][0]["metadata"]["sentinel.checkpointer_backend"] =
+            serde_json::json!("redis");
+        topology["nodes"][0]["metadata"]["sentinel.checkpointer_scope"] =
+            serde_json::json!("ttl_seconds:none");
+        topology["nodes"][0]["metadata"]["sentinel.checkpointer_tenant_scope"] =
+            serde_json::json!("legatus_ai");
+        topology
+    }
+
+    #[test]
+    fn topology_validation_uses_serialized_tenant_scope_after_env_drift() {
+        with_phase_graph_thread_env(Some("redis"), Some("wrong_tenant"), || {
+            let graph = serde_json::json!({
+                "graph_topology": hosted_topology("linear", "session-123", "claim")
+            });
+            let expected = ProofEngine::validate_graph_topology(
+                graph.as_object().expect("graph object"),
+                "linear",
+                "session-123",
+                "claim",
+                "test evidence",
+            )
+            .expect("hosted topology should validate from serialized tenant scope");
+
+            assert_eq!(
+                expected,
+                "tenant:legatus_ai:sentinel.phase.linear.session-123"
+            );
+        });
+    }
+
+    #[test]
+    fn topology_validation_rejects_hosted_backend_without_tenant_scope() {
+        let mut topology = hosted_topology("linear", "session-123", "claim");
+        topology
+            .as_object_mut()
+            .expect("topology object")
+            .remove("checkpointer_tenant_scope");
+        let graph = serde_json::json!({ "graph_topology": topology });
+
+        let err = ProofEngine::validate_graph_topology(
+            graph.as_object().expect("graph object"),
+            "linear",
+            "session-123",
+            "claim",
+            "test evidence",
+        )
+        .expect_err("hosted topology without tenant scope must fail");
+
+        assert!(err
+            .to_string()
+            .contains("omitted checkpointer tenant scope"));
+    }
+
+    #[test]
+    fn topology_validation_rejects_mismatched_tenant_metadata() {
+        let mut topology = hosted_topology("linear", "session-123", "claim");
+        topology["nodes"][0]["metadata"]["sentinel.checkpointer_tenant_scope"] =
+            serde_json::json!("other_tenant");
+        let graph = serde_json::json!({ "graph_topology": topology });
+
+        let err = ProofEngine::validate_graph_topology(
+            graph.as_object().expect("graph object"),
+            "linear",
+            "session-123",
+            "claim",
+            "test evidence",
+        )
+        .expect_err("mismatched tenant metadata must fail");
+
+        assert!(err
+            .to_string()
+            .contains("matching checkpointer tenant scope metadata"));
+    }
+
+    #[test]
+    fn topology_validation_rejects_sqlite_tenant_metadata() {
+        let mut topology = test_graph_topology("linear", "session-123", &["claim"]);
+        topology["checkpointer_tenant_scope"] = serde_json::json!("legatus_ai");
+        let graph = serde_json::json!({ "graph_topology": topology });
+
+        let err = ProofEngine::validate_graph_topology(
+            graph.as_object().expect("graph object"),
+            "linear",
+            "session-123",
+            "claim",
+            "test evidence",
+        )
+        .expect_err("sqlite topology with tenant scope must fail");
+
+        assert!(err
+            .to_string()
+            .contains("must not carry hosted tenant metadata"));
     }
 
     struct StepGraphWithForgedWrite;

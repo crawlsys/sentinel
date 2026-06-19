@@ -574,7 +574,16 @@ async fn phase_graph_mutation_evidence(
         .introspect(session_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let mut evidence = build_phase_graph_mutation_evidence(session_id, state, checkpoints, writes)?;
+    let expected_thread_id = graph
+        .thread_id_for_session(session_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut evidence = build_phase_graph_mutation_evidence(
+        session_id,
+        state,
+        checkpoints,
+        writes,
+        &expected_thread_id,
+    )?;
     evidence
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("phase graph evidence must be an object"))?
@@ -587,12 +596,11 @@ fn build_phase_graph_mutation_evidence(
     state: &sentinel_graph::PhaseGraphState,
     checkpoints: Vec<sentinel_graph::PhaseGraphCheckpointSnapshot>,
     writes: Vec<sentinel_graph::PhaseGraphWriteHistoryEntry>,
+    expected_thread_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let latest_checkpoint = checkpoints
         .last()
         .ok_or_else(|| anyhow::anyhow!("phase graph mutation did not persist a checkpoint"))?;
-    let expected_thread_id = sentinel_graph::phase_thread_id(&state.skill, session_id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if latest_checkpoint.thread_id != expected_thread_id {
         anyhow::bail!(
             "phase graph latest checkpoint thread mismatch for session '{session_id}': expected '{expected_thread_id}', got '{}'",
@@ -4150,6 +4158,7 @@ blocker = true
             &projected,
             vec![checkpoint_snapshot(stale, "checkpoint-1")],
             vec![write_history_entry(&projected, "checkpoint-1")],
+            "sentinel.phase.linear.test-session",
         )
         .expect_err("stale latest checkpoint must fail closed");
 
@@ -4171,6 +4180,7 @@ blocker = true
             &projected,
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-2")],
             vec![write_history_entry(&projected, "checkpoint-1")],
+            "sentinel.phase.linear.test-session",
         )
         .expect_err("missing latest checkpoint write must fail closed");
 
@@ -4195,6 +4205,7 @@ blocker = true
             &projected,
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-2")],
             writes,
+            "sentinel.phase.linear.test-session",
         )
         .expect_err("mismatched write thread must fail closed");
 
@@ -4228,6 +4239,7 @@ blocker = true
             &projected,
             vec![older_checkpoint, latest_checkpoint],
             vec![latest_write, older_write],
+            "sentinel.phase.linear.test-session",
         )
         .expect_err("out-of-order write history must fail closed");
 
@@ -4261,6 +4273,7 @@ blocker = true
                 write_history_entry(&projected, "checkpoint-2"),
                 write_history_entry(&older, "checkpoint-1"),
             ],
+            "sentinel.phase.linear.test-session",
         )
         .expect_err("out-of-order checkpoint history must fail closed");
 
@@ -4282,6 +4295,7 @@ blocker = true
             &projected,
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-3")],
             vec![write_history_entry(&projected, "checkpoint-3")],
+            "sentinel.phase.linear.test-session",
         )
         .expect("matching checkpoint evidence is accepted");
 

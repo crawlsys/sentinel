@@ -19,8 +19,8 @@ use sentinel_domain::workflow::{
 };
 
 use crate::{
-    compile_skill_graph_with_checkpointer, next_phase_target, phase_checkpointer,
-    required_phase_edge_contract, required_phase_node_metadata,
+    compile_skill_graph_with_backend, compile_skill_graph_with_checkpointer, next_phase_target,
+    phase_checkpointer, required_phase_edge_contract, required_phase_node_metadata,
     required_phase_node_runtime_contract, required_phase_runtime_contract,
     required_phase_schema_contract, PhaseCheckpointerConfig, PhaseGraphCheckpointSnapshot,
     PhaseGraphCheckpointWrite, PhaseGraphEdgeInfo, PhaseGraphErrorEvent, PhaseGraphNodeInfo,
@@ -309,6 +309,32 @@ fn phase_checkpointer_config_requires_redis_url() {
     });
 }
 
+#[cfg(all(feature = "postgres", feature = "redis"))]
+#[test]
+fn explicit_hosted_phase_checkpointer_config_requires_tenant_scope() {
+    with_phase_checkpointer_env(None, None, None, None, || {
+        let postgres_err =
+            crate::tenant_scope_for_phase_checkpointer_config(&PhaseCheckpointerConfig::Postgres {
+                database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
+                schema: Some("phase_graph".to_string()),
+            })
+            .expect_err("explicit postgres config must require tenant scope");
+        assert!(postgres_err
+            .to_string()
+            .contains(crate::LANGGRAPH_TENANT_ENV));
+        assert!(postgres_err.to_string().contains("tenant-scoped"));
+
+        let redis_err =
+            crate::tenant_scope_for_phase_checkpointer_config(&PhaseCheckpointerConfig::Redis {
+                redis_url: "redis://localhost:6379/0".to_string(),
+                ttl_seconds: Some(60),
+            })
+            .expect_err("explicit redis config must require tenant scope");
+        assert!(redis_err.to_string().contains(crate::LANGGRAPH_TENANT_ENV));
+        assert!(redis_err.to_string().contains("tenant-scoped"));
+    });
+}
+
 #[test]
 fn phase_checkpointer_config_requires_tenant_scope_for_redis() {
     with_phase_checkpointer_env_full(
@@ -501,6 +527,85 @@ async fn compiles_linear_workflow_with_all_phases() {
 }
 
 #[tokio::test]
+async fn compiled_phase_graph_thread_id_uses_compiled_tenant_scope_after_env_drift() {
+    let saver = phase_checkpointer(":memory:").await.expect("saver");
+    let graph = compile_skill_graph_with_backend(
+        &fixture(),
+        saver.into_saver(),
+        "redis".to_string(),
+        "ttl_seconds:none".to_string(),
+        Some("legatus_ai".to_string()),
+    )
+    .expect("compile hosted phase graph");
+
+    with_phase_checkpointer_env_full(
+        Some("redis"),
+        None,
+        None,
+        Some("redis://localhost:6379/0"),
+        None,
+        Some("wrong_tenant"),
+        || {
+            let topology = graph.introspect("sess-hosted").expect("hosted topology");
+            assert_eq!(
+                topology.thread_id,
+                "tenant:legatus_ai:sentinel.phase.linear.sess-hosted"
+            );
+            assert_eq!(
+                topology.checkpointer_tenant_scope.as_deref(),
+                Some("legatus_ai")
+            );
+            assert!(topology.nodes.iter().all(|node| {
+                node.metadata
+                    .get("sentinel.checkpointer_tenant_scope")
+                    .map(String::as_str)
+                    == Some("legatus_ai")
+            }));
+        },
+    );
+}
+
+#[tokio::test]
+async fn compiled_phase_graph_rejects_missing_hosted_tenant_scope() {
+    let saver = phase_checkpointer(":memory:").await.expect("saver");
+    let result = compile_skill_graph_with_backend(
+        &fixture(),
+        saver.into_saver(),
+        "postgres".to_string(),
+        "schema:public".to_string(),
+        None,
+    );
+    let err = match result {
+        Ok(_) => panic!("hosted phase graph must carry tenant scope"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains(crate::LANGGRAPH_TENANT_ENV));
+    assert!(err.to_string().contains("tenant-scoped"));
+}
+
+#[tokio::test]
+async fn compiled_phase_graph_rejects_sqlite_tenant_scope() {
+    let saver = phase_checkpointer(":memory:").await.expect("saver");
+    let result = compile_skill_graph_with_backend(
+        &fixture(),
+        saver.into_saver(),
+        "sqlite".to_string(),
+        "database_path::memory:".to_string(),
+        Some("legatus_ai".to_string()),
+    );
+    let err = match result {
+        Ok(_) => panic!("sqlite phase graph must not carry tenant scope"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("SQLite phase graph"));
+    assert!(err
+        .to_string()
+        .contains("must not carry hosted tenant metadata"));
+}
+
+#[tokio::test]
 async fn graph_introspection_exposes_langgraph_runtime_contract() {
     let checkpointer = phase_checkpointer(":memory:").await.expect("checkpointer");
     let graph = compile_skill_graph_with_checkpointer(&fixture(), checkpointer).expect("compile");
@@ -511,6 +616,7 @@ async fn graph_introspection_exposes_langgraph_runtime_contract() {
     assert!(topology.durable_checkpointer);
     assert_eq!(topology.checkpointer_backend, "sqlite");
     assert_eq!(topology.checkpointer_scope, "database_path::memory:");
+    assert_eq!(topology.checkpointer_tenant_scope, None);
     assert!(topology.auto_checkpoint);
     assert!(
         topology.max_iterations > topology.phase_order.len(),
@@ -583,6 +689,13 @@ async fn graph_introspection_exposes_langgraph_runtime_contract() {
             .map(String::as_str),
         Some("database_path::memory:")
     );
+    assert_eq!(
+        claim
+            .metadata
+            .get("sentinel.checkpointer_tenant_scope")
+            .map(String::as_str),
+        Some("")
+    );
     assert!(claim.has_timeout_policy);
     assert!(claim.has_error_handler);
     assert!(claim.interrupt_after);
@@ -597,6 +710,11 @@ async fn graph_introspection_exposes_langgraph_runtime_contract() {
             && node.metadata.get("sentinel.node").map(String::as_str) == Some(node.id.as_str())
             && node.metadata.get("sentinel.skill").map(String::as_str) == Some("linear")
             && node.metadata.get("sentinel.phase").map(String::as_str) == Some(node.id.as_str())
+            && node
+                .metadata
+                .get("sentinel.checkpointer_tenant_scope")
+                .map(String::as_str)
+                == Some("")
     }));
 
     assert!(
@@ -697,6 +815,10 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
             "sentinel.checkpointer_scope".to_string(),
             "database_path::memory:".to_string(),
         );
+        metadata.insert(
+            "sentinel.checkpointer_tenant_scope".to_string(),
+            String::new(),
+        );
         PhaseGraphNodeInfo {
             id: id.to_string(),
             deferred: false,
@@ -717,6 +839,7 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
         &nodes,
         "sqlite",
         "database_path::memory:",
+        None,
     )
     .expect("fully configured phase node passes");
 
@@ -728,6 +851,7 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
         &missing_timeout,
         "sqlite",
         "database_path::memory:",
+        None,
     )
     .expect_err("missing timeout fails");
     assert!(err.to_string().contains("timeout policy"));
@@ -740,6 +864,7 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
         &missing_handler,
         "sqlite",
         "database_path::memory:",
+        None,
     )
     .expect_err("missing error handler fails");
     assert!(err.to_string().contains("error handler"));
@@ -752,6 +877,7 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
         &wrong_interrupt,
         "sqlite",
         "database_path::memory:",
+        None,
     )
     .expect_err("missing post-node interrupt fails");
     assert!(err.to_string().contains("interrupt after"));
@@ -762,9 +888,84 @@ fn phase_node_runtime_contract_requires_enterprise_langgraph_configuration() {
         &[node("claim"), node("unexpected")],
         "sqlite",
         "database_path::memory:",
+        None,
     )
     .expect_err("unexpected LangGraph node fails");
     assert!(err.to_string().contains("unexpected LangGraph node"));
+}
+
+#[test]
+fn phase_node_runtime_contract_enforces_tenant_scope_metadata() {
+    fn node(id: &str, tenant_scope: Option<&str>) -> PhaseGraphNodeInfo {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("sentinel.graph".to_string(), "phase".to_string());
+        metadata.insert("sentinel.node".to_string(), id.to_string());
+        metadata.insert("sentinel.skill".to_string(), "linear".to_string());
+        metadata.insert("sentinel.phase".to_string(), id.to_string());
+        metadata.insert(
+            "sentinel.checkpointer_backend".to_string(),
+            "redis".to_string(),
+        );
+        metadata.insert(
+            "sentinel.checkpointer_scope".to_string(),
+            "ttl_seconds:none".to_string(),
+        );
+        if let Some(tenant_scope) = tenant_scope {
+            metadata.insert(
+                "sentinel.checkpointer_tenant_scope".to_string(),
+                tenant_scope.to_string(),
+            );
+        }
+        PhaseGraphNodeInfo {
+            id: id.to_string(),
+            deferred: false,
+            barrier_on: Vec::new(),
+            metadata,
+            has_error_handler: true,
+            has_timeout_policy: true,
+            interrupt_before: false,
+            interrupt_after: true,
+        }
+    }
+
+    let phase_ids = vec!["claim".to_string()];
+    let nodes = vec![node("claim", Some("legatus_ai"))];
+    required_phase_node_runtime_contract(
+        "linear",
+        &phase_ids,
+        &nodes,
+        "redis",
+        "ttl_seconds:none",
+        Some("legatus_ai"),
+    )
+    .expect("matching hosted tenant metadata passes");
+
+    let missing = vec![node("claim", None)];
+    let err = required_phase_node_runtime_contract(
+        "linear",
+        &phase_ids,
+        &missing,
+        "redis",
+        "ttl_seconds:none",
+        Some("legatus_ai"),
+    )
+    .expect_err("missing hosted tenant metadata fails");
+    assert!(err
+        .to_string()
+        .contains("sentinel.checkpointer_tenant_scope"));
+
+    let mismatched = vec![node("claim", Some("other_tenant"))];
+    let err = required_phase_node_runtime_contract(
+        "linear",
+        &phase_ids,
+        &mismatched,
+        "redis",
+        "ttl_seconds:none",
+        Some("legatus_ai"),
+    )
+    .expect_err("mismatched hosted tenant metadata fails");
+    assert!(err.to_string().contains("other_tenant"));
+    assert!(err.to_string().contains("legatus_ai"));
 }
 
 #[test]
