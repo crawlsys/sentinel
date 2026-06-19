@@ -77,25 +77,12 @@ impl DecisionGraphCheckpointerConfig {
     /// scope are mandatory; Sentinel never switches back to SQLite after an
     /// enterprise backend is requested.
     pub(crate) fn from_env(graph_name: &str) -> Result<Self, String> {
-        let backend = match std::env::var(Self::BACKEND_ENV) {
-            Ok(value) => {
-                let backend = value.trim();
-                if backend.is_empty() {
-                    return Err(format!(
-                        "{} is set but empty; expected sqlite, postgres, or redis",
-                        Self::BACKEND_ENV
-                    ));
-                }
-                backend.to_ascii_lowercase()
-            }
-            Err(std::env::VarError::NotPresent) => "sqlite".to_string(),
-            Err(err) => return Err(format!("failed to read {}: {err}", Self::BACKEND_ENV)),
-        };
+        let backend = decision_checkpointer_backend_from_env()?;
         match backend.as_str() {
             "sqlite" => Ok(Self::Sqlite {
                 database_path: sqlite_path(graph_name)?,
             }),
-            "postgres" | "postgresql" => {
+            "postgres" => {
                 let database_url = std::env::var(Self::POSTGRES_URL_ENV)
                     .map_err(|_| {
                         format!(
@@ -120,7 +107,7 @@ impl DecisionGraphCheckpointerConfig {
                     schema,
                 })
             }
-            "redis" | "redis-checkpoint" => {
+            "redis" => {
                 let redis_url = std::env::var(Self::REDIS_URL_ENV)
                     .map_err(|_| {
                         format!(
@@ -145,10 +132,7 @@ impl DecisionGraphCheckpointerConfig {
                     ttl_seconds,
                 })
             }
-            other => Err(format!(
-                "unsupported decision graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
-                Self::BACKEND_ENV
-            )),
+            _ => unreachable!("decision_checkpointer_backend_from_env only returns known backends"),
         }
     }
 
@@ -173,6 +157,38 @@ impl DecisionGraphCheckpointerConfig {
                 None => "ttl_seconds:none".to_string(),
             },
         }
+    }
+}
+
+fn decision_checkpointer_backend_from_env() -> Result<String, String> {
+    let backend = match std::env::var(DecisionGraphCheckpointerConfig::BACKEND_ENV) {
+        Ok(value) => {
+            let backend = value.trim();
+            if backend.is_empty() {
+                return Err(format!(
+                    "{} is set but empty; expected sqlite, postgres, or redis",
+                    DecisionGraphCheckpointerConfig::BACKEND_ENV
+                ));
+            }
+            backend.to_ascii_lowercase()
+        }
+        Err(std::env::VarError::NotPresent) => return Ok("sqlite".to_string()),
+        Err(err) => {
+            return Err(format!(
+                "failed to read {}: {err}",
+                DecisionGraphCheckpointerConfig::BACKEND_ENV
+            ));
+        }
+    };
+
+    match backend.as_str() {
+        "sqlite" => Ok("sqlite".to_string()),
+        "postgres" | "postgresql" => Ok("postgres".to_string()),
+        "redis" | "redis-checkpoint" => Ok("redis".to_string()),
+        other => Err(format!(
+            "unsupported decision graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
+            DecisionGraphCheckpointerConfig::BACKEND_ENV
+        )),
     }
 }
 
@@ -217,6 +233,23 @@ fn require_enterprise_tenant_scope(backend_env: &str, backend: &str) -> Result<(
     Err(format!(
         "{backend_env}={backend} requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
     ))
+}
+
+fn tenant_scope_for_checkpointer_backend(backend: &str) -> Result<Option<String>, String> {
+    match backend {
+        "sqlite" => Ok(None),
+        "postgres" | "redis" => tenant_scope_from_env()?.map_or_else(
+            || {
+                Err(format!(
+                    "decision graph {backend} checkpointer requires {LANGGRAPH_TENANT_ENV} so LangGraph checkpoint thread_id values are tenant-scoped"
+                ))
+            },
+            |tenant| Ok(Some(tenant)),
+        ),
+        other => Err(format!(
+            "unsupported decision graph checkpointer backend '{other}'"
+        )),
+    }
 }
 
 /// Resolve the SQLite checkpoint database path for a named decision graph.
@@ -341,9 +374,9 @@ async fn redis_checkpointer(
 /// Hashing the serialized input keeps retries for the same decision idempotent
 /// while giving changed facts/verdicts a fresh run thread under the same graph.
 ///
-/// When `SENTINEL_LANGGRAPH_TENANT` is set, the tenant is part of the thread id
-/// so hosted distributed checkpointers can safely share storage without
-/// cross-tenant resume collisions.
+/// Hosted distributed checkpointers require `SENTINEL_LANGGRAPH_TENANT` and
+/// include it in the thread id so shared storage cannot resume across tenant
+/// boundaries. Local SQLite ids stay unscoped even if a tenant env var is set.
 pub(crate) fn run_thread_id<T: Serialize>(
     graph_name: &str,
     identifier: &str,
@@ -353,7 +386,9 @@ pub(crate) fn run_thread_id<T: Serialize>(
         .map_err(|e| format!("failed to serialize {graph_name} graph input: {e}"))?;
     let digest = Sha256::digest(&bytes);
     let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
-    tenant_scoped_thread_id(base, tenant_scope_from_env()?.as_deref())
+    let backend = decision_checkpointer_backend_from_env()?;
+    let tenant_scope = tenant_scope_for_checkpointer_backend(&backend)?;
+    tenant_scoped_thread_id(base, tenant_scope.as_deref())
 }
 
 fn tenant_scoped_thread_id(base: String, tenant: Option<&str>) -> Result<String, String> {
@@ -756,6 +791,103 @@ mod tests {
                 .expect("valid tenant");
 
         assert_eq!(scoped, "tenant:legatus_ai:severity:SEN-123:abc123");
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_ignores_tenant_for_local_sqlite_default() {
+        with_decision_graph_checkpointer_env(None, None, None, Some("legatus_ai"), || {
+            let thread_id = run_thread_id(
+                "severity",
+                "SEN-123",
+                &serde_json::json!({"ticket": "SEN-123"}),
+            )
+            .expect("sqlite thread id");
+
+            assert!(thread_id.starts_with("severity:SEN-123:"));
+            assert!(
+                !thread_id.starts_with("tenant:"),
+                "local SQLite thread ids must not inherit hosted tenant scope: {thread_id}"
+            );
+        });
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_uses_tenant_for_hosted_redis_backend() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis-checkpoint"),
+            None,
+            None,
+            Some("redis://localhost:6379/0"),
+            None,
+            Some("legatus_ai"),
+            || {
+                let thread_id = run_thread_id(
+                    "severity",
+                    "SEN-123",
+                    &serde_json::json!({"ticket": "SEN-123"}),
+                )
+                .expect("redis thread id");
+
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_uses_tenant_for_hosted_postgres_alias() {
+        with_decision_graph_checkpointer_env(
+            Some("postgresql"),
+            Some("postgres://sentinel:sentinel@localhost/sentinel"),
+            None,
+            Some("legatus_ai"),
+            || {
+                let thread_id = run_thread_id(
+                    "severity",
+                    "SEN-123",
+                    &serde_json::json!({"ticket": "SEN-123"}),
+                )
+                .expect("postgres thread id");
+
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_requires_tenant_for_hosted_backend() {
+        with_decision_graph_checkpointer_env(
+            Some("postgres"),
+            Some("postgres://sentinel:sentinel@localhost/sentinel"),
+            None,
+            None,
+            || {
+                let err = run_thread_id(
+                    "severity",
+                    "SEN-123",
+                    &serde_json::json!({"ticket": "SEN-123"}),
+                )
+                .expect_err("hosted backend must require tenant scope");
+
+                assert!(err.contains("decision graph postgres checkpointer requires"));
+                assert!(err.contains(LANGGRAPH_TENANT_ENV));
+                assert!(err.contains("tenant-scoped"));
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_rejects_unknown_backend_without_fallback() {
+        with_decision_graph_checkpointer_env(Some("unsupported"), None, None, None, || {
+            let err = run_thread_id(
+                "severity",
+                "SEN-123",
+                &serde_json::json!({"ticket": "SEN-123"}),
+            )
+            .expect_err("unsupported backend must fail");
+
+            assert!(err.contains("unsupported decision graph checkpointer backend 'unsupported'"));
+            assert!(err.contains("expected sqlite, postgres, or redis"));
+        });
     }
 
     #[test]
