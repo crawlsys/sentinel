@@ -1,9 +1,10 @@
 //! Guard Sentinel's decision graphs against opaque LangGraph execution.
 //!
-//! Every infrastructure decision graph must run through the shared v3 streaming
-//! authority so CLI/MCP/API evidence includes typed stream parts, checkpoints,
-//! write history, and topology. Direct `execute` calls are not an enterprise
-//! audit surface.
+//! Every infrastructure decision graph must compile with a durable checkpointer
+//! and run through the shared v3 streaming authority so CLI/MCP/API evidence
+//! includes typed stream parts, Sentinel custom node events, checkpoints, write
+//! history, and topology. Direct `execute` calls are not an enterprise audit
+//! surface.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,10 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} must execute through decision_graph_introspection::stream_decision_run"
         );
         assert!(
+            source.contains("emit_decision_node_event("),
+            "{label} must emit Sentinel custom node evidence through emit_decision_node_event"
+        );
+        assert!(
             source.contains("DecisionGraphStreamPart"),
             "{label} must expose typed LangGraph v3 stream evidence"
         );
@@ -42,6 +47,22 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
         assert!(
             source.contains("checkpoint_history("),
             "{label} run report must carry durable checkpoint history"
+        );
+        assert!(
+            source.contains("topology("),
+            "{label} run report must carry LangGraph topology evidence"
+        );
+        assert!(
+            source.contains(".with_checkpointer("),
+            "{label} must compile with a durable LangGraph checkpointer"
+        );
+        assert!(
+            source.contains(".compile_with_config("),
+            "{label} must preserve LangGraph runtime configuration during compilation"
+        );
+        assert!(
+            !source.contains("get_stream_writer("),
+            "{label} must use emit_decision_node_event instead of direct stream-writer calls"
         );
         assert!(
             !source.contains(".execute("),
