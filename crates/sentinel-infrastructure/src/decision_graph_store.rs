@@ -250,6 +250,7 @@ fn require_enterprise_tenant_scope(backend_env: &str, backend: &str) -> Result<(
     ))
 }
 
+#[cfg(any(feature = "postgres", feature = "redis", test))]
 fn tenant_scope_for_checkpointer_backend(backend: &str) -> Result<Option<String>, String> {
     match backend {
         "sqlite" => Ok(None),
