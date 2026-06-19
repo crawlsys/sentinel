@@ -3393,6 +3393,7 @@ name = "sentinel-graph"
 version = "0.4.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "hex",
  "langgraph-core",

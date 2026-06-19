@@ -720,10 +720,10 @@ fn linear_pm_state_schema() -> StateSchema<LinearPmState> {
         })
 }
 
-async fn classify_node(state: LinearPmState) -> Result<LinearPmState, NodeError> {
-    let mut next = state;
+fn classify_node(state: &LinearPmState) -> LinearPmState {
+    let mut next = state.clone();
     next.decision = expected_decision(&next);
-    Ok(next)
+    next
 }
 
 pub async fn build_linear_pm_graph() -> Result<LinearPmGraph, String> {
@@ -756,33 +756,33 @@ async fn build_linear_pm_graph_with_checkpointer(
     let builder = StateGraphBuilder::<LinearPmState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_node_with_config(
             CLASSIFY,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", CLASSIFY, &s.identifier)?;
-                classify_node(s).await
+                Ok(classify_node(s))
             },
             node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             ALLOW,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", ALLOW, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::Allow;
                 Ok::<_, NodeError>(next)
             },
             node_config(ALLOW, checkpointer_backend, checkpointer_scope),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_MISSING_ISSUE_IDENTIFIER,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event(
                     "linear_pm",
                     BLOCK_MISSING_ISSUE_IDENTIFIER,
                     &s.identifier,
                 )?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockMissingIssueIdentifier;
                 Ok::<_, NodeError>(next)
             },
@@ -792,15 +792,15 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_LIVE_AUTHORITY_UNAVAILABLE,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event(
                     "linear_pm",
                     BLOCK_LIVE_AUTHORITY_UNAVAILABLE,
                     &s.identifier,
                 )?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockLiveAuthorityUnavailable;
                 Ok::<_, NodeError>(next)
             },
@@ -810,11 +810,11 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_BLOCKED_TICKET,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_BLOCKED_TICKET, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockBlockedTicket;
                 Ok::<_, NodeError>(next)
             },
@@ -824,11 +824,11 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_OVERSIZED_TICKET,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_OVERSIZED_TICKET, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockOversizedTicket;
                 Ok::<_, NodeError>(next)
             },
@@ -838,11 +838,11 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_MISSING_MILESTONE,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_MISSING_MILESTONE, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockMissingMilestone;
                 Ok::<_, NodeError>(next)
             },
@@ -852,15 +852,15 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             BLOCK_HIGHER_PRIORITY_AVAILABLE,
-            |s: LinearPmState| async move {
+            |s: &LinearPmState| {
                 emit_decision_node_event(
                     "linear_pm",
                     BLOCK_HIGHER_PRIORITY_AVAILABLE,
                     &s.identifier,
                 )?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = LinearPmDecision::BlockHigherPriorityAvailable;
                 Ok::<_, NodeError>(next)
             },

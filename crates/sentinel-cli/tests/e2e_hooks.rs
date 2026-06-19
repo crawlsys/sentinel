@@ -54,11 +54,13 @@ struct HookTest {
 
 impl HookTest {
     fn new() -> Self {
-        Self {
+        let test = Self {
             home: tempfile::tempdir().expect("tempdir"),
             session_id: unique_session_id(),
             extra_env: Vec::new(),
-        }
+        };
+        test.seed_workflow_config();
+        test
     }
 
     fn home_path(&self) -> &Path {
@@ -68,6 +70,26 @@ impl HookTest {
     /// The isolated `~/.claude` dir inside the temp home.
     fn claude_dir(&self) -> PathBuf {
         self.home_path().join(".claude")
+    }
+
+    fn seed_workflow_config(&self) {
+        let config_dir = self.claude_dir().join("sentinel").join("config");
+        std::fs::create_dir_all(&config_dir).expect("mk sentinel config dir");
+        std::fs::write(
+            config_dir.join("workflows.toml"),
+            r#"
+[[workflows]]
+skill = "linear"
+
+[[workflows.phases]]
+id = "claim"
+file = "claim.md"
+required = true
+judge = "sonnet"
+description = "Claim"
+"#,
+        )
+        .expect("write workflows.toml");
     }
 
     /// Seed a task JSON file at `~/.claude/tasks/{session}/{id}.json`.

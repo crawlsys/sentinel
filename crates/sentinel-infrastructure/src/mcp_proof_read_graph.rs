@@ -26,6 +26,8 @@ use crate::decision_graph_introspection::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum McpProofReadSurface {
     ProofChain,
+    WorkflowStatus,
+    VerifyChain,
     StepProof,
     StepChain,
     ActiveStep,
@@ -50,6 +52,10 @@ pub struct McpProofReadState {
     pub session_id_present: bool,
     pub entries_count: Option<u64>,
     pub steps_count: Option<u64>,
+    pub workflow_status_fields_present: bool,
+    pub verification_valid_present: bool,
+    pub verification_counts_present: bool,
+    pub verification_errors_present: bool,
     pub step_id_present: bool,
     pub phase_id_present: bool,
     pub combined_hash_present: bool,
@@ -88,6 +94,22 @@ impl McpProofReadState {
                 .get("steps")
                 .and_then(Value::as_array)
                 .map(|items| items.len() as u64),
+            workflow_status_fields_present: response.get("current_phase").is_some()
+                && response
+                    .get("completed_phases")
+                    .and_then(Value::as_array)
+                    .is_some()
+                && response.get("complete").and_then(Value::as_bool).is_some(),
+            verification_valid_present: response.get("valid").and_then(Value::as_bool).is_some(),
+            verification_counts_present: response
+                .get("phases_verified")
+                .and_then(Value::as_u64)
+                .is_some()
+                && response
+                    .get("steps_verified")
+                    .and_then(Value::as_u64)
+                    .is_some(),
+            verification_errors_present: response.get("errors").and_then(Value::as_array).is_some(),
             step_id_present: non_empty_string(response, "step_id"),
             phase_id_present: non_empty_string(response, "phase_id"),
             combined_hash_present: response
@@ -178,6 +200,8 @@ pub fn mcp_proof_read_decision_label(decision: McpProofReadDecision) -> &'static
 pub fn mcp_proof_read_surface_label(surface: McpProofReadSurface) -> &'static str {
     match surface {
         McpProofReadSurface::ProofChain => "proof_chain",
+        McpProofReadSurface::WorkflowStatus => "workflow_status",
+        McpProofReadSurface::VerifyChain => "verify_chain",
         McpProofReadSurface::StepProof => "step_proof",
         McpProofReadSurface::StepChain => "step_chain",
         McpProofReadSurface::ActiveStep => "active_step",
@@ -196,6 +220,25 @@ pub fn mcp_proof_read_identifier(
         McpProofReadSurface::ProofChain => {
             let entries_count = required_array_len(response, "entries")?;
             format!("entries-{entries_count}")
+        }
+        McpProofReadSurface::WorkflowStatus => {
+            require_field(response, "current_phase")?;
+            let completed_count = required_array_len(response, "completed_phases")?;
+            let complete = required_bool(response, "complete")?;
+            let current_phase = response
+                .get("current_phase")
+                .and_then(Value::as_u64)
+                .map_or_else(|| "none".to_string(), |phase| phase.to_string());
+            format!("current-phase-{current_phase}:completed-{completed_count}:complete-{complete}")
+        }
+        McpProofReadSurface::VerifyChain => {
+            let valid = required_bool(response, "valid")?;
+            let phases_verified = required_u64(response, "phases_verified")?;
+            let steps_verified = required_u64(response, "steps_verified")?;
+            let errors_count = required_array_len(response, "errors")?;
+            format!(
+                "valid-{valid}:phases-{phases_verified}:steps-{steps_verified}:errors-{errors_count}"
+            )
         }
         McpProofReadSurface::StepProof => {
             let phase_id = required_response_string(response, "phase_id")?;
@@ -256,6 +299,13 @@ fn required_u64(response: &Value, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("MCP proof read response requires concrete numeric {field}"))
 }
 
+fn required_bool(response: &Value, field: &str) -> Result<bool, String> {
+    response
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("MCP proof read response requires concrete boolean {field}"))
+}
+
 fn require_field(response: &Value, field: &str) -> Result<(), String> {
     if response.get(field).is_some() {
         Ok(())
@@ -308,6 +358,10 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                 "session_id_present",
                 "entries_count",
                 "steps_count",
+                "workflow_status_fields_present",
+                "verification_valid_present",
+                "verification_counts_present",
+                "verification_errors_present",
                 "step_id_present",
                 "phase_id_present",
                 "combined_hash_present",
@@ -320,7 +374,14 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                 "identifier": { "type": "string", "minLength": 1 },
                 "surface": {
                     "type": "string",
-                    "enum": ["ProofChain", "StepProof", "StepChain", "ActiveStep"]
+                    "enum": [
+                        "ProofChain",
+                        "WorkflowStatus",
+                        "VerifyChain",
+                        "StepProof",
+                        "StepChain",
+                        "ActiveStep"
+                    ]
                 },
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
@@ -340,6 +401,10 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                         { "type": "null" }
                     ]
                 },
+                "workflow_status_fields_present": { "type": "boolean" },
+                "verification_valid_present": { "type": "boolean" },
+                "verification_counts_present": { "type": "boolean" },
+                "verification_errors_present": { "type": "boolean" },
                 "step_id_present": { "type": "boolean" },
                 "phase_id_present": { "type": "boolean" },
                 "combined_hash_present": { "type": "boolean" },
@@ -383,6 +448,24 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                     if state.entries_count.is_none() {
                         return Err(StateError::ValidationFailed(
                             "MCP proof chain read requires canonical entries".to_string(),
+                        ));
+                    }
+                }
+                McpProofReadSurface::WorkflowStatus => {
+                    if !state.workflow_status_fields_present {
+                        return Err(StateError::ValidationFailed(
+                            "MCP workflow status read requires workflow status fields".to_string(),
+                        ));
+                    }
+                }
+                McpProofReadSurface::VerifyChain => {
+                    if !state.verification_valid_present
+                        || !state.verification_counts_present
+                        || !state.verification_errors_present
+                    {
+                        return Err(StateError::ValidationFailed(
+                            "MCP chain verification read requires verification result fields"
+                                .to_string(),
                         ));
                     }
                 }
@@ -576,6 +659,37 @@ mod tests {
         assert!(
             step_chain_identifier.contains(&format!("step_chain-linear-sess:head-{HASH}:steps-0"))
         );
+
+        let workflow_status = base_response(serde_json::json!({
+            "current_phase": 0,
+            "completed_phases": [],
+            "complete": false
+        }));
+        let workflow_status_hash = sha256_json(&workflow_status);
+        let workflow_status_identifier = mcp_proof_read_identifier(
+            McpProofReadSurface::WorkflowStatus,
+            &workflow_status,
+            &workflow_status_hash,
+        )
+        .unwrap();
+        assert!(workflow_status_identifier
+            .contains("workflow_status-linear-sess:current-phase-0:completed-0:complete-false"));
+
+        let verify_chain = base_response(serde_json::json!({
+            "valid": true,
+            "phases_verified": 1,
+            "steps_verified": 2,
+            "errors": []
+        }));
+        let verify_chain_hash = sha256_json(&verify_chain);
+        let verify_chain_identifier = mcp_proof_read_identifier(
+            McpProofReadSurface::VerifyChain,
+            &verify_chain,
+            &verify_chain_hash,
+        )
+        .unwrap();
+        assert!(verify_chain_identifier
+            .contains("verify_chain-linear-sess:valid-true:phases-1:steps-2:errors-0"));
     }
 
     #[test]
@@ -606,6 +720,23 @@ mod tests {
                     "step_id": "1",
                     "phase_id": "claim",
                     "combined_hash": HASH
+                })),
+            ),
+            (
+                McpProofReadSurface::WorkflowStatus,
+                base_response(serde_json::json!({
+                    "current_phase": 0,
+                    "completed_phases": [],
+                    "complete": false
+                })),
+            ),
+            (
+                McpProofReadSurface::VerifyChain,
+                base_response(serde_json::json!({
+                    "valid": true,
+                    "phases_verified": 1,
+                    "steps_verified": 2,
+                    "errors": []
                 })),
             ),
             (
@@ -697,5 +828,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("LangGraph workflow projection"));
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_verify_chain_without_verification_fields() {
+        let graph = build_mcp_proof_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let response = base_response(serde_json::json!({
+            "valid": true,
+            "phases_verified": 1,
+            "steps_verified": 2
+        }));
+        let state = McpProofReadState::from_response(
+            McpProofReadSurface::VerifyChain,
+            "missing-verification-errors",
+            &response,
+        );
+        let err = run_mcp_proof_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("verification result fields"), "{err}");
     }
 }

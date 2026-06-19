@@ -51,14 +51,18 @@ use std::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 
 use langgraph_core::application::services::{
-    get_stream_writer, CheckpointStateSnapshot, CompilationResult, ExecutableGraph, GraphCompiler,
+    get_stream_writer, ChatModelStream, CheckpointEvent, CheckpointStateSnapshot,
+    CheckpointsTransformer, CompilationResult, CompiledGraphV3Ext, CustomEvent, CustomTransformer,
+    DebugEvent, DebugTransformer, GraphCompiler, GraphRunStream, LifecycleEvent, RunV3Options,
+    StateSnapshot, StateUpdateEvent, SubgraphHandle, TaskEvent, TasksTransformer,
+    UpdatesTransformer, V3StreamTransformer,
 };
 use langgraph_core::domain::value_objects::{
-    Command, InterruptConfig, NodeConfig, NodeError, NodeErrorContext, NodeTimeoutPolicy,
-    StateError, StateSchema, StateUpdate, StreamEventType, StreamMode, StreamPart,
-    StreamPartPayload, END, START,
+    Command, Interrupt, InterruptConfig, NodeConfig, NodeError, NodeErrorContext,
+    NodeTimeoutPolicy, StateError, StateSchema, END, START,
 };
 use langgraph_core::ports::CheckpointSaver;
 #[cfg(feature = "postgres")]
@@ -81,6 +85,8 @@ mod tests;
 pub type Result<T> = std::result::Result<T, GraphEngineError>;
 
 const PHASE_GRAPH_NAME: &str = "phase";
+const PHASE_STREAM_PROTOCOL: &str = "v3";
+const STATE_SNAPSHOT_NODE: &str = "__state__";
 pub const LANGGRAPH_TENANT_ENV: &str = sentinel_domain::langgraph_thread::LANGGRAPH_TENANT_ENV;
 
 fn tenant_scope_from_env() -> Result<Option<String>> {
@@ -282,12 +288,14 @@ pub struct PhaseGraphIntrospection {
 /// Serializable view of one LangGraph stream part emitted during phase execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseGraphStreamPart {
+    pub stream_protocol: String,
     pub event_type: String,
     pub node_id: String,
     pub timestamp: String,
     pub superstep: u64,
     pub payload_kind: String,
     pub payload_json: serde_json::Value,
+    pub subgraph_namespace: Vec<String>,
 }
 
 /// State plus the exact LangGraph stream parts observed during a gate run.
@@ -295,6 +303,67 @@ pub struct PhaseGraphStreamPart {
 pub struct PhaseGraphRunReport {
     pub state: PhaseGraphState,
     pub stream: Vec<PhaseGraphStreamPart>,
+}
+
+struct PhaseV3StreamRun {
+    output: PhaseGraphState,
+    interrupted: bool,
+    interrupts: Vec<Interrupt>,
+    stream: Vec<PhaseGraphStreamPart>,
+}
+
+#[derive(Default)]
+struct V3PhaseProjectionDrain {
+    stream: Vec<PhaseGraphStreamPart>,
+    node_error: Option<String>,
+}
+
+impl V3PhaseProjectionDrain {
+    fn push(&mut self, part: PhaseGraphStreamPart) {
+        if part.payload_kind == "tasks"
+            && part
+                .payload_json
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+        {
+            self.node_error = Some(phase_task_error_message(&part));
+        }
+        if part.event_type == "SubgraphFailed" {
+            self.node_error = Some(phase_lifecycle_error_message(&part));
+        }
+        self.stream.push(part);
+    }
+
+    fn extend(&mut self, other: Self) {
+        if self.node_error.is_none() {
+            self.node_error = other.node_error;
+        }
+        self.stream.extend(other.stream);
+    }
+}
+
+fn phase_task_error_message(part: &PhaseGraphStreamPart) -> String {
+    part.payload_json
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+        .map(|error| format!("phase stream failed at node {}: {error}", part.node_id))
+        .unwrap_or_else(|| format!("phase stream failed at node {}", part.node_id))
+}
+
+fn phase_lifecycle_error_message(part: &PhaseGraphStreamPart) -> String {
+    part.payload_json
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+        .map(|error| {
+            format!(
+                "phase stream lifecycle failed at node {}: {error}",
+                part.node_id
+            )
+        })
+        .unwrap_or_else(|| format!("phase stream lifecycle failed at node {}", part.node_id))
 }
 
 /// Serializable checkpoint source metadata from the LangGraph runtime.
@@ -1649,37 +1718,37 @@ impl CompiledPhaseGraph {
             }
         });
 
-        let mut rx = self
+        let checkpointer = self.inner.checkpointer.as_ref().ok_or_else(|| {
+            GraphEngineError::Graph(
+                "phase stream requires a configured durable LangGraph checkpointer".into(),
+            )
+        })?;
+        let handle = self
             .inner
-            .stream_v2_with_config(input, &config, Self::phase_stream_modes())
+            .graph
+            .stream_events_v3_with_options(
+                input,
+                Self::phase_v3_transformers(),
+                RunV3Options::new()
+                    .with_checkpointer(Arc::clone(checkpointer))
+                    .with_thread_id(thread_id.clone())
+                    .with_config(config),
+            )
             .await
             .map_err(GraphEngineError::from_graph)?;
-        let mut stream = Vec::new();
-        let mut node_error = None;
+        let v3_run = Self::collect_v3_phase_stream(handle, &thread_id).await?;
+        let stream = v3_run.stream;
         let mut saw_expected_gate_checkpoint = false;
         let mut saw_expected_custom_phase_gate = false;
         let mut checkpoint_sources = Vec::new();
 
-        while let Some(part) = rx.recv().await {
-            if part.event_type() == StreamEventType::NodeError {
-                node_error = Some(part.node_id().to_string());
-            }
-            let view = Self::stream_part_view(part)?;
-            if view.payload_kind == "tasks"
-                && view
-                    .payload_json
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("error")
-            {
-                node_error = Some(view.node_id.clone());
-            }
-            if view.payload_kind == "checkpoints" {
-                let source_type = view
+        for part in &stream {
+            if part.payload_kind == "checkpoints" {
+                let source_type = part
                     .payload_json
                     .pointer("/source/type")
                     .and_then(serde_json::Value::as_str);
-                let source_node = view
+                let source_node = part
                     .payload_json
                     .pointer("/source/node")
                     .and_then(serde_json::Value::as_str);
@@ -1690,23 +1759,23 @@ impl CompiledPhaseGraph {
                     saw_expected_gate_checkpoint = true;
                 }
             }
-            if view.payload_kind == "custom"
-                && view
+            if part.payload_kind == "custom"
+                && part
                     .payload_json
                     .get("type")
                     .and_then(serde_json::Value::as_str)
                     == Some("sentinel.phase_gate")
-                && view
+                && part
                     .payload_json
                     .get("skill")
                     .and_then(serde_json::Value::as_str)
                     == Some(expected_skill.as_str())
-                && view
+                && part
                     .payload_json
                     .get("session_id")
                     .and_then(serde_json::Value::as_str)
                     == Some(session_id)
-                && view
+                && part
                     .payload_json
                     .get("phase_id")
                     .and_then(serde_json::Value::as_str)
@@ -1714,17 +1783,33 @@ impl CompiledPhaseGraph {
             {
                 saw_expected_custom_phase_gate = true;
             }
-            stream.push(view);
-        }
-
-        if let Some(node_id) = node_error {
-            return Err(GraphEngineError::Graph(format!(
-                "phase stream failed at node {node_id}"
-            )));
         }
         if stream.is_empty() {
             return Err(GraphEngineError::Graph(format!(
                 "phase stream emitted no parts for thread {thread_id}"
+            )));
+        }
+        if !stream
+            .iter()
+            .all(|part| part.stream_protocol == PHASE_STREAM_PROTOCOL)
+        {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} emitted non-v3 LangGraph stream evidence"
+            )));
+        }
+        if !stream.iter().any(|part| part.payload_kind == "values") {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} omitted LangGraph values payloads"
+            )));
+        }
+        if !stream.iter().any(|part| part.payload_kind == "updates") {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} omitted LangGraph v3 updates payloads"
+            )));
+        }
+        if !stream.iter().any(|part| part.payload_kind == "tasks") {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} omitted LangGraph v3 task payloads"
             )));
         }
         if !saw_expected_gate_checkpoint {
@@ -1748,6 +1833,11 @@ impl CompiledPhaseGraph {
                 "phase stream for thread {thread_id} did not expose checkpoint history"
             ))
         })?;
+        if v3_run.output != state {
+            return Err(GraphEngineError::Graph(format!(
+                "phase v3 stream output state mismatch for thread {thread_id}"
+            )));
+        }
         if latest.state != state {
             return Err(GraphEngineError::Graph(format!(
                 "phase stream latest checkpoint state mismatch for thread {thread_id}"
@@ -1760,12 +1850,13 @@ impl CompiledPhaseGraph {
             &expected_gate,
             &state,
         )?;
-        let interrupts = self
-            .inner
-            .graph
-            .get_interrupts()
-            .map_err(GraphEngineError::from_graph)?;
-        if !interrupts
+        if !v3_run.interrupted {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} completed without the expected gate interrupt"
+            )));
+        }
+        if !v3_run
+            .interrupts
             .iter()
             .any(|interrupt| interrupt.node_id() == expected_gate)
         {
@@ -1777,64 +1868,370 @@ impl CompiledPhaseGraph {
         Ok(PhaseGraphRunReport { state, stream })
     }
 
-    fn phase_stream_modes() -> Vec<StreamMode> {
+    fn phase_v3_transformers() -> Vec<Arc<dyn V3StreamTransformer>> {
         vec![
-            StreamMode::Values,
-            StreamMode::Updates,
-            StreamMode::Checkpoints,
-            StreamMode::Tasks,
-            StreamMode::Messages,
-            StreamMode::Debug,
-            StreamMode::Custom,
+            Arc::new(UpdatesTransformer),
+            Arc::new(CheckpointsTransformer),
+            Arc::new(TasksTransformer),
+            Arc::new(DebugTransformer),
+            Arc::new(CustomTransformer),
         ]
     }
 
-    fn stream_part_view(part: StreamPart<PhaseGraphState>) -> Result<PhaseGraphStreamPart> {
-        let event_type = format!("{:?}", part.event_type());
-        let node_id = part.node_id().to_string();
-        let timestamp = part.timestamp().to_rfc3339();
-        let superstep = part.superstep();
-        let (payload_kind, payload_json) = match part.payload() {
-            StreamPartPayload::Lifecycle => ("lifecycle", serde_json::Value::Null),
-            StreamPartPayload::Values(state) => ("values", Self::phase_state_payload_json(state)),
-            StreamPartPayload::Updates(update) => {
-                ("updates", Self::stream_update_payload_json(update))
-            }
-            StreamPartPayload::Debug(debug) => (
-                "debug",
-                serde_json::json!({
-                    "execution_time_ms": debug.execution_time_ms(),
-                    "memory_usage_bytes": debug.memory_usage_bytes(),
-                    "metadata": debug.metadata(),
-                }),
-            ),
-            StreamPartPayload::Tasks(value) => ("tasks", value.clone()),
-            StreamPartPayload::Checkpoints(value) => ("checkpoints", value.clone()),
-            StreamPartPayload::Messages(value) => ("messages", value.clone()),
-            StreamPartPayload::Custom(value) => ("custom", value.clone()),
-            _ => {
-                return Err(GraphEngineError::Graph(
-                    "unsupported LangGraph stream payload kind".into(),
-                ));
-            }
-        };
+    async fn collect_v3_phase_stream(
+        handle: GraphRunStream<PhaseGraphState>,
+        thread_id: &str,
+    ) -> Result<PhaseV3StreamRun> {
+        let values_rx = handle
+            .values()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let updates_rx = handle
+            .updates()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let checkpoints_rx = handle
+            .checkpoints()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let tasks_rx = handle
+            .tasks()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let debug_rx = handle
+            .debug()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let custom_rx = handle
+            .custom()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let lifecycle_rx = handle
+            .lifecycle()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let subgraphs_rx = handle
+            .subgraphs()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let messages_rx = handle
+            .messages()
+            .take()
+            .map_err(|err| GraphEngineError::Graph(err.to_string()))?;
+        let output = handle.output();
 
-        Ok(PhaseGraphStreamPart {
-            event_type,
-            node_id,
-            timestamp,
+        let (
+            values,
+            updates,
+            checkpoints,
+            tasks,
+            debug,
+            custom,
+            lifecycle,
+            subgraphs,
+            messages,
+            output,
+        ) = tokio::join!(
+            Self::drain_v3_values(values_rx),
+            Self::drain_v3_updates(updates_rx),
+            Self::drain_v3_checkpoints(checkpoints_rx),
+            Self::drain_v3_tasks(tasks_rx),
+            Self::drain_v3_debug(debug_rx),
+            Self::drain_v3_custom(custom_rx),
+            Self::drain_v3_lifecycle(lifecycle_rx),
+            Self::drain_v3_subgraphs(subgraphs_rx),
+            Self::drain_v3_messages(messages_rx),
+            output,
+        );
+
+        let mut drain = V3PhaseProjectionDrain::default();
+        drain.extend(values?);
+        drain.extend(updates?);
+        drain.extend(checkpoints?);
+        drain.extend(tasks?);
+        drain.extend(debug?);
+        drain.extend(custom?);
+        drain.extend(lifecycle?);
+        drain.extend(subgraphs?);
+        drain.extend(messages?);
+
+        if let Some(error) = drain.node_error {
+            return Err(GraphEngineError::Graph(error));
+        }
+
+        let output = output.map_err(|err| {
+            GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} closed before LangGraph v3 completion: {err}"
+            ))
+        })?;
+        let interrupted = handle.interrupted().await.map_err(|err| {
+            GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} did not expose v3 interrupted status: {err}"
+            ))
+        })?;
+        let interrupts = handle.interrupts().await.map_err(|err| {
+            GraphEngineError::Graph(format!(
+                "phase stream for thread {thread_id} did not expose v3 interrupts: {err}"
+            ))
+        })?;
+        let superstep = drain
+            .stream
+            .iter()
+            .map(|part| part.superstep)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        drain.stream.push(Self::phase_stream_part(
+            "ExecutionComplete",
+            END,
+            chrono::Utc::now().to_rfc3339(),
             superstep,
-            payload_kind: payload_kind.to_string(),
-            payload_json,
+            "values",
+            Self::phase_state_payload_json(&output),
+            Vec::new(),
+        ));
+        drain.stream.sort_by(|left, right| {
+            left.superstep
+                .cmp(&right.superstep)
+                .then_with(|| left.timestamp.cmp(&right.timestamp))
+                .then_with(|| Self::stream_part_rank(left).cmp(&Self::stream_part_rank(right)))
+                .then_with(|| left.node_id.cmp(&right.node_id))
+                .then_with(|| left.payload_kind.cmp(&right.payload_kind))
+        });
+
+        Ok(PhaseV3StreamRun {
+            output,
+            interrupted,
+            interrupts,
+            stream: drain.stream,
         })
     }
 
-    fn stream_update_payload_json(update: &StateUpdate<PhaseGraphState>) -> serde_json::Value {
-        serde_json::json!({
-            "before": Self::phase_state_payload_json(update.before()),
-            "after": Self::phase_state_payload_json(update.after()),
-            "description": update.description(),
-        })
+    async fn drain_v3_values(
+        mut rx: mpsc::Receiver<StateSnapshot<PhaseGraphState>>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(snapshot) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Values",
+                STATE_SNAPSHOT_NODE,
+                chrono::Utc::now().to_rfc3339(),
+                snapshot.superstep(),
+                "values",
+                Self::phase_state_payload_json(snapshot.state()),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_updates(
+        mut rx: mpsc::Receiver<StateUpdateEvent>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Updates",
+                event.node_id.to_string(),
+                event.timestamp.to_rfc3339(),
+                event.superstep,
+                "updates",
+                event.payload,
+                Self::namespace_strings(&event.subgraph_namespace),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_checkpoints(
+        mut rx: mpsc::Receiver<CheckpointEvent>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Checkpoint",
+                event.node_id.to_string(),
+                event.timestamp.to_rfc3339(),
+                event.superstep,
+                "checkpoints",
+                event.payload,
+                Self::namespace_strings(&event.subgraph_namespace),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_tasks(mut rx: mpsc::Receiver<TaskEvent>) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Task",
+                event.node_id.to_string(),
+                event.timestamp.to_rfc3339(),
+                event.superstep,
+                "tasks",
+                event.payload,
+                Self::namespace_strings(&event.subgraph_namespace),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_debug(mut rx: mpsc::Receiver<DebugEvent>) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Debug",
+                event.node_id.to_string(),
+                event.timestamp.to_rfc3339(),
+                event.superstep,
+                "debug",
+                serde_json::to_value(&event.info)
+                    .map_err(|err| GraphEngineError::Graph(err.to_string()))?,
+                Self::namespace_strings(&event.subgraph_namespace),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_custom(
+        mut rx: mpsc::Receiver<CustomEvent>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Custom",
+                event.node_id.to_string(),
+                event.timestamp.to_rfc3339(),
+                event.superstep,
+                "custom",
+                event.payload,
+                Self::namespace_strings(&event.subgraph_namespace),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_lifecycle(
+        mut rx: mpsc::Receiver<LifecycleEvent>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(event) = rx.recv().await {
+            let (event_type, node_id) = match &event {
+                LifecycleEvent::SubgraphStarted { node_id, .. } => ("SubgraphStarted", node_id),
+                LifecycleEvent::SubgraphCompleted { node_id, .. } => ("SubgraphCompleted", node_id),
+                LifecycleEvent::SubgraphFailed { node_id, .. } => ("SubgraphFailed", node_id),
+                _ => {
+                    return Err(GraphEngineError::Graph(
+                        "unsupported non-exhaustive LangGraph v3 lifecycle event in phase stream"
+                            .into(),
+                    ));
+                }
+            };
+            drain.push(Self::phase_stream_part(
+                event_type,
+                node_id.to_string(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "lifecycle",
+                serde_json::to_value(&event)
+                    .map_err(|err| GraphEngineError::Graph(err.to_string()))?,
+                Self::namespace_strings(event.subgraph_namespace()),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_subgraphs(
+        mut rx: mpsc::Receiver<SubgraphHandle>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(handle) = rx.recv().await {
+            let full_path = handle
+                .full_path()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            drain.push(Self::phase_stream_part(
+                "Subgraph",
+                handle.node_id().to_string(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "subgraphs",
+                serde_json::json!({
+                    "node_id": handle.node_id().to_string(),
+                    "full_path": full_path,
+                }),
+                Self::namespace_strings(handle.subgraph_namespace()),
+            ));
+        }
+        Ok(drain)
+    }
+
+    async fn drain_v3_messages(
+        mut rx: mpsc::Receiver<ChatModelStream>,
+    ) -> Result<V3PhaseProjectionDrain> {
+        let mut drain = V3PhaseProjectionDrain::default();
+        while let Some(message) = rx.recv().await {
+            drain.push(Self::phase_stream_part(
+                "Messages",
+                message.node_id.to_string(),
+                chrono::Utc::now().to_rfc3339(),
+                0,
+                "messages",
+                serde_json::json!({
+                    "node_id": message.node_id.to_string(),
+                    "stream": "chat_model",
+                }),
+                Vec::new(),
+            ));
+        }
+        Ok(drain)
+    }
+
+    fn phase_stream_part(
+        event_type: impl Into<String>,
+        node_id: impl Into<String>,
+        timestamp: String,
+        superstep: u64,
+        payload_kind: impl Into<String>,
+        payload_json: serde_json::Value,
+        subgraph_namespace: Vec<String>,
+    ) -> PhaseGraphStreamPart {
+        PhaseGraphStreamPart {
+            stream_protocol: PHASE_STREAM_PROTOCOL.to_string(),
+            event_type: event_type.into(),
+            node_id: node_id.into(),
+            timestamp,
+            superstep,
+            payload_kind: payload_kind.into(),
+            payload_json,
+            subgraph_namespace,
+        }
+    }
+
+    fn namespace_strings(
+        namespace: &[langgraph_core::domain::value_objects::NodeId],
+    ) -> Vec<String> {
+        namespace.iter().map(ToString::to_string).collect()
+    }
+
+    fn stream_part_rank(part: &PhaseGraphStreamPart) -> u8 {
+        match part.event_type.as_str() {
+            "Values" => 0,
+            "Updates" => 1,
+            "Task" => 2,
+            "Debug" => 3,
+            "Custom" => 4,
+            "Checkpoint" => 5,
+            "SubgraphStarted" => 6,
+            "SubgraphCompleted" => 7,
+            "SubgraphFailed" => 8,
+            "Subgraph" => 9,
+            "Messages" => 10,
+            "ExecutionComplete" => 11,
+            _ => 12,
+        }
     }
 
     fn phase_state_payload_json(state: &PhaseGraphState) -> serde_json::Value {
@@ -1887,6 +2284,16 @@ impl CompiledPhaseGraph {
         expected_gate: &str,
         expected_state: &PhaseGraphState,
     ) -> Result<()> {
+        if let Some(part) = stream
+            .iter()
+            .find(|part| part.stream_protocol != PHASE_STREAM_PROTOCOL)
+        {
+            return Err(GraphEngineError::Graph(format!(
+                "phase stream for thread {expected_thread_id} contains {} evidence, expected {PHASE_STREAM_PROTOCOL}",
+                part.stream_protocol
+            )));
+        }
+
         let checkpoint_part = stream
             .iter()
             .filter(|part| part.payload_kind == "checkpoints")

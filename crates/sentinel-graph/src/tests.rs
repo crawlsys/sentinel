@@ -16,11 +16,12 @@ use sentinel_domain::workflow::{
 
 use crate::{
     compile_skill_graph_with_checkpointer, next_phase_target, phase_checkpointer,
-    phase_checkpointer_for_config, required_phase_edge_contract, required_phase_node_metadata,
+    required_phase_edge_contract, required_phase_node_metadata,
     required_phase_node_runtime_contract, required_phase_runtime_contract,
     required_phase_schema_contract, PhaseCheckpointerConfig, PhaseGraphCheckpointSnapshot,
     PhaseGraphCheckpointWrite, PhaseGraphEdgeInfo, PhaseGraphErrorEvent, PhaseGraphNodeInfo,
-    PhaseGraphState, PhaseGraphStreamPart, PhaseGraphWriteHistoryEntry, Verdict,
+    PhaseGraphState, PhaseGraphStreamPart, PhaseGraphWriteHistoryEntry, V3PhaseProjectionDrain,
+    Verdict,
 };
 use std::collections::BTreeMap;
 
@@ -279,7 +280,7 @@ fn phase_thread_id_rejects_malformed_tenant_scope() {
 #[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn postgres_phase_saver_request_fails_without_postgres_feature() {
-    let result = phase_checkpointer_for_config(PhaseCheckpointerConfig::Postgres {
+    let result = crate::phase_checkpointer_for_config(PhaseCheckpointerConfig::Postgres {
         database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
         schema: Some("phase_graph".to_string()),
     })
@@ -947,6 +948,13 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
         report
             .stream
             .iter()
+            .all(|part| part.stream_protocol == "v3"),
+        "stream report must expose the LangGraph v3 typed protocol"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
             .any(|part| part.payload_kind == "values"),
         "stream report must include LangGraph values payloads"
     );
@@ -956,6 +964,13 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
             .iter()
             .any(|part| part.payload_kind == "updates"),
         "stream report must include LangGraph update payloads"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
+            .any(|part| part.payload_kind == "tasks"),
+        "stream report must include LangGraph task payloads"
     );
     assert!(
         report.stream.iter().any(|part| {
@@ -985,6 +1000,13 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
     assert!(
         report.stream.iter().all(|part| !part.node_id.is_empty()),
         "every stream part must preserve its LangGraph node id"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
+            .all(|part| part.subgraph_namespace.is_empty()),
+        "top-level phase runs must preserve an empty v3 subgraph namespace"
     );
 
     let writes = graph
@@ -1023,6 +1045,30 @@ async fn run_until_gate_report_captures_langgraph_stream_parts() {
     assert_eq!(
         latest_stream_checkpoint.payload_json["state"],
         serde_json::to_value(&report.state).expect("state serializes")
+    );
+}
+
+#[test]
+fn phase_v3_projection_preserves_task_error_detail() {
+    let mut drain = V3PhaseProjectionDrain::default();
+
+    drain.push(PhaseGraphStreamPart {
+        stream_protocol: "v3".into(),
+        event_type: "Task".into(),
+        node_id: "claim".into(),
+        timestamp: "2026-06-18T00:00:00Z".into(),
+        superstep: 1,
+        payload_kind: "tasks".into(),
+        payload_json: serde_json::json!({
+            "status": "error",
+            "error": "schema rejected missing current_phase"
+        }),
+        subgraph_namespace: Vec::new(),
+    });
+
+    assert_eq!(
+        drain.node_error.as_deref(),
+        Some("phase stream failed at node claim: schema rejected missing current_phase")
     );
 }
 
@@ -1071,8 +1117,29 @@ async fn apply_verdict_report_returns_reentry_stream_for_next_gate() {
         report
             .stream
             .iter()
+            .all(|part| part.stream_protocol == "v3"),
+        "non-terminal verdict report must expose LangGraph v3 stream evidence"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
             .any(|part| part.payload_kind == "values"),
         "non-terminal verdict report must expose LangGraph values stream"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
+            .any(|part| part.payload_kind == "updates"),
+        "non-terminal verdict report must expose LangGraph v3 updates stream"
+    );
+    assert!(
+        report
+            .stream
+            .iter()
+            .any(|part| part.payload_kind == "tasks"),
+        "non-terminal verdict report must expose LangGraph v3 tasks stream"
     );
     assert!(
         report.stream.iter().any(|part| {
@@ -1796,6 +1863,7 @@ fn evidence_checkpoint_stream_part(
     state: &PhaseGraphState,
 ) -> PhaseGraphStreamPart {
     PhaseGraphStreamPart {
+        stream_protocol: "v3".to_string(),
         event_type: "Checkpoint".to_string(),
         node_id: node_id.to_string(),
         timestamp: "2026-01-01T00:00:00Z".to_string(),
@@ -1812,6 +1880,7 @@ fn evidence_checkpoint_stream_part(
             },
             "state": serde_json::to_value(state).expect("state serializes"),
         }),
+        subgraph_namespace: Vec::new(),
     }
 }
 
@@ -1901,6 +1970,30 @@ fn stream_latest_checkpoint_evidence_accepts_matching_payload() {
         &state,
     )
     .expect("matching latest stream checkpoint evidence must pass");
+}
+
+#[test]
+fn stream_latest_checkpoint_evidence_rejects_non_v3_payload() {
+    let skill = "linear";
+    let session_id = "stream-evidence-v2";
+    let state = evidence_state(skill, session_id, &["claim"]);
+    let snapshot =
+        evidence_checkpoint(skill, session_id, "checkpoint-2", 2, state.clone(), "claim");
+    let mut stream = vec![evidence_checkpoint_stream_part(&snapshot, "claim", &state)];
+    stream[0].stream_protocol = "v2".to_string();
+
+    let err = crate::CompiledPhaseGraph::validate_stream_latest_checkpoint_evidence(
+        &stream,
+        &snapshot,
+        &format!("sentinel.phase.{skill}.{session_id}"),
+        "claim",
+        &state,
+    )
+    .expect_err("non-v3 stream evidence must fail");
+    assert!(
+        err.to_string().contains("expected v3"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

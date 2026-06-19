@@ -708,8 +708,8 @@ where
     drain.extend(subgraphs?);
     drain.extend(messages?);
 
-    if let Some(node_id) = drain.node_error {
-        return Err(format!("decision graph stream failed at node {node_id}"));
+    if let Some(error) = drain.node_error {
+        return Err(error);
     }
 
     let state = output.map_err(|err| {
@@ -763,10 +763,10 @@ impl V3ProjectionDrain {
                 .and_then(serde_json::Value::as_str)
                 == Some("error")
         {
-            self.node_error = Some(part.node_id.clone());
+            self.node_error = Some(task_error_message(&part));
         }
         if part.event_type == "SubgraphFailed" {
-            self.node_error = Some(part.node_id.clone());
+            self.node_error = Some(lifecycle_error_message(&part));
         }
         self.stream.push(part);
     }
@@ -777,6 +777,39 @@ impl V3ProjectionDrain {
         }
         self.stream.extend(other.stream);
     }
+}
+
+fn task_error_message(part: &DecisionGraphStreamPart) -> String {
+    part.payload_json
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+        .map(|error| {
+            format!(
+                "decision graph stream failed at node {}: {error}",
+                part.node_id
+            )
+        })
+        .unwrap_or_else(|| format!("decision graph stream failed at node {}", part.node_id))
+}
+
+fn lifecycle_error_message(part: &DecisionGraphStreamPart) -> String {
+    part.payload_json
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.trim().is_empty())
+        .map(|error| {
+            format!(
+                "decision graph stream lifecycle failed at node {}: {error}",
+                part.node_id
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "decision graph stream lifecycle failed at node {}",
+                part.node_id
+            )
+        })
 }
 
 async fn drain_v3_values<S>(

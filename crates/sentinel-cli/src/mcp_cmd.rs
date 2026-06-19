@@ -36,6 +36,7 @@ use sentinel_domain::workflow::{
     DyadVerdicts, SkillSteps, SkillWorkflow, StepStatus, WorkflowState,
 };
 use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
+use sentinel_infrastructure::workflow_api_read_graph::WorkflowApiReadSurface;
 
 use crate::phase_graph_projection::{
     graph_checkpoint_projection, graph_history_projection, graph_introspection,
@@ -371,6 +372,12 @@ fn mcp_proof_read_surface(
     match surface {
         AppMcpProofReadSurface::ProofChain => {
             sentinel_infrastructure::mcp_proof_read_graph::McpProofReadSurface::ProofChain
+        }
+        AppMcpProofReadSurface::WorkflowStatus => {
+            sentinel_infrastructure::mcp_proof_read_graph::McpProofReadSurface::WorkflowStatus
+        }
+        AppMcpProofReadSurface::VerifyChain => {
+            sentinel_infrastructure::mcp_proof_read_graph::McpProofReadSurface::VerifyChain
         }
         AppMcpProofReadSurface::StepProof => {
             sentinel_infrastructure::mcp_proof_read_graph::McpProofReadSurface::StepProof
@@ -3362,6 +3369,16 @@ async fn handle_get_workflow_status(
             );
         }
     }
+    let result =
+        match attach_workflow_read_graph_audit(WorkflowApiReadSurface::Status, result).await {
+            Ok(result) => result,
+            Err(error) => {
+                return JsonRpcResponse::success(
+                    request.id.clone(),
+                    mcp_tool_result(false, langgraph_tool_error(error)),
+                );
+            }
+        };
 
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
@@ -3495,6 +3512,16 @@ async fn handle_get_phase_steps(
             );
         }
     }
+    let result =
+        match attach_workflow_read_graph_audit(WorkflowApiReadSurface::PhaseSteps, result).await {
+            Ok(result) => result,
+            Err(error) => {
+                return JsonRpcResponse::success(
+                    request.id.clone(),
+                    mcp_tool_result(false, langgraph_tool_error(error)),
+                );
+            }
+        };
 
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
@@ -3669,6 +3696,16 @@ async fn handle_get_workflow_progress(
             );
         }
     }
+    let result =
+        match attach_workflow_read_graph_audit(WorkflowApiReadSurface::Progress, result).await {
+            Ok(result) => result,
+            Err(error) => {
+                return JsonRpcResponse::success(
+                    request.id.clone(),
+                    mcp_tool_result(false, langgraph_tool_error(error)),
+                );
+            }
+        };
 
     JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, result))
 }
@@ -3806,6 +3843,22 @@ async fn attach_phase_graph_read_evidence(
     }
 
     Ok(())
+}
+
+async fn attach_workflow_read_graph_audit(
+    surface: WorkflowApiReadSurface,
+    mut response: serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let graph_audit =
+        sentinel_infrastructure::workflow_api_read_graph::workflow_api_read_graph_audit(
+            surface, &response,
+        )
+        .await?;
+    response
+        .as_object_mut()
+        .ok_or_else(|| "workflow read graph audit can only attach to object responses".to_string())?
+        .insert("graph_audit".to_string(), graph_audit);
+    Ok(response)
 }
 
 /// Format MCP tool result in the standard content array format
@@ -5607,6 +5660,8 @@ description = "Fetch"
                 .any(|edge| edge["from"] == "claim" && edge["kind"] == "conditional"),
             "topology must expose LangGraph conditional routing"
         );
+        assert_workflow_read_graph_audit(&data, "progress");
+        assert_workflow_api_read_jsonl(tmp.path(), "progress");
 
         match prev_sentinel_home {
             Some(v) => std::env::set_var("SENTINEL_HOME", v),
@@ -5699,6 +5754,8 @@ description = "Claim"
                     && write["value_json"]["completed_phases"] == serde_json::json!(["claim"])),
             "workflow progress must expose LangGraph state-channel write evidence: {data}"
         );
+        assert_workflow_read_graph_audit(&data, "progress");
+        assert_workflow_api_read_jsonl(tmp.path(), "progress");
 
         match prev_sentinel_home {
             Some(v) => std::env::set_var("SENTINEL_HOME", v),
@@ -5919,6 +5976,8 @@ description = "Claim"
                     && write["value_json"]["step_states"][0]["step_id"] == "0.1"),
             "phase steps must expose LangGraph state-channel write evidence: {data}"
         );
+        assert_workflow_read_graph_audit(&data, "phase_steps");
+        assert_workflow_api_read_jsonl(tmp.path(), "phase_steps");
 
         match prev_sentinel_home {
             Some(v) => std::env::set_var("SENTINEL_HOME", v),
@@ -6611,6 +6670,7 @@ description = "Claim"
         assert_eq!(data["skill"], "linear");
         assert_eq!(data["current_phase"], 0);
         assert!(data["completed_phases"].as_array().unwrap().is_empty());
+        assert_workflow_read_graph_audit(&data, "status");
         assert_eq!(data["graph_state"], data["latest_checkpoint"]["state"]);
         assert!(
             data["graph_topology"]["thread_id"]
@@ -6654,6 +6714,7 @@ description = "Claim"
                 .all(|phase| phase != "forged"),
             "workflow status must ignore stale local workflow fields: {data}"
         );
+        assert_workflow_api_read_jsonl(tmp.path(), "status");
 
         match prev_sentinel_home {
             Some(v) => std::env::set_var("SENTINEL_HOME", v),
@@ -6713,6 +6774,7 @@ description = "Claim"
         assert_eq!(data["workflow_authority"], "langgraph");
         assert_eq!(data["skill"], "linear");
         assert_eq!(data["status"], "no_checkpoint");
+        assert_workflow_read_graph_audit(&data, "status");
         assert!(data["graph_state"].is_null());
         assert!(data.get("latest_checkpoint").is_none());
         assert!(data.get("graph_history").is_none());
@@ -7375,6 +7437,36 @@ description = "Fetch"
             .unwrap_or("");
         let data: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
         (data, is_error)
+    }
+
+    fn assert_workflow_read_graph_audit(data: &serde_json::Value, surface: &str) {
+        assert_eq!(data["graph_audit"]["workflow_authority"], "langgraph");
+        assert_eq!(data["graph_audit"]["graph"], "workflow_api_read");
+        assert_eq!(data["graph_audit"]["surface"], surface);
+        assert_eq!(data["graph_audit"]["decision"], "verified");
+        assert!(
+            data["graph_audit"]["authorization_checkpoint"]
+                .as_str()
+                .is_some_and(|checkpoint| checkpoint.contains('#')),
+            "workflow read graph audit must expose checkpoint evidence: {data}"
+        );
+    }
+
+    fn assert_workflow_api_read_jsonl(sentinel_home: &Path, surface: &str) {
+        let graph_rows = fs::read_to_string(
+            sentinel_home
+                .join(".claude")
+                .join("sentinel")
+                .join("metrics")
+                .join("workflow-api-read.graph-runs.jsonl"),
+        )
+        .expect("workflow API read graph audit rows");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"graph\":\"workflow_api_read\""));
+        assert!(
+            graph_rows.contains(&format!("\"surface\":\"{surface}\"")),
+            "workflow API read graph rows must include surface {surface}: {graph_rows}"
+        );
     }
 
     #[tokio::test]

@@ -562,10 +562,10 @@ fn git_hygiene_state_schema() -> StateSchema<GitHygieneState> {
         })
 }
 
-async fn classify_node(state: GitHygieneState) -> Result<GitHygieneState, NodeError> {
-    let mut next = state;
+fn classify_node(state: &GitHygieneState) -> GitHygieneState {
+    let mut next = state.clone();
     next.decision = expected_decision(&next);
-    Ok(next)
+    next
 }
 
 pub async fn build_git_hygiene_graph() -> Result<GitHygieneGraph, String> {
@@ -600,29 +600,29 @@ async fn build_git_hygiene_graph_with_checkpointer(
     let builder = StateGraphBuilder::<GitHygieneState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_node_with_config(
             CLASSIFY,
-            |s: GitHygieneState| async move {
+            |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", CLASSIFY, &s.identifier)?;
-                classify_node(s).await
+                Ok(classify_node(s))
             },
             node_config(CLASSIFY, checkpointer_backend, checkpointer_scope),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             ALLOW,
-            |s: GitHygieneState| async move {
+            |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", ALLOW, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = GitHygieneDecision::Allow;
                 Ok::<_, NodeError>(next)
             },
             node_config(ALLOW, checkpointer_backend, checkpointer_scope),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             DENY_PROTECTED_BRANCH,
-            |s: GitHygieneState| async move {
+            |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", DENY_PROTECTED_BRANCH, &s.identifier)?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = GitHygieneDecision::DenyProtectedBranch;
                 Ok::<_, NodeError>(next)
             },
@@ -632,15 +632,15 @@ async fn build_git_hygiene_graph_with_checkpointer(
                 checkpointer_scope,
             ),
         )
-        .add_async_node_with_config(
+        .add_node_with_config(
             DENY_UNCOMMITTED_FILE_LIMIT,
-            |s: GitHygieneState| async move {
+            |s: &GitHygieneState| {
                 emit_decision_node_event(
                     "git_hygiene",
                     DENY_UNCOMMITTED_FILE_LIMIT,
                     &s.identifier,
                 )?;
-                let mut next = s;
+                let mut next = s.clone();
                 next.decision = GitHygieneDecision::DenyUncommittedFileLimit;
                 Ok::<_, NodeError>(next)
             },
@@ -842,6 +842,14 @@ mod tests {
             .unwrap();
         assert_eq!(run.state.decision, GitHygieneDecision::Allow);
         assert!(run.state.file_path_sha256.is_none());
+    }
+
+    #[test]
+    fn git_hygiene_state_serializes_without_recursion() {
+        let state =
+            GitHygieneState::from_evaluation("git-hygiene-serialization", &clean_evaluation());
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        assert_eq!(serialized["identifier"], "git-hygiene-serialization");
     }
 
     #[tokio::test]

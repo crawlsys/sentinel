@@ -4,7 +4,6 @@
 //! GET /api/workflows/:skill/status — current workflow state for a skill
 
 use std::collections::BTreeSet;
-use std::io::Write as _;
 
 use axum::{
     extract::{Path, State},
@@ -418,97 +417,10 @@ async fn run_workflow_api_read_graph_audit(
     surface: WorkflowApiReadSurface,
     response: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    let response_hash = sentinel_infrastructure::workflow_api_read_graph::sha256_json(response);
-    let surface_label =
-        sentinel_infrastructure::workflow_api_read_graph::workflow_api_read_surface_label(surface);
-    let identifier = workflow_api_read_identifier(surface_label, response, &response_hash);
-    let state =
-        sentinel_infrastructure::workflow_api_read_graph::WorkflowApiReadState::from_response(
-            surface, identifier, response,
-        );
-    let run =
-        sentinel_infrastructure::workflow_api_read_graph::run_workflow_api_read_decision_report(
-            graph, state,
-        )
-        .await
-        .map_err(|e| format!("run workflow API read graph: {e}"))?;
-    let authorization = run
-        .workflow_api_read_authorization()
-        .map_err(|e| format!("workflow API read graph authorization failed: {e}"))?
-        .ok_or_else(|| "workflow API read graph produced no terminal checkpoint".to_string())?;
-    let graph_runs = sentinel_infrastructure::paths::sentinel_root()
-        .join("metrics")
-        .join("workflow-api-read.graph-runs.jsonl");
-    if let Some(parent) = graph_runs.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "create workflow API read graph audit dir {}: {e}",
-                parent.display()
-            )
-        })?;
-    }
-    let row = serde_json::json!({
-        "workflow_authority": "langgraph",
-        "graph": "workflow_api_read",
-        "surface": surface_label,
-        "response_sha256": response_hash,
-        "decision": sentinel_infrastructure::workflow_api_read_graph::
-            workflow_api_read_decision_label(authorization.decision()),
-        "authorization_checkpoint": authorization.checkpoint_ref(),
-        "thread_id": run.thread_id.clone(),
-        "run": run,
-    });
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&graph_runs)
-        .map_err(|e| {
-            format!(
-                "open workflow API read graph audit {}: {e}",
-                graph_runs.display()
-            )
-        })?;
-    serde_json::to_writer(&mut file, &row).map_err(|e| {
-        format!(
-            "write workflow API read graph audit {}: {e}",
-            graph_runs.display()
-        )
-    })?;
-    file.write_all(b"\n").map_err(|e| {
-        format!(
-            "terminate workflow API read graph audit {}: {e}",
-            graph_runs.display()
-        )
-    })?;
-    Ok(serde_json::json!({
-        "workflow_authority": "langgraph",
-        "graph": "workflow_api_read",
-        "surface": surface_label,
-        "graph_runs_path": graph_runs,
-        "response_sha256": row["response_sha256"].clone(),
-        "decision": row["decision"].clone(),
-        "authorization_checkpoint": authorization.checkpoint_ref(),
-        "thread_id": row["thread_id"].clone(),
-        "run": row["run"].clone(),
-    }))
-}
-
-fn workflow_api_read_identifier(
-    surface_label: &str,
-    response: &serde_json::Value,
-    response_hash: &str,
-) -> String {
-    let id = if let Some(skill) = response.get("skill").and_then(serde_json::Value::as_str) {
-        format!("skill-present-true:{skill}")
-    } else if let Some(session_id) = response
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-    {
-        format!("skill-present-false:session-id-present-true:{session_id}")
-    } else {
-        "skill-present-false:session-id-present-false".to_string()
-    };
-    format!("{surface_label}-{id}:response-{response_hash}")
+    sentinel_infrastructure::workflow_api_read_graph::workflow_api_read_graph_audit_with_graph(
+        graph, surface, response,
+    )
+    .await
 }
 
 fn workflow_error_json(error: impl Into<String>) -> serde_json::Value {
@@ -1202,11 +1114,12 @@ description = "Claim"
 
     #[test]
     fn workflow_api_identifier_records_absent_keys_explicitly() {
-        let identifier = workflow_api_read_identifier(
-            "error",
-            &serde_json::json!({"error": "workflow config load failed"}),
-            "abc123",
-        );
+        let identifier =
+            sentinel_infrastructure::workflow_api_read_graph::workflow_api_read_identifier(
+                "error",
+                &serde_json::json!({"error": "workflow config load failed"}),
+                "abc123",
+            );
 
         assert_eq!(
             identifier,

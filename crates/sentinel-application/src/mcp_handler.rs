@@ -75,6 +75,8 @@ pub struct AggregateGraphAudit {
 #[serde(rename_all = "snake_case")]
 pub enum McpProofReadSurface {
     ProofChain,
+    WorkflowStatus,
+    VerifyChain,
     StepProof,
     StepChain,
     ActiveStep,
@@ -85,6 +87,8 @@ impl McpProofReadSurface {
     pub fn label(self) -> &'static str {
         match self {
             Self::ProofChain => "proof_chain",
+            Self::WorkflowStatus => "workflow_status",
+            Self::VerifyChain => "verify_chain",
             Self::StepProof => "step_proof",
             Self::StepChain => "step_chain",
             Self::ActiveStep => "active_step",
@@ -1162,15 +1166,31 @@ impl McpHandler {
             None => return McpToolResult::err("Missing 'skill' argument"),
         };
 
-        let state = self.state.read().await;
-        match state.graph_workflow(skill) {
-            Some(wf) => match serde_json::to_value(wf) {
-                Ok(v) => McpToolResult::ok(v),
-                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
-            },
-            None => McpToolResult::err(format!(
-                "No LangGraph-projected workflow state for skill '{skill}'"
-            )),
+        let workflow_state = {
+            let state = self.state.read().await;
+            match state.graph_workflow(skill) {
+                Some(wf) => wf.clone(),
+                None => {
+                    return McpToolResult::err(format!(
+                        "No LangGraph-projected workflow state for skill '{skill}'"
+                    ));
+                }
+            }
+        };
+        let payload = match serde_json::to_value(&workflow_state) {
+            Ok(v) => v,
+            Err(e) => return McpToolResult::err(format!("Serialization error: {e}")),
+        };
+        match self
+            .attach_mcp_proof_read_authority(
+                McpProofReadSurface::WorkflowStatus,
+                payload,
+                &workflow_state,
+            )
+            .await
+        {
+            Ok(payload) => McpToolResult::ok(payload),
+            Err(err) => err,
         }
     }
 
@@ -1180,11 +1200,44 @@ impl McpHandler {
             None => return McpToolResult::err("Missing 'skill' argument"),
         };
 
+        let workflow_state = {
+            let state = self.state.read().await;
+            match require_graph_workflow_projection(&state, skill, "sentinel__verify_chain") {
+                Ok(workflow_state) => workflow_state.clone(),
+                Err(err) => return err,
+            }
+        };
         match self.proof_engine.verify_chain(skill).await {
-            Ok(verification) => match serde_json::to_value(&verification) {
-                Ok(v) => McpToolResult::ok(v),
-                Err(e) => McpToolResult::err(format!("Serialization error: {e}")),
-            },
+            Ok(verification) => {
+                let mut payload = match serde_json::to_value(&verification) {
+                    Ok(v) => v,
+                    Err(e) => return McpToolResult::err(format!("Serialization error: {e}")),
+                };
+                let Some(obj) = payload.as_object_mut() else {
+                    return McpToolResult::err(
+                        "Serialization error: chain verification did not serialize to an object",
+                    );
+                };
+                obj.insert(
+                    "skill".to_string(),
+                    serde_json::json!(workflow_state.skill.clone()),
+                );
+                obj.insert(
+                    "session_id".to_string(),
+                    serde_json::json!(workflow_state.session_id.clone()),
+                );
+                match self
+                    .attach_mcp_proof_read_authority(
+                        McpProofReadSurface::VerifyChain,
+                        payload,
+                        &workflow_state,
+                    )
+                    .await
+                {
+                    Ok(payload) => McpToolResult::ok(payload),
+                    Err(err) => err,
+                }
+            }
             Err(e) => McpToolResult::err(format!("Verification failed: {e}")),
         }
     }
@@ -4681,6 +4734,64 @@ mod step_tools_tests {
     }
 
     #[tokio::test]
+    async fn get_workflow_status_returns_mcp_read_graph_audit() {
+        let handler = handler_with_chain().await;
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__get_workflow_status".into(),
+                arguments: serde_json::json!({"skill": "linear"}),
+            })
+            .await;
+
+        assert!(result.success, "error: {:?}", result.error);
+        let payload = result.content;
+        assert_eq!(
+            payload.get("workflow_authority").and_then(|v| v.as_str()),
+            Some("langgraph")
+        );
+        assert_eq!(
+            payload.get("skill").and_then(|v| v.as_str()),
+            Some("linear")
+        );
+        assert!(
+            payload.get("current_phase").is_some(),
+            "workflow status must expose graph workflow state: {payload}"
+        );
+        assert_mcp_proof_read_graph_audit(&payload, "workflow_status");
+    }
+
+    #[tokio::test]
+    async fn verify_chain_returns_mcp_read_graph_audit() {
+        let handler = handler_with_chain().await;
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__verify_chain".into(),
+                arguments: serde_json::json!({"skill": "linear"}),
+            })
+            .await;
+
+        assert!(result.success, "error: {:?}", result.error);
+        let payload = result.content;
+        assert_eq!(
+            payload.get("workflow_authority").and_then(|v| v.as_str()),
+            Some("langgraph")
+        );
+        assert!(
+            payload.get("valid").and_then(|v| v.as_bool()).is_some(),
+            "verify_chain must expose the canonical verification result: {payload}"
+        );
+        assert_eq!(
+            payload.get("phases_verified").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            payload.get("steps_verified").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_mcp_proof_read_graph_audit(&payload, "verify_chain");
+    }
+
+    #[tokio::test]
     async fn get_step_proof_returns_matching_step() {
         let handler = handler_with_chain().await;
         let result = handler
@@ -5486,6 +5597,19 @@ mod step_tools_tests {
         let result = handler
             .handle(McpToolCall {
                 name: "sentinel__get_step_chain".into(),
+                arguments: serde_json::json!({"skill": "linear"}),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|err| err.contains("MCP proof read LangGraph audit port")));
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__verify_chain".into(),
                 arguments: serde_json::json!({"skill": "linear"}),
             })
             .await;
