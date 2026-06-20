@@ -3402,17 +3402,12 @@ async fn handle_get_workflow_status(
     } else {
         serde_json::json!({
             "skill": skill.clone(),
-            "workflow_authority": "langgraph",
             "status": "no_checkpoint",
             "checkpoint": null,
             "graph_state": null,
         })
     };
     if let Some(obj) = result.as_object_mut() {
-        obj.insert(
-            "workflow_authority".to_string(),
-            serde_json::json!("langgraph"),
-        );
         if let Some(topology) = graph_topology {
             obj.insert("graph_topology".to_string(), serde_json::json!(topology));
         }
@@ -3549,7 +3544,6 @@ async fn handle_get_phase_steps(
     let total = steps_list.len();
 
     let mut result = serde_json::json!({
-        "workflow_authority": "langgraph",
         "skill": skill,
         "phase_id": phase_id,
         "steps": steps_list,
@@ -3730,7 +3724,6 @@ async fn handle_get_workflow_progress(
     };
 
     let mut result = serde_json::json!({
-        "workflow_authority": "langgraph",
         "skill": skill,
         "phases": phases_list,
         "overall": {
@@ -3912,10 +3905,14 @@ async fn attach_workflow_read_graph_audit(
             surface, &response,
         )
         .await?;
-    response
-        .as_object_mut()
-        .ok_or_else(|| "workflow read graph audit can only attach to object responses".to_string())?
-        .insert("graph_audit".to_string(), graph_audit);
+    let obj = response.as_object_mut().ok_or_else(|| {
+        "workflow read graph audit can only attach to object responses".to_string()
+    })?;
+    obj.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_audit".to_string(), graph_audit);
     Ok(response)
 }
 

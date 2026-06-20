@@ -3,7 +3,8 @@
 //! Workflow API responses expose phase-graph topology, checkpoint history, and
 //! write history. This graph checkpoints the rendered API response itself so
 //! the `workflow_authority = "langgraph"` claim is backed by durable
-//! LangGraph evidence at the API boundary.
+//! LangGraph evidence at the API boundary before callers stamp it onto the
+//! rendered response.
 
 use std::{io::Write as _, time::Duration};
 
@@ -46,6 +47,7 @@ pub struct WorkflowApiReadState {
     pub surface: WorkflowApiReadSurface,
     pub response_sha256: String,
     pub response_len: u64,
+    pub workflow_authority_present: bool,
     pub workflow_authority_langgraph: bool,
     pub workflows_count: Option<u64>,
     pub child_authority_count: u64,
@@ -83,6 +85,7 @@ impl WorkflowApiReadState {
             surface,
             response_sha256: hex::encode(Sha256::digest(&response_bytes)),
             response_len: response_bytes.len() as u64,
+            workflow_authority_present: response.get("workflow_authority").is_some(),
             workflow_authority_langgraph: response
                 .get("workflow_authority")
                 .and_then(Value::as_str)
@@ -260,6 +263,7 @@ fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
                 "surface",
                 "response_sha256",
                 "response_len",
+                "workflow_authority_present",
                 "workflow_authority_langgraph",
                 "workflows_count",
                 "child_authority_count",
@@ -287,6 +291,7 @@ fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
                 },
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
+                "workflow_authority_present": { "type": "boolean" },
                 "workflow_authority_langgraph": { "type": "boolean" },
                 "workflows_count": {
                     "anyOf": [
@@ -335,9 +340,9 @@ fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
                     "workflow API response digest must identify a serialized response".to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph && !state.error_present {
+            if state.workflow_authority_present && !state.workflow_authority_langgraph {
                 return Err(StateError::ValidationFailed(
-                    "non-error workflow API response must declare LangGraph workflow authority"
+                    "workflow API response must not declare non-LangGraph workflow authority"
                         .to_string(),
                 ));
             }
@@ -683,7 +688,6 @@ mod tests {
     fn item_response() -> Value {
         serde_json::json!({
             "skill": "linear",
-            "workflow_authority": "langgraph",
             "status": "no_checkpoint",
             "graph_topology": topology(),
             "graph_checkpoints": [],
@@ -694,6 +698,10 @@ mod tests {
 
     fn audited_item_response() -> Value {
         let mut item = item_response();
+        item.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
         item.as_object_mut().unwrap().insert(
             "graph_audit".to_string(),
             serde_json::json!({
@@ -706,7 +714,6 @@ mod tests {
 
     fn phase_steps_response() -> Value {
         serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "phase_id": "claim",
             "steps": [{
@@ -725,7 +732,6 @@ mod tests {
 
     fn progress_response() -> Value {
         serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "phases": [{
                 "id": "claim",
@@ -760,6 +766,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.state.decision, WorkflowApiReadDecision::Verified);
+        assert!(!run.state.workflow_authority_present);
         assert!(run
             .workflow_api_read_authorization()
             .unwrap()
@@ -782,6 +789,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.state.decision, WorkflowApiReadDecision::Verified);
+        assert!(!run.state.workflow_authority_present);
         assert_eq!(run.state.steps_count, Some(1));
         assert!(run
             .workflow_api_read_authorization()
@@ -805,6 +813,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.state.decision, WorkflowApiReadDecision::Verified);
+        assert!(!run.state.workflow_authority_present);
         assert_eq!(run.state.phases_count, Some(1));
         assert!(run.state.overall_present);
         assert!(run
@@ -839,7 +848,6 @@ mod tests {
             .await
             .unwrap();
         let response = serde_json::json!({
-            "workflow_authority": "langgraph",
             "workflows": [audited_item_response()]
         });
         let state =
@@ -857,9 +865,13 @@ mod tests {
         let graph = build_workflow_api_read_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
+        let mut child = item_response();
+        child.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
         let response = serde_json::json!({
-            "workflow_authority": "langgraph",
-            "workflows": [item_response()]
+            "workflows": [child]
         });
         let state = WorkflowApiReadState::from_response(
             WorkflowApiReadSurface::List,
@@ -870,5 +882,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("graph audit"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_explicit_non_langgraph_workflow_authority() {
+        let graph = build_workflow_api_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut response = phase_steps_response();
+        response.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("legacy"),
+        );
+        let state = WorkflowApiReadState::from_response(
+            WorkflowApiReadSurface::PhaseSteps,
+            "phase-steps-forged-authority",
+            &response,
+        );
+        let err = run_workflow_api_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("non-LangGraph workflow authority"),
+            "unexpected error: {err}"
+        );
     }
 }
