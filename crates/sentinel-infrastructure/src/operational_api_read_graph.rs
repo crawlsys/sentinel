@@ -58,6 +58,8 @@ pub struct OperationalApiReadState {
     pub response_sha256: String,
     pub response_len: u64,
     pub response_object: bool,
+    pub graph_authority_present: bool,
+    pub graph_authority_langgraph: bool,
     pub root_health_present: bool,
     pub scan_snapshot_present: bool,
     pub validation_report_present: bool,
@@ -103,6 +105,9 @@ impl OperationalApiReadState {
             response_sha256: sha256_bytes(&response_bytes),
             response_len: response_bytes.len() as u64,
             response_object: response.as_object().is_some(),
+            graph_authority_present: response.get("graph_authority").is_some(),
+            graph_authority_langgraph: response.get("graph_authority").and_then(Value::as_str)
+                == Some("langgraph"),
             root_health_present: root_health_present(response),
             scan_snapshot_present: nonempty_string_field(response, "version")
                 && nested_counts_present
@@ -385,6 +390,8 @@ fn operational_api_read_state_schema() -> StateSchema<OperationalApiReadState> {
                 "response_sha256",
                 "response_len",
                 "response_object",
+                "graph_authority_present",
+                "graph_authority_langgraph",
                 "root_health_present",
                 "scan_snapshot_present",
                 "validation_report_present",
@@ -430,6 +437,8 @@ fn operational_api_read_state_schema() -> StateSchema<OperationalApiReadState> {
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
                 "response_object": { "type": "boolean" },
+                "graph_authority_present": { "type": "boolean" },
+                "graph_authority_langgraph": { "type": "boolean" },
                 "root_health_present": { "type": "boolean" },
                 "scan_snapshot_present": { "type": "boolean" },
                 "validation_report_present": { "type": "boolean" },
@@ -487,6 +496,12 @@ fn operational_api_read_state_schema() -> StateSchema<OperationalApiReadState> {
             if !state.response_object {
                 return Err(StateError::ValidationFailed(
                     "operational API read response must be a JSON object".to_string(),
+                ));
+            }
+            if state.graph_authority_present {
+                return Err(StateError::ValidationFailed(
+                    "operational API read response must not declare graph authority before read graph audit"
+                        .to_string(),
                 ));
             }
             match state.surface {
@@ -853,7 +868,6 @@ mod tests {
 
     fn config_error_response() -> Value {
         serde_json::json!({
-            "graph_authority": "langgraph",
             "error": "authoritative workflows.toml load failed: missing phases",
             "hooksTomlExists": true,
             "workflowsTomlExists": true
@@ -1047,5 +1061,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("counts response"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_explicit_graph_authority_before_read_audit() {
+        let graph = build_operational_api_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut response = config_response();
+        response.as_object_mut().unwrap().insert(
+            "graph_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
+        let state = OperationalApiReadState::from_response(
+            OperationalApiReadSurface::Config,
+            "forged-config-authority",
+            &response,
+        );
+        let err = run_operational_api_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("before read graph audit"), "{err}");
     }
 }

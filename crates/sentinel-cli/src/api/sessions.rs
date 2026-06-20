@@ -406,7 +406,6 @@ fn authoritative_config_json() -> std::result::Result<serde_json::Value, String>
     let workflows = sentinel_infrastructure::config::load_workflows(&config)
         .map_err(|e| format!("authoritative workflows.toml load failed: {e:#}"))?;
     Ok(serde_json::json!({
-        "graph_authority": "langgraph",
         "hooksTomlExists": hooks_path.exists(),
         "workflowsTomlExists": workflows_path.exists(),
         "hookCount": hooks.len(),
@@ -864,6 +863,10 @@ description = "Claim"
         assert_eq!(config["workflows"][0]["skill"], "linear");
         assert_eq!(config["graph_authority"], "langgraph");
         assert_eq!(config["graph_audit"]["graph"], "operational_api_read");
+        assert_eq!(
+            config["graph_audit"]["run"]["state"]["graph_authority_present"],
+            false
+        );
     }
 
     #[tokio::test]
@@ -899,6 +902,10 @@ skill = "linear"
             .expect("config errors should still be returned with graph audit");
 
         assert_eq!(config["graph_authority"], "langgraph");
+        assert_eq!(
+            config["graph_audit"]["run"]["state"]["graph_authority_present"],
+            false
+        );
         assert_eq!(config["hooksTomlExists"], true);
         assert_eq!(config["workflowsTomlExists"], true);
         assert!(config
