@@ -198,8 +198,8 @@ fn decision_checkpointer_backend_from_env() -> Result<String, String> {
 
     match backend.as_str() {
         "sqlite" => Ok("sqlite".to_string()),
-        "postgres" | "postgresql" => Ok("postgres".to_string()),
-        "redis" | "redis-checkpoint" => Ok("redis".to_string()),
+        "postgres" => Ok("postgres".to_string()),
+        "redis" => Ok("redis".to_string()),
         other => Err(format!(
             "unsupported decision graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
             DecisionGraphCheckpointerConfig::BACKEND_ENV
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn decision_graph_checkpointer_config_accepts_redis_without_ttl() {
         with_decision_graph_checkpointer_env_full(
-            Some("redis-checkpoint"),
+            Some("redis"),
             None,
             None,
             Some("redis://localhost:6379/1"),
@@ -936,6 +936,43 @@ mod tests {
                     DecisionGraphCheckpointerConfig::from_env("ignored").expect("redis config");
                 assert_eq!(config.backend_name(), "redis");
                 assert_eq!(config.scope_name(), "ttl_seconds:none");
+            },
+        );
+    }
+
+    #[test]
+    fn decision_graph_checkpointer_config_rejects_backend_aliases_without_normalization() {
+        with_decision_graph_checkpointer_env_full(
+            Some("redis-checkpoint"),
+            None,
+            None,
+            Some("redis://localhost:6379/1"),
+            None,
+            Some("legatus_ai"),
+            || {
+                let err = DecisionGraphCheckpointerConfig::from_env("severity")
+                    .expect_err("redis-checkpoint alias must be rejected");
+
+                assert!(err.contains(
+                    "unsupported decision graph checkpointer backend 'redis-checkpoint'"
+                ));
+                assert!(err.contains("expected sqlite, postgres, or redis"));
+            },
+        );
+
+        with_decision_graph_checkpointer_env(
+            Some("postgresql"),
+            Some("postgres://sentinel:sentinel@localhost/sentinel"),
+            None,
+            Some("legatus_ai"),
+            || {
+                let err = DecisionGraphCheckpointerConfig::from_env("severity")
+                    .expect_err("postgresql alias must be rejected");
+
+                assert!(
+                    err.contains("unsupported decision graph checkpointer backend 'postgresql'")
+                );
+                assert!(err.contains("expected sqlite, postgres, or redis"));
             },
         );
     }
@@ -1134,7 +1171,7 @@ mod tests {
     #[test]
     fn decision_graph_run_thread_id_uses_tenant_for_hosted_redis_backend() {
         with_decision_graph_checkpointer_env_full(
-            Some("redis-checkpoint"),
+            Some("redis"),
             None,
             None,
             Some("redis://localhost:6379/0"),
@@ -1159,26 +1196,24 @@ mod tests {
     }
 
     #[test]
-    fn decision_graph_run_thread_id_uses_tenant_for_hosted_postgres_alias() {
+    fn decision_graph_run_thread_id_rejects_postgres_alias_without_normalization() {
         with_decision_graph_checkpointer_env(
             Some("postgresql"),
             Some("postgres://sentinel:sentinel@localhost/sentinel"),
             None,
             Some("legatus_ai"),
             || {
-                let thread_id = run_thread_id(
+                let err = run_thread_id(
                     "severity",
                     "SEN-123",
                     &serde_json::json!({"ticket": "SEN-123"}),
                 )
-                .expect("postgres thread id");
+                .expect_err("postgresql alias must be rejected");
 
-                assert!(thread_id.starts_with("tenant:legatus_ai:severity:id-"));
-                assert!(thread_id.contains(":input-"));
                 assert!(
-                    !thread_id.contains("SEN-123"),
-                    "hosted decision graph thread ids must hash raw identifiers: {thread_id}"
+                    err.contains("unsupported decision graph checkpointer backend 'postgresql'")
                 );
+                assert!(err.contains("expected sqlite, postgres, or redis"));
             },
         );
     }

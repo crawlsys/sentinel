@@ -645,8 +645,8 @@ fn phase_checkpointer_backend_from_env() -> Result<String> {
 
     match backend.as_str() {
         "sqlite" => Ok("sqlite".to_string()),
-        "postgres" | "postgresql" => Ok("postgres".to_string()),
-        "redis" | "redis-checkpoint" => Ok("redis".to_string()),
+        "postgres" => Ok("postgres".to_string()),
+        "redis" => Ok("redis".to_string()),
         other => Err(GraphEngineError::Checkpointer(format!(
             "unsupported phase graph checkpointer backend '{other}' from {}; expected sqlite, postgres, or redis",
             PhaseCheckpointerConfig::BACKEND_ENV
@@ -1086,6 +1086,11 @@ fn validate_phase_graph_state(
     if state.session_id.trim().is_empty() {
         return Err(validation_failed("session_id must not be empty"));
     }
+    sentinel_domain::langgraph_thread::validate_thread_id_component(
+        &state.session_id,
+        "session_id",
+    )
+    .map_err(validation_failed)?;
     if state.phase_order != expected_phase_order {
         return Err(validation_failed(
             "phase_order must match the compiled workflow exactly",
@@ -1758,6 +1763,50 @@ pub struct CompiledPhaseGraph {
 }
 
 impl CompiledPhaseGraph {
+    fn validate_requested_skill(&self, skill: &str) -> Result<()> {
+        if skill == self.workflow.skill {
+            return Ok(());
+        }
+        Err(GraphEngineError::Graph(format!(
+            "phase graph compiled for skill '{}' cannot be used as skill '{skill}'",
+            self.workflow.skill
+        )))
+    }
+
+    fn required_phase_ids(&self) -> Vec<String> {
+        self.workflow
+            .phases
+            .iter()
+            .filter(|phase| phase.required)
+            .map(|phase| phase.id.clone())
+            .collect()
+    }
+
+    fn validate_phase_state_for_session(
+        &self,
+        session_id: &str,
+        state: &PhaseGraphState,
+    ) -> Result<()> {
+        if state.session_id != session_id {
+            return Err(GraphEngineError::Graph(format!(
+                "phase graph state session mismatch for skill '{}': expected '{session_id}', got '{}'",
+                self.workflow.skill, state.session_id
+            )));
+        }
+        validate_phase_graph_state(
+            state,
+            &self.workflow.skill,
+            &self.phase_ids,
+            &self.required_phase_ids(),
+        )
+        .map_err(|err| {
+            GraphEngineError::Graph(format!(
+                "phase graph checkpoint state invalid for skill '{}' session '{session_id}': {err}",
+                self.workflow.skill
+            ))
+        })
+    }
+
     fn thread_id(&self, session_id: &str) -> Result<String> {
         sentinel_domain::langgraph_thread::phase_thread_id(
             &self.workflow.skill,
@@ -1888,6 +1937,7 @@ impl CompiledPhaseGraph {
     /// # Errors
     /// Returns [`GraphEngineError`] on checkpointer failure.
     pub async fn load_or_init(&self, skill: &str, session_id: &str) -> Result<PhaseGraphState> {
+        self.validate_requested_skill(skill)?;
         if let Some(existing) = self.load_latest(session_id).await? {
             return Ok(existing);
         }
@@ -1932,6 +1982,7 @@ impl CompiledPhaseGraph {
         session_id: &str,
         input: PhaseGraphState,
     ) -> Result<PhaseGraphRunReport> {
+        self.validate_phase_state_for_session(session_id, &input)?;
         let expected_gate = input
             .current_phase
             .and_then(|idx| self.phase_ids.get(idx).cloned())
@@ -2866,6 +2917,7 @@ impl CompiledPhaseGraph {
         phase_id: &str,
         passed: bool,
     ) -> Result<PhaseGraphRunReport> {
+        self.validate_requested_skill(skill)?;
         let idx = self
             .phase_ids
             .iter()
@@ -2966,6 +3018,7 @@ impl CompiledPhaseGraph {
         status: StepStatus,
         summary: Option<String>,
     ) -> Result<PhaseGraphState> {
+        self.validate_requested_skill(skill)?;
         if !self.phase_ids.iter().any(|id| id == phase_id) {
             return Err(GraphEngineError::UnknownPhase {
                 skill: skill.to_string(),
@@ -3021,6 +3074,7 @@ impl CompiledPhaseGraph {
         phase_id: &str,
         verdicts: DyadVerdicts,
     ) -> Result<PhaseGraphState> {
+        self.validate_requested_skill(skill)?;
         if !self.phase_ids.iter().any(|id| id == phase_id) {
             return Err(GraphEngineError::UnknownPhase {
                 skill: skill.to_string(),
@@ -3063,6 +3117,7 @@ impl CompiledPhaseGraph {
         state: PhaseGraphState,
         as_node: &str,
     ) -> Result<PhaseGraphState> {
+        self.validate_phase_state_for_session(session_id, &state)?;
         let thread_id = self.thread_id(session_id)?;
         self.inner
             .update_state_as_node(&thread_id, state.clone(), as_node)
@@ -3110,7 +3165,20 @@ impl CompiledPhaseGraph {
         // `get_state_history` does not guarantee ordering; sort by the
         // monotonic per-thread step number so oldest is first / newest is last.
         snapshots.sort_by_key(|s| s.metadata().step_number());
-        Ok(snapshots.into_iter().map(Self::snapshot_view).collect())
+        let snapshots = snapshots
+            .into_iter()
+            .map(Self::snapshot_view)
+            .collect::<Vec<_>>();
+        for snapshot in &snapshots {
+            if snapshot.thread_id != thread_id {
+                return Err(GraphEngineError::Graph(format!(
+                    "phase graph checkpoint history for skill '{}' contains thread {}, expected {thread_id}",
+                    self.workflow.skill, snapshot.thread_id
+                )));
+            }
+            self.validate_phase_state_for_session(session_id, &snapshot.state)?;
+        }
+        Ok(snapshots)
     }
 
     fn snapshot_view(
@@ -3374,6 +3442,7 @@ impl CompiledPhaseGraph {
         phase_id: &str,
         reason: &str,
     ) -> Result<PhaseGraphState> {
+        self.validate_requested_skill(skill)?;
         let reason = reason.trim();
         if reason.is_empty() {
             return Err(GraphEngineError::InvalidReplayReason {

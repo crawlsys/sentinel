@@ -99,7 +99,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
                 "checkpoint_id": checkpoint_id,
                 "step_number": 1,
                 "channel": "state",
-                "value": graph_state,
+                "value_json": graph_state,
             }],
             "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
         }));
@@ -275,7 +275,7 @@ fn test_nonterminal_phase_graph_run(
             "checkpoint_id": checkpoint_id,
             "step_number": 1,
             "channel": "state",
-            "value": graph_state
+            "value_json": graph_state
         }],
         "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
         "stream": stream
@@ -728,8 +728,8 @@ impl ProofEngine {
 
         match backend.as_str() {
             "sqlite" => Ok("sqlite"),
-            "postgres" | "postgresql" => Ok("postgres"),
-            "redis" | "redis-checkpoint" => Ok("redis"),
+            "postgres" => Ok("postgres"),
+            "redis" => Ok("redis"),
             other => Err(anyhow::anyhow!(
                 "unsupported phase graph checkpointer backend '{other}' from SENTINEL_PHASE_GRAPH_CHECKPOINTER; expected sqlite, postgres, or redis"
             )),
@@ -2050,14 +2050,13 @@ impl ProofEngine {
             }
         }
         let state_write_records_graph_state = writes.iter().any(|write| {
-            let write_value = write.get("value").or_else(|| write.get("value_json"));
             write.get("thread_id").and_then(serde_json::Value::as_str) == Some(expected_thread_id)
                 && write
                     .get("checkpoint_id")
                     .and_then(serde_json::Value::as_str)
                     == Some(checkpoint_id)
                 && write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
-                && write_value == Some(state_value)
+                && write.get("value_json") == Some(state_value)
         });
         if !state_write_records_graph_state {
             bail!(
@@ -2225,6 +2224,31 @@ mod step_evidence_tests {
     }
 
     #[test]
+    fn expected_phase_thread_id_rejects_backend_aliases_without_normalization() {
+        with_phase_graph_thread_env(Some("postgresql"), Some("legatus_ai"), || {
+            let err = ProofEngine::expected_phase_thread_id("linear", "session-123")
+                .expect_err("postgresql alias must be rejected");
+            assert!(err
+                .to_string()
+                .contains("unsupported phase graph checkpointer backend 'postgresql'"));
+            assert!(err
+                .to_string()
+                .contains("expected sqlite, postgres, or redis"));
+        });
+
+        with_phase_graph_thread_env(Some("redis-checkpoint"), Some("legatus_ai"), || {
+            let err = ProofEngine::expected_phase_thread_id("linear", "session-123")
+                .expect_err("redis-checkpoint alias must be rejected");
+            assert!(err
+                .to_string()
+                .contains("unsupported phase graph checkpointer backend 'redis-checkpoint'"));
+            assert!(err
+                .to_string()
+                .contains("expected sqlite, postgres, or redis"));
+        });
+    }
+
+    #[test]
     fn expected_phase_thread_id_rejects_malformed_tenant_namespace_for_hosted_backend() {
         with_phase_graph_thread_env(Some("redis"), Some("tenant:escape"), || {
             let err = ProofEngine::expected_phase_thread_id("linear", "session-123")
@@ -2383,7 +2407,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": {
+                        "value_json": {
                             "skill": skill,
                             "session_id": session_id,
                             "step_states": []
@@ -2440,7 +2464,7 @@ mod step_evidence_tests {
                         "checkpoint_id": previous_checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state
+                        "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
                 })),
@@ -2492,7 +2516,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state
+                        "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
                 })),
@@ -2548,14 +2572,14 @@ mod step_evidence_tests {
                             "checkpoint_id": latest_checkpoint_id,
                             "step_number": 2,
                             "channel": "state",
-                            "value": graph_state.clone()
+                            "value_json": graph_state.clone()
                         },
                         {
                             "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
                             "checkpoint_id": previous_checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
-                            "value": graph_state
+                            "value_json": graph_state
                         }
                     ],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
@@ -2620,14 +2644,14 @@ mod step_evidence_tests {
                             "checkpoint_id": previous_checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
-                            "value": graph_state.clone()
+                            "value_json": graph_state.clone()
                         },
                         {
                             "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
                             "checkpoint_id": latest_checkpoint_id,
                             "step_number": 2,
                             "channel": "state",
-                            "value": graph_state
+                            "value_json": graph_state
                         }
                     ],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
@@ -2685,7 +2709,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state
+                        "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
                 })),
@@ -2737,7 +2761,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state
+                        "value_json": graph_state
                     }]
                 })),
             })
@@ -2792,7 +2816,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state
+                        "value_json": graph_state
                     }],
                     "graph_topology": graph_topology
                 })),
@@ -3963,7 +3987,7 @@ mod phase_evidence_tests {
                             "checkpoint_id": checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
-                            "value": graph_state.clone(),
+                            "value_json": graph_state.clone(),
                         }],
                         "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
                         "stream": if state.complete {
@@ -4248,7 +4272,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": {
+                        "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
                             "phase_order": ["claim"],
@@ -4535,7 +4559,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state.clone()
+                        "value_json": graph_state.clone()
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": [
@@ -4680,7 +4704,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": graph_state.clone()
+                        "value_json": graph_state.clone()
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": [
@@ -4823,12 +4847,13 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": {
+                        "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
                             "completed_phases": ["claim"]
                         }
                     }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
                 }),
             ))),
@@ -4916,12 +4941,13 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": {
+                        "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
                             "completed_phases": ["claim"]
                         }
                     }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
                 }),
             ))),
@@ -4972,6 +4998,91 @@ mod phase_evidence_tests {
     }
 
     #[tokio::test]
+    async fn phase_submission_rejects_write_value_field_without_value_json() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let accepted_state = serde_json::json!({
+            "skill": "linear",
+            "session_id": "phase-session",
+            "phase_order": ["claim"],
+            "current_phase": 1,
+            "completed_phases": ["claim"],
+            "complete": true,
+            "last_verdict": "pass"
+        });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(test_graph_run_with_authority(
+                serde_json::json!({
+                    "state": accepted_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone(),
+                        "writes": [{
+                            "node_id": "claim",
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-claim",
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "step_number": 1,
+                        "state": accepted_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": "sentinel.phase.linear.phase-session",
+                        "checkpoint_id": "checkpoint-claim",
+                        "step_number": 1,
+                        "channel": "state",
+                        "value": accepted_state
+                    }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
+                    "stream": []
+                }),
+            ))),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("write history must require value_json");
+
+        assert!(
+            err.to_string().contains("accepted graph state"),
+            "error must reject write history without value_json: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "value-only write evidence must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "value-only write evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
     async fn phase_submission_requires_write_history_for_latest_checkpoint() {
         let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
         let accepted_state = serde_json::json!({
@@ -5009,8 +5120,9 @@ mod phase_evidence_tests {
                         "checkpoint_id": "previous-checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": accepted_state
+                        "value_json": accepted_state
                     }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
                 }),
             ))),
@@ -5099,8 +5211,9 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": accepted_state
+                        "value_json": accepted_state
                     }],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
                 }),
             ))),
@@ -5188,7 +5301,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": accepted_state
+                        "value_json": accepted_state
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
@@ -5280,16 +5393,17 @@ mod phase_evidence_tests {
                             "checkpoint_id": "checkpoint-claim",
                             "step_number": 2,
                             "channel": "state",
-                            "value": accepted_state.clone()
+                            "value_json": accepted_state.clone()
                         },
                         {
                             "thread_id": "sentinel.phase.linear.phase-session",
                             "checkpoint_id": "previous-checkpoint-claim",
                             "step_number": 1,
                             "channel": "state",
-                            "value": accepted_state
+                            "value_json": accepted_state
                         }
                     ],
+                    "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": []
                 }),
             ))),
@@ -5378,7 +5492,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
-                        "value": accepted_state
+                        "value_json": accepted_state
                     }],
                     "stream": []
                 }),

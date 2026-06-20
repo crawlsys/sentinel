@@ -162,6 +162,54 @@ fn langgraph_dependencies_do_not_enable_backend_defaults_implicitly() {
 }
 
 #[test]
+fn langgraph_runtime_backend_selectors_use_canonical_names_only() {
+    for (label, source) in [
+        (
+            "phase graph",
+            include_str!("../../sentinel-graph/src/lib.rs"),
+        ),
+        (
+            "decision graph",
+            include_str!("../../sentinel-infrastructure/src/decision_graph_store.rs"),
+        ),
+        (
+            "proof engine phase test helper",
+            include_str!("../../sentinel-application/src/proof_engine.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains("\"postgres\" | \"postgresql\""),
+            "{label} backend selector must reject the postgresql alias"
+        );
+        assert!(
+            !source.contains("\"redis\" | \"redis-checkpoint\""),
+            "{label} backend selector must reject the redis-checkpoint alias"
+        );
+        assert!(
+            source.contains("\"postgres\" =>"),
+            "{label} backend selector must keep canonical postgres"
+        );
+        assert!(
+            source.contains("\"redis\" =>"),
+            "{label} backend selector must keep canonical redis"
+        );
+    }
+}
+
+#[test]
+fn proof_engine_requires_current_langgraph_write_value_json_shape() {
+    let proof_engine = include_str!("../../sentinel-application/src/proof_engine.rs");
+    assert!(
+        proof_engine.contains("write.get(\"value_json\") == Some(state_value)"),
+        "proof engine must validate the current LangGraph write-history value_json field"
+    );
+    assert!(
+        !proof_engine.contains("write.get(\"value\").or_else(|| write.get(\"value_json\"))"),
+        "proof engine must not accept legacy write-history value fields"
+    );
+}
+
+#[test]
 fn phase_graph_runtime_snapshots_tenant_scope_from_compiled_graph() {
     let graph_source = include_str!("../../sentinel-graph/src/lib.rs");
     assert!(

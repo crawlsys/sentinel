@@ -244,7 +244,7 @@ fn phase_checkpointer_config_accepts_redis_ttl() {
 #[test]
 fn phase_checkpointer_config_accepts_redis_without_ttl() {
     with_phase_checkpointer_env_full(
-        Some("redis-checkpoint"),
+        Some("redis"),
         None,
         None,
         Some("redis://localhost:6379/1"),
@@ -255,6 +255,43 @@ fn phase_checkpointer_config_accepts_redis_without_ttl() {
                 PhaseCheckpointerConfig::from_env("/tmp/ignored.db").expect("redis config");
             assert_eq!(config.backend_name(), "redis");
             assert_eq!(config.scope_name(), "ttl_seconds:none");
+        },
+    );
+}
+
+#[test]
+fn phase_checkpointer_config_rejects_backend_aliases_without_normalization() {
+    with_phase_checkpointer_env_full(
+        Some("redis-checkpoint"),
+        None,
+        None,
+        Some("redis://localhost:6379/1"),
+        None,
+        Some("legatus_ai"),
+        || {
+            let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+                .expect_err("redis-checkpoint alias must be rejected");
+            let message = err.to_string();
+
+            assert!(
+                message.contains("unsupported phase graph checkpointer backend 'redis-checkpoint'")
+            );
+            assert!(message.contains("expected sqlite, postgres, or redis"));
+        },
+    );
+
+    with_phase_checkpointer_env(
+        Some("postgresql"),
+        Some("postgres://sentinel:sentinel@localhost/sentinel"),
+        None,
+        Some("legatus_ai"),
+        || {
+            let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+                .expect_err("postgresql alias must be rejected");
+            let message = err.to_string();
+
+            assert!(message.contains("unsupported phase graph checkpointer backend 'postgresql'"));
+            assert!(message.contains("expected sqlite, postgres, or redis"));
         },
     );
 }
@@ -1291,6 +1328,27 @@ async fn run_until_gate_executes_phase_node_and_persists_interrupt_state() {
         .expect("checkpoint");
     assert_eq!(persisted.current_phase, Some(0));
     assert_eq!(persisted.completed_phases, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn run_until_gate_rejects_skill_mismatch_before_checkpoint_seed() {
+    let saver = phase_checkpointer(":memory:").await.expect("saver");
+    let graph = compile_skill_graph_with_checkpointer(&fixture(), saver).expect("compile");
+
+    let err = graph
+        .run_until_gate("deploy", "skill-mismatch-session")
+        .await
+        .expect_err("compiled graph skill must be authoritative");
+
+    assert!(err.to_string().contains("compiled for skill 'linear'"));
+    assert!(
+        graph
+            .load_latest("skill-mismatch-session")
+            .await
+            .expect("load_latest should still work")
+            .is_none(),
+        "skill mismatch must not seed a LangGraph checkpoint"
+    );
 }
 
 #[tokio::test]
@@ -3003,6 +3061,29 @@ async fn update_step_keeps_checkpointed_steps_when_session_projection_is_stale()
         .map(|step| step.step_id.as_str())
         .collect();
     assert_eq!(step_ids, vec!["0.1", "0.2"]);
+}
+
+#[tokio::test]
+async fn update_state_as_node_rejects_embedded_session_mismatch() {
+    let saver = phase_checkpointer(":memory:").await.expect("saver");
+    let graph = compile_skill_graph_with_checkpointer(&fixture(), saver).expect("compile");
+    graph
+        .run_until_gate("linear", "session-match")
+        .await
+        .expect("initial gate checkpoint");
+    let mut state = graph
+        .load_latest("session-match")
+        .await
+        .expect("load")
+        .expect("checkpoint");
+    state.session_id = "other-session".to_string();
+
+    let err = graph
+        .update_state_as_node("session-match", state, START)
+        .await
+        .expect_err("embedded session mismatch must not be checkpointed");
+
+    assert!(err.to_string().contains("state session mismatch"));
 }
 
 #[tokio::test]
