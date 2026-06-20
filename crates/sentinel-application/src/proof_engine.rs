@@ -3278,6 +3278,56 @@ mod step_evidence_tests {
         }
     }
 
+    struct StepGraphWithoutStepPolicyEvidence;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithoutStepPolicyEvidence {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            step_policy: &WorkflowStep,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let authority = TestStepGraphAuthority::default();
+            let mut result = authority
+                .apply_step_status(
+                    skill,
+                    session_id,
+                    workflow,
+                    phase_id,
+                    step_id,
+                    step_policy,
+                    status,
+                    summary,
+                )
+                .await?;
+            fn strip_step_policy_evidence(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(obj) => {
+                        obj.remove("step_policy_evidence");
+                        for value in obj.values_mut() {
+                            strip_step_policy_evidence(value);
+                        }
+                    }
+                    serde_json::Value::Array(values) => {
+                        for value in values {
+                            strip_step_policy_evidence(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            strip_step_policy_evidence(&mut result.graph_run);
+            Ok(result)
+        }
+    }
+
     struct StepGraphWithMismatchedProjection;
 
     #[async_trait::async_trait]
@@ -3502,6 +3552,47 @@ mod step_evidence_tests {
         assert!(
             !state.has_graph_workflow("linear"),
             "unauthorized graph evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_graph_run_without_step_policy_evidence() {
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "missing-step-policy-evidence",
+        )));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithoutStepPolicyEvidence));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("step graph evidence without policy evidence must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("omitted state.step_policy_evidence"),
+            "error must identify missing configured policy evidence: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "policyless graph evidence must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "policyless graph evidence must not project workflow progress"
         );
     }
 
