@@ -408,7 +408,7 @@ async fn build_bug_task_graph_with_checkpointer(
     let builder = StateGraphBuilder::<BugTaskState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: BugTaskState| async move {
                 emit_decision_node_event("bug_task", CLASSIFY, &s.identifier)?;
@@ -420,8 +420,9 @@ async fn build_bug_task_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: BugTaskState| async move {
                 emit_decision_node_event("bug_task", ALLOW, &s.identifier)?;
@@ -435,8 +436,9 @@ async fn build_bug_task_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: BugTaskState| async move {
                 emit_decision_node_event("bug_task", BLOCK, &s.identifier)?;
@@ -450,6 +452,7 @@ async fn build_bug_task_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &BugTaskState| match expected_decision(s) {

@@ -408,7 +408,7 @@ async fn build_token_usage_graph_with_checkpointer(
     let builder = StateGraphBuilder::<TokenUsageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", CLASSIFY, &s.identifier)?;
@@ -420,8 +420,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", NO_DATA, &s.identifier)?;
@@ -435,8 +436,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_MAPPED_TICKETS,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", NO_MAPPED_TICKETS, &s.identifier)?;
@@ -450,8 +452,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             UNPRICED_MODEL_RISK,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", UNPRICED_MODEL_RISK, &s.identifier)?;
@@ -465,8 +468,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MAPPING_COVERAGE_RISK,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", MAPPING_COVERAGE_RISK, &s.identifier)?;
@@ -480,8 +484,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             EXPENSIVE_TICKET_RISK,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", EXPENSIVE_TICKET_RISK, &s.identifier)?;
@@ -495,8 +500,9 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HEALTHY_USAGE,
             |s: TokenUsageState| async move {
                 emit_decision_node_event("token_usage", HEALTHY_USAGE, &s.identifier)?;
@@ -510,6 +516,7 @@ async fn build_token_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &TokenUsageState| match expected_decision(s) {

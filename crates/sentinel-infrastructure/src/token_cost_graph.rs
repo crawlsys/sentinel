@@ -334,7 +334,7 @@ async fn build_token_cost_graph_with_checkpointer(
     let builder = StateGraphBuilder::<TokenCostState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: TokenCostState| async move {
                 emit_decision_node_event("token_cost", CLASSIFY, &s.identifier)?;
@@ -346,8 +346,9 @@ async fn build_token_cost_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: TokenCostState| async move {
                 emit_decision_node_event("token_cost", NO_DATA, &s.identifier)?;
@@ -361,8 +362,9 @@ async fn build_token_cost_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             UNKNOWN_MODEL_RISK,
             |s: TokenCostState| async move {
                 emit_decision_node_event("token_cost", UNKNOWN_MODEL_RISK, &s.identifier)?;
@@ -376,8 +378,9 @@ async fn build_token_cost_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CACHE_EFFECTIVE,
             |s: TokenCostState| async move {
                 emit_decision_node_event("token_cost", CACHE_EFFECTIVE, &s.identifier)?;
@@ -391,8 +394,9 @@ async fn build_token_cost_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_SAVINGS,
             |s: TokenCostState| async move {
                 emit_decision_node_event("token_cost", NO_SAVINGS, &s.identifier)?;
@@ -406,6 +410,7 @@ async fn build_token_cost_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &TokenCostState| match expected_decision(s) {

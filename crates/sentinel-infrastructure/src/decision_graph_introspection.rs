@@ -12,7 +12,7 @@ use langgraph_core::application::services::{
     GraphRunStream, LifecycleEvent, Projection, RunV3Options, StateSnapshot, StateUpdateEvent,
     SubgraphHandle, TaskEvent, TasksTransformer, UpdatesTransformer, V3StreamTransformer,
 };
-use langgraph_core::domain::value_objects::{NodeError, END, START};
+use langgraph_core::domain::value_objects::{Command, NodeError, NodeErrorContext, END, START};
 use langgraph_core::ports::WriteHistoryEntry;
 use sentinel_domain::langgraph_thread::validate_tenant_scope;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -87,6 +87,31 @@ pub(crate) fn emit_decision_node_event(
             "identifier": identifier,
         }))
         .map_err(|err| NodeError::ExecutionFailed(err.to_string()))
+}
+
+/// Fail-closed LangGraph error handler for Sentinel decision-graph nodes.
+///
+/// Infrastructure decision graphs authorize external behavior. A node failure
+/// must therefore remain a hard graph failure instead of being recovered into a
+/// stale authorization state. Returning `Command::Interrupt` from a node error
+/// handler is intentionally unsupported by LangGraph's handler dispatcher, so
+/// the executor records an error-handler failure in the v3 task stream.
+pub(crate) fn decision_node_error_handler<S>(_state: &S, ctx: NodeErrorContext) -> Command<S> {
+    if let Some(writer) = get_stream_writer() {
+        let _ = writer.write(serde_json::json!({
+            "type": "sentinel.decision_node_error",
+            "node_id": ctx.node(),
+            "error": ctx.error().to_string(),
+        }));
+    }
+    Command::interrupt_with_metadata(
+        format!("Sentinel decision graph node '{}' failed", ctx.node()),
+        serde_json::json!({
+            "node_id": ctx.node(),
+            "error": ctx.error().to_string(),
+            "authority": "langgraph",
+        }),
+    )
 }
 
 /// Serializable view of one durable LangGraph checkpoint snapshot.
@@ -358,6 +383,12 @@ fn required_decision_node_runtime_contract(
     for node in nodes {
         require_node_metadata_value(graph_name, node, "sentinel.graph", "graph", graph_name)?;
         require_node_metadata_value(graph_name, node, "sentinel.node", "node", &node.id)?;
+        if !node.has_error_handler {
+            return Err(format!(
+                "{graph_name} decision graph node '{}' is missing a LangGraph error handler",
+                node.id
+            ));
+        }
         if !node.has_timeout_policy {
             return Err(format!(
                 "{graph_name} decision graph node '{}' is missing a LangGraph timeout policy",
@@ -1878,7 +1909,7 @@ mod tests {
             deferred: false,
             barrier_on: Vec::new(),
             metadata,
-            has_error_handler: false,
+            has_error_handler: true,
             has_timeout_policy: true,
             interrupt_before: false,
             interrupt_after: false,
@@ -2821,11 +2852,45 @@ mod tests {
         assert!(err.contains("sentinel.node"));
         assert!(err.contains("set"));
 
+        let mut missing_handler = nodes.clone();
+        missing_handler[0].has_error_handler = false;
+        let err = required_decision_node_runtime_contract("severity", &missing_handler)
+            .expect_err("missing error handler must fail");
+        assert!(err.contains("error handler"));
+
         let mut missing_timeout = nodes;
         missing_timeout[0].has_timeout_policy = false;
         let err = required_decision_node_runtime_contract("severity", &missing_timeout)
             .expect_err("missing timeout must fail");
         assert!(err.contains("timeout policy"));
+    }
+
+    #[test]
+    fn decision_node_error_handler_returns_fail_closed_interrupt_command() {
+        let state = serde_json::json!({"identifier": "FPCRM-1"});
+        let command = decision_node_error_handler(
+            &state,
+            NodeErrorContext::new(
+                "classify",
+                langgraph_core::domain::value_objects::GraphError::Node(
+                    NodeError::ExecutionFailed("boom".to_string()),
+                ),
+            ),
+        );
+
+        let Command::Interrupt { reason, metadata } = command else {
+            panic!("decision node error handler must fail closed with Command::Interrupt");
+        };
+        assert!(reason.contains("classify"));
+        let metadata = metadata.expect("interrupt metadata");
+        assert_eq!(metadata["authority"], "langgraph");
+        assert_eq!(metadata["node_id"], "classify");
+        assert!(
+            metadata["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("boom")),
+            "metadata must preserve the original LangGraph node error: {metadata}"
+        );
     }
 
     #[tokio::test]

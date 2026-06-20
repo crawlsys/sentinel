@@ -766,7 +766,7 @@ async fn build_linear_pm_graph_with_checkpointer(
     let builder = StateGraphBuilder::<LinearPmState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             CLASSIFY,
             |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", CLASSIFY, &s.identifier)?;
@@ -778,8 +778,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             ALLOW,
             |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", ALLOW, &s.identifier)?;
@@ -793,8 +794,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_MISSING_ISSUE_IDENTIFIER,
             |s: &LinearPmState| {
                 emit_decision_node_event(
@@ -812,8 +814,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_LIVE_AUTHORITY_UNAVAILABLE,
             |s: &LinearPmState| {
                 emit_decision_node_event(
@@ -831,8 +834,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_BLOCKED_TICKET,
             |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_BLOCKED_TICKET, &s.identifier)?;
@@ -846,8 +850,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_OVERSIZED_TICKET,
             |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_OVERSIZED_TICKET, &s.identifier)?;
@@ -861,8 +866,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_MISSING_MILESTONE,
             |s: &LinearPmState| {
                 emit_decision_node_event("linear_pm", BLOCK_MISSING_MILESTONE, &s.identifier)?;
@@ -876,8 +882,9 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             BLOCK_HIGHER_PRIORITY_AVAILABLE,
             |s: &LinearPmState| {
                 emit_decision_node_event(
@@ -895,6 +902,7 @@ async fn build_linear_pm_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &LinearPmState| match expected_decision(s) {

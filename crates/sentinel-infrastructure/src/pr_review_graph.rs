@@ -485,7 +485,7 @@ async fn build_pr_review_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PrReviewState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", CLASSIFY, &s.identifier)?;
@@ -497,8 +497,9 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", NO_DATA, &s.identifier)?;
@@ -512,8 +513,9 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HUMAN_REVIEW_RISK,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", HUMAN_REVIEW_RISK, &s.identifier)?;
@@ -527,8 +529,9 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             REVIEW_LATENCY_RISK,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", REVIEW_LATENCY_RISK, &s.identifier)?;
@@ -542,8 +545,9 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             FINDING_LOAD_RISK,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", FINDING_LOAD_RISK, &s.identifier)?;
@@ -557,8 +561,9 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HEALTHY_REVIEW_LOOP,
             |s: PrReviewState| async move {
                 emit_decision_node_event("pr_review", HEALTHY_REVIEW_LOOP, &s.identifier)?;
@@ -572,6 +577,7 @@ async fn build_pr_review_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PrReviewState| match expected_decision(s) {

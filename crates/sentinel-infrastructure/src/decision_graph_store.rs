@@ -708,7 +708,7 @@ mod tests {
         .expect("sqlite checkpointer");
         let schema = StateSchema::<TestDecisionState>::new().with_serializable_validation();
         let graph = StateGraphBuilder::<TestDecisionState>::with_schema(schema)
-            .add_node_with_config(
+            .add_node_with_config_and_error_handler(
                 "classify",
                 |state: &TestDecisionState| Ok::<_, NodeError>(state.clone()),
                 NodeConfig::new()
@@ -717,6 +717,7 @@ mod tests {
                     .with_metadata(CHECKPOINTER_BACKEND_METADATA, backend)
                     .with_metadata("sentinel.checkpointer_scope", "database_path::memory:")
                     .with_metadata(CHECKPOINTER_TENANT_SCOPE_METADATA, tenant_scope),
+                crate::decision_graph_introspection::decision_node_error_handler,
             )
             .add_edge(START, "classify")
             .add_edge("classify", END)

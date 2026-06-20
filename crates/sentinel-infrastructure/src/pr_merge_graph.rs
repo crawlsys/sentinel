@@ -371,7 +371,7 @@ async fn build_pr_merge_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PrMergeState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PrMergeState| async move {
                 emit_decision_node_event("pr_merge", CLASSIFY, &s.identifier)?;
@@ -383,8 +383,9 @@ async fn build_pr_merge_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: PrMergeState| async move {
                 emit_decision_node_event("pr_merge", ALLOW, &s.identifier)?;
@@ -398,8 +399,9 @@ async fn build_pr_merge_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ASK,
             |s: PrMergeState| async move {
                 emit_decision_node_event("pr_merge", ASK, &s.identifier)?;
@@ -413,8 +415,9 @@ async fn build_pr_merge_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_AUTOPILOT_REMINDER,
             |s: PrMergeState| async move {
                 emit_decision_node_event("pr_merge", ALLOW_AUTOPILOT_REMINDER, &s.identifier)?;
@@ -428,6 +431,7 @@ async fn build_pr_merge_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PrMergeState| match expected_decision(s) {

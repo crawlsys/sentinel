@@ -479,7 +479,7 @@ async fn build_deploy_frequency_graph_with_checkpointer(
     let builder = StateGraphBuilder::<DeployFrequencyState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", CLASSIFY, &s.identifier)?;
@@ -491,8 +491,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", NO_DATA, &s.identifier)?;
@@ -506,8 +507,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_ACTIVE_DEPLOY_WINDOW,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event(
@@ -525,8 +527,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             LOW_FREQUENCY_RISK,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", LOW_FREQUENCY_RISK, &s.identifier)?;
@@ -540,8 +543,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NEEDS_IMPROVEMENT,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", NEEDS_IMPROVEMENT, &s.identifier)?;
@@ -555,8 +559,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HEALTHY_CADENCE,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", HEALTHY_CADENCE, &s.identifier)?;
@@ -570,8 +575,9 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ELITE_CADENCE,
             |s: DeployFrequencyState| async move {
                 emit_decision_node_event("deploy_frequency", ELITE_CADENCE, &s.identifier)?;
@@ -585,6 +591,7 @@ async fn build_deploy_frequency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

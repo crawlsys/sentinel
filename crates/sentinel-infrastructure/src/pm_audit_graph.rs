@@ -298,7 +298,7 @@ async fn build_pm_audit_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PmAuditState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PmAuditState| async move {
                 emit_decision_node_event("pm_audit", CLASSIFY, &s.identifier)?;
@@ -310,8 +310,9 @@ async fn build_pm_audit_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HARD,
             |s: PmAuditState| async move {
                 emit_decision_node_event("pm_audit", HARD, &s.identifier)?;
@@ -325,8 +326,9 @@ async fn build_pm_audit_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ADVISORY,
             |s: PmAuditState| async move {
                 emit_decision_node_event("pm_audit", ADVISORY, &s.identifier)?;
@@ -340,8 +342,9 @@ async fn build_pm_audit_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLEAR,
             |s: PmAuditState| async move {
                 emit_decision_node_event("pm_audit", CLEAR, &s.identifier)?;
@@ -355,6 +358,7 @@ async fn build_pm_audit_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PmAuditState| {

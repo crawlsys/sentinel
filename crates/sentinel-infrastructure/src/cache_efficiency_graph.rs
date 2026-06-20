@@ -517,7 +517,7 @@ async fn build_cache_efficiency_graph_with_checkpointer(
     let builder = StateGraphBuilder::<CacheEfficiencyState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", CLASSIFY, &s.identifier)?;
@@ -529,8 +529,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", NO_DATA, &s.identifier)?;
@@ -544,8 +545,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_USAGE_DATA,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", NO_USAGE_DATA, &s.identifier)?;
@@ -559,8 +561,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CACHE_WASTE_RISK,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", CACHE_WASTE_RISK, &s.identifier)?;
@@ -574,8 +577,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NEEDS_TUNING,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", NEEDS_TUNING, &s.identifier)?;
@@ -589,8 +593,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CACHE_EFFECTIVE,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", CACHE_EFFECTIVE, &s.identifier)?;
@@ -604,8 +609,9 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CACHE_EXCELLENT,
             |s: CacheEfficiencyState| async move {
                 emit_decision_node_event("cache_efficiency", CACHE_EXCELLENT, &s.identifier)?;
@@ -619,6 +625,7 @@ async fn build_cache_efficiency_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

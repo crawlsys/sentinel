@@ -316,7 +316,7 @@ async fn build_dev_scorecard_graph_with_checkpointer(
     let builder = StateGraphBuilder::<DevScorecardState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: DevScorecardState| async move {
                 emit_decision_node_event("dev_scorecard", CLASSIFY, &s.identifier)?;
@@ -328,8 +328,9 @@ async fn build_dev_scorecard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ATTRIBUTION_DIVERGENCE,
             |s: DevScorecardState| async move {
                 emit_decision_node_event("dev_scorecard", ATTRIBUTION_DIVERGENCE, &s.identifier)?;
@@ -343,8 +344,9 @@ async fn build_dev_scorecard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             EXCELLENT,
             |s: DevScorecardState| async move {
                 emit_decision_node_event("dev_scorecard", EXCELLENT, &s.identifier)?;
@@ -358,8 +360,9 @@ async fn build_dev_scorecard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HEALTHY,
             |s: DevScorecardState| async move {
                 emit_decision_node_event("dev_scorecard", HEALTHY, &s.identifier)?;
@@ -373,8 +376,9 @@ async fn build_dev_scorecard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NEEDS_ATTENTION,
             |s: DevScorecardState| async move {
                 emit_decision_node_event("dev_scorecard", NEEDS_ATTENTION, &s.identifier)?;
@@ -388,6 +392,7 @@ async fn build_dev_scorecard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &DevScorecardState| {

@@ -450,7 +450,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PrePushBrowserState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event("pre_push_browser_test", CLASSIFY, &s.identifier)?;
@@ -462,8 +462,9 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event("pre_push_browser_test", ALLOW, &s.identifier)?;
@@ -477,8 +478,9 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_NO_BROWSER_CONFIG,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event(
@@ -496,8 +498,9 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_NO_FRONTEND_CHANGES,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event(
@@ -515,8 +518,9 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_RECENT_BROWSER_TEST,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event(
@@ -534,8 +538,9 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: PrePushBrowserState| async move {
                 emit_decision_node_event("pre_push_browser_test", BLOCK, &s.identifier)?;
@@ -549,6 +554,7 @@ async fn build_pre_push_browser_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

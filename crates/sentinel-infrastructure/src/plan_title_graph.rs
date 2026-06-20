@@ -378,7 +378,7 @@ async fn build_plan_title_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PlanTitleState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PlanTitleState| async move {
                 emit_decision_node_event("plan_title", CLASSIFY, &s.identifier)?;
@@ -390,8 +390,9 @@ async fn build_plan_title_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: PlanTitleState| async move {
                 emit_decision_node_event("plan_title", ALLOW, &s.identifier)?;
@@ -405,8 +406,9 @@ async fn build_plan_title_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK_MISSING_PLAN,
             |s: PlanTitleState| async move {
                 emit_decision_node_event("plan_title", BLOCK_MISSING_PLAN, &s.identifier)?;
@@ -420,8 +422,9 @@ async fn build_plan_title_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK_TITLELESS,
             |s: PlanTitleState| async move {
                 emit_decision_node_event("plan_title", BLOCK_TITLELESS, &s.identifier)?;
@@ -435,6 +438,7 @@ async fn build_plan_title_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PlanTitleState| match expected_decision(s) {

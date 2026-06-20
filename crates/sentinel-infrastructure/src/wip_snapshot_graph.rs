@@ -314,7 +314,7 @@ async fn build_wip_snapshot_graph_with_checkpointer(
     let builder = StateGraphBuilder::<WipSnapshotState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: WipSnapshotState| async move {
                 emit_decision_node_event("wip_snapshot", CLASSIFY, &s.identifier)?;
@@ -326,8 +326,9 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             SNAPSHOT_PRESENT,
             |s: WipSnapshotState| async move {
                 emit_decision_node_event("wip_snapshot", SNAPSHOT_PRESENT, &s.identifier)?;
@@ -339,8 +340,9 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_SNAPSHOT,
             |s: WipSnapshotState| async move {
                 emit_decision_node_event("wip_snapshot", NO_SNAPSHOT, &s.identifier)?;
@@ -352,6 +354,7 @@ async fn build_wip_snapshot_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &WipSnapshotState| {

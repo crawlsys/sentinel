@@ -458,7 +458,7 @@ async fn build_skill_invocation_graph_with_checkpointer(
     let builder = StateGraphBuilder::<SkillInvocationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: SkillInvocationState| async move {
                 emit_decision_node_event("skill_invocation", CLASSIFY, &s.identifier)?;
@@ -470,8 +470,9 @@ async fn build_skill_invocation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: SkillInvocationState| async move {
                 emit_decision_node_event("skill_invocation", ALLOW, &s.identifier)?;
@@ -485,8 +486,9 @@ async fn build_skill_invocation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: SkillInvocationState| async move {
                 emit_decision_node_event("skill_invocation", BLOCK, &s.identifier)?;
@@ -500,6 +502,7 @@ async fn build_skill_invocation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

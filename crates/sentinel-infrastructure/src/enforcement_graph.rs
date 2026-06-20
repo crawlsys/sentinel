@@ -288,7 +288,7 @@ async fn build_escalation_graph_with_checkpointer(
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
         // classify: pass through; routing is decided by the conditional edge.
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: EscalationState| async move {
                 emit_decision_node_event("enforcement", CLASSIFY, &s.identifier)?;
@@ -300,9 +300,10 @@ async fn build_escalation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         // judge: pass through; the verdict was set by the orchestrator.
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             JUDGE,
             |s: EscalationState| async move {
                 emit_decision_node_event("enforcement", JUDGE, &s.identifier)?;
@@ -314,9 +315,10 @@ async fn build_escalation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         // revert / clear: record the terminal decision.
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             REVERT,
             |s: EscalationState| async move {
                 emit_decision_node_event("enforcement", REVERT, &s.identifier)?;
@@ -330,8 +332,9 @@ async fn build_escalation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLEAR,
             |s: EscalationState| async move {
                 emit_decision_node_event("enforcement", CLEAR, &s.identifier)?;
@@ -345,6 +348,7 @@ async fn build_escalation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         // classify → judge (started+unready) or clear (ready/not-started).

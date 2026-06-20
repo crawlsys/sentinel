@@ -343,7 +343,7 @@ async fn build_ba_provenance_graph_with_checkpointer(
     let builder = StateGraphBuilder::<BaProvenanceState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: BaProvenanceState| async move {
                 emit_decision_node_event("ba_provenance", CLASSIFY, &s.identifier)?;
@@ -355,8 +355,9 @@ async fn build_ba_provenance_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: BaProvenanceState| async move {
                 emit_decision_node_event("ba_provenance", ALLOW, &s.identifier)?;
@@ -370,8 +371,9 @@ async fn build_ba_provenance_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             OBSERVE_ONLY_WOULD_BLOCK,
             |s: BaProvenanceState| async move {
                 emit_decision_node_event("ba_provenance", OBSERVE_ONLY_WOULD_BLOCK, &s.identifier)?;
@@ -385,8 +387,9 @@ async fn build_ba_provenance_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: BaProvenanceState| async move {
                 emit_decision_node_event("ba_provenance", BLOCK, &s.identifier)?;
@@ -400,6 +403,7 @@ async fn build_ba_provenance_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &BaProvenanceState| {

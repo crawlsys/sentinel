@@ -505,7 +505,7 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PreCommitVerificationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event("pre_commit_verification", CLASSIFY, &s.identifier)?;
@@ -517,8 +517,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event("pre_commit_verification", ALLOW, &s.identifier)?;
@@ -532,8 +533,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_CONTENT_ONLY_REPO,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event(
@@ -551,8 +553,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_DOCS_ONLY,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event(
@@ -570,8 +573,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_SIGNED_OVERRIDE,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event(
@@ -589,8 +593,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_RECORDED_EVIDENCE,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event(
@@ -608,8 +613,9 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: PreCommitVerificationState| async move {
                 emit_decision_node_event("pre_commit_verification", BLOCK, &s.identifier)?;
@@ -623,6 +629,7 @@ async fn build_pre_commit_verification_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(

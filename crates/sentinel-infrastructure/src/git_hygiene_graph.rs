@@ -610,7 +610,7 @@ async fn build_git_hygiene_graph_with_checkpointer(
     let builder = StateGraphBuilder::<GitHygieneState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             CLASSIFY,
             |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", CLASSIFY, &s.identifier)?;
@@ -622,8 +622,9 @@ async fn build_git_hygiene_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             ALLOW,
             |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", ALLOW, &s.identifier)?;
@@ -637,8 +638,9 @@ async fn build_git_hygiene_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             DENY_PROTECTED_BRANCH,
             |s: &GitHygieneState| {
                 emit_decision_node_event("git_hygiene", DENY_PROTECTED_BRANCH, &s.identifier)?;
@@ -652,8 +654,9 @@ async fn build_git_hygiene_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_node_with_config(
+        .add_node_with_config_and_error_handler(
             DENY_UNCOMMITTED_FILE_LIMIT,
             |s: &GitHygieneState| {
                 emit_decision_node_event(
@@ -671,6 +674,7 @@ async fn build_git_hygiene_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &GitHygieneState| match expected_decision(s) {

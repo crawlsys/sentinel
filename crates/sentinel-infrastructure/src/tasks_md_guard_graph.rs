@@ -466,7 +466,7 @@ async fn build_tasks_md_guard_graph_with_checkpointer(
     let builder = StateGraphBuilder::<TasksMdGuardState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: TasksMdGuardState| async move {
                 emit_decision_node_event("tasks_md_guard", CLASSIFY, &s.identifier)?;
@@ -478,8 +478,9 @@ async fn build_tasks_md_guard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: TasksMdGuardState| async move {
                 emit_decision_node_event("tasks_md_guard", ALLOW, &s.identifier)?;
@@ -493,8 +494,9 @@ async fn build_tasks_md_guard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: TasksMdGuardState| async move {
                 emit_decision_node_event("tasks_md_guard", BLOCK, &s.identifier)?;
@@ -508,6 +510,7 @@ async fn build_tasks_md_guard_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &TasksMdGuardState| {

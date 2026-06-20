@@ -186,7 +186,7 @@ async fn build_linear_comment_graph_with_checkpointer(
     let builder = StateGraphBuilder::<LinearCommentState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: LinearCommentState| async move {
                 emit_decision_node_event("linear_comment", CLASSIFY, &s.identifier)?;
@@ -198,8 +198,9 @@ async fn build_linear_comment_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             POST,
             |s: LinearCommentState| async move {
                 emit_decision_node_event("linear_comment", POST, &s.identifier)?;
@@ -213,8 +214,9 @@ async fn build_linear_comment_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             SKIP,
             |s: LinearCommentState| async move {
                 emit_decision_node_event("linear_comment", SKIP, &s.identifier)?;
@@ -228,6 +230,7 @@ async fn build_linear_comment_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &LinearCommentState| {

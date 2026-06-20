@@ -618,7 +618,7 @@ async fn build_step_gate_graph_with_checkpointer(
     let builder = StateGraphBuilder::<StepGateState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", CLASSIFY, &s.identifier)?;
@@ -630,8 +630,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", ALLOW, &s.identifier)?;
@@ -645,8 +646,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_FIRST_STEP,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", ALLOW_FIRST_STEP, &s.identifier)?;
@@ -660,8 +662,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_PREREQUISITE_PROOF,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", ALLOW_PREREQUISITE_PROOF, &s.identifier)?;
@@ -675,8 +678,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_STEP_CONFIG,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", DENY_MISSING_STEP_CONFIG, &s.identifier)?;
@@ -690,8 +694,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_STEP_NOT_DECLARED,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", DENY_STEP_NOT_DECLARED, &s.identifier)?;
@@ -705,8 +710,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_GRAPH_WORKFLOW,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", DENY_MISSING_GRAPH_WORKFLOW, &s.identifier)?;
@@ -720,8 +726,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_PREREQUISITE_NOT_COMPLETED,
             |s: StepGateState| async move {
                 emit_decision_node_event(
@@ -739,8 +746,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_PROOF_CHAIN,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", DENY_MISSING_PROOF_CHAIN, &s.identifier)?;
@@ -754,8 +762,9 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_STEP_PROOF,
             |s: StepGateState| async move {
                 emit_decision_node_event("step_gate", DENY_MISSING_STEP_PROOF, &s.identifier)?;
@@ -769,6 +778,7 @@ async fn build_step_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &StepGateState| match expected_decision(s) {

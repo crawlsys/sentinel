@@ -519,7 +519,7 @@ async fn build_commit_message_graph_with_checkpointer(
     let builder = StateGraphBuilder::<CommitMessageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", CLASSIFY, &s.identifier)?;
@@ -531,8 +531,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", ALLOW, &s.identifier)?;
@@ -546,8 +547,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_AMEND,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", ALLOW_AMEND, &s.identifier)?;
@@ -561,8 +563,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_NO_MESSAGE,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", ALLOW_NO_MESSAGE, &s.identifier)?;
@@ -576,8 +579,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_CONVENTIONAL,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", ALLOW_CONVENTIONAL, &s.identifier)?;
@@ -591,8 +595,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK_MALFORMED,
             |s: CommitMessageState| async move {
                 emit_decision_node_event("commit_message", BLOCK_MALFORMED, &s.identifier)?;
@@ -606,8 +611,9 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK_MISSING_LINEAR_REF,
             |s: CommitMessageState| async move {
                 emit_decision_node_event(
@@ -625,6 +631,7 @@ async fn build_commit_message_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &CommitMessageState| {

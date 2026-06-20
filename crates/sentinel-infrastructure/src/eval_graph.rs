@@ -347,7 +347,7 @@ async fn build_eval_graph_with_checkpointer(
     let builder = StateGraphBuilder::<EvalRunState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", CLASSIFY, &s.identifier)?;
@@ -359,8 +359,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_CASES,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", NO_CASES, &s.identifier)?;
@@ -374,8 +375,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             SCORING_FAILED,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", SCORING_FAILED, &s.identifier)?;
@@ -389,8 +391,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             FAILING,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", FAILING, &s.identifier)?;
@@ -404,8 +407,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BORDERLINE,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", BORDERLINE, &s.identifier)?;
@@ -419,8 +423,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             PASSING,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", PASSING, &s.identifier)?;
@@ -434,8 +439,9 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             STRONG,
             |s: EvalRunState| async move {
                 emit_decision_node_event("eval", STRONG, &s.identifier)?;
@@ -449,6 +455,7 @@ async fn build_eval_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &EvalRunState| match expected_decision(s) {

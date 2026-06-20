@@ -482,7 +482,7 @@ async fn build_cost_per_point_graph_with_checkpointer(
     let builder = StateGraphBuilder::<CostPerPointState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", CLASSIFY, &s.identifier)?;
@@ -494,8 +494,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", NO_DATA, &s.identifier)?;
@@ -509,8 +510,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MISSING_ESTIMATE_DATA,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", MISSING_ESTIMATE_DATA, &s.identifier)?;
@@ -524,8 +526,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DRIFT_ALARM,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", DRIFT_ALARM, &s.identifier)?;
@@ -539,8 +542,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             COVERAGE_RISK,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", COVERAGE_RISK, &s.identifier)?;
@@ -554,8 +558,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             INSUFFICIENT_CURVE_BASELINE,
             |s: CostPerPointState| async move {
                 emit_decision_node_event(
@@ -573,8 +578,9 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HEALTHY_CURVE,
             |s: CostPerPointState| async move {
                 emit_decision_node_event("cost_per_point", HEALTHY_CURVE, &s.identifier)?;
@@ -588,6 +594,7 @@ async fn build_cost_per_point_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &CostPerPointState| {

@@ -302,7 +302,7 @@ async fn build_delegation_graph_with_checkpointer(
     let builder = StateGraphBuilder::<DelegationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: DelegationState| async move {
                 emit_decision_node_event("delegation", CLASSIFY, &s.identifier)?;
@@ -314,8 +314,9 @@ async fn build_delegation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             COMPLETED,
             |s: DelegationState| async move {
                 emit_decision_node_event("delegation", COMPLETED, &s.identifier)?;
@@ -327,6 +328,7 @@ async fn build_delegation_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |_s: &DelegationState| COMPLETED.into())

@@ -506,7 +506,7 @@ async fn build_roi_graph_with_checkpointer(
     let builder = StateGraphBuilder::<RoiState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", CLASSIFY, &s.identifier)?;
@@ -518,8 +518,9 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", NO_DATA, &s.identifier)?;
@@ -533,8 +534,9 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MISSING_ESTIMATE_DATA,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", MISSING_ESTIMATE_DATA, &s.identifier)?;
@@ -548,8 +550,9 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             POSITIVE_RETURN,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", POSITIVE_RETURN, &s.identifier)?;
@@ -563,8 +566,9 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BREAK_EVEN,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", BREAK_EVEN, &s.identifier)?;
@@ -578,8 +582,9 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NEGATIVE_RETURN,
             |s: RoiState| async move {
                 emit_decision_node_event("roi", NEGATIVE_RETURN, &s.identifier)?;
@@ -593,6 +598,7 @@ async fn build_roi_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &RoiState| match expected_decision(s) {

@@ -653,7 +653,7 @@ async fn build_tool_usage_graph_with_checkpointer(
     let builder = StateGraphBuilder::<ToolUsageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", CLASSIFY, &s.identifier)?;
@@ -665,8 +665,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_NO_TOOL,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", ALLOW_NO_TOOL, &s.identifier)?;
@@ -678,8 +679,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_TRIVIALLY_REVERSIBLE,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", ALLOW_TRIVIALLY_REVERSIBLE, &s.identifier)?;
@@ -691,8 +693,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW_A3_HANDOFF,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", ALLOW_A3_HANDOFF, &s.identifier)?;
@@ -704,8 +707,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", ALLOW, &s.identifier)?;
@@ -717,8 +721,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_SESSION_ID,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_MISSING_SESSION_ID, &s.identifier)?;
@@ -730,8 +735,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_TRANSCRIPT_PATH,
             |s: ToolUsageState| async move {
                 emit_decision_node_event(
@@ -747,8 +753,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_TRANSCRIPT_AUTHORITY,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_TRANSCRIPT_AUTHORITY, &s.identifier)?;
@@ -760,8 +767,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_TASK_LIST_AUTHORITY,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_TASK_LIST_AUTHORITY, &s.identifier)?;
@@ -773,8 +781,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_SEQUENTIAL_THINKING,
             |s: ToolUsageState| async move {
                 emit_decision_node_event(
@@ -790,8 +799,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_TASK_LIST,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_MISSING_TASK_LIST, &s.identifier)?;
@@ -803,8 +813,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_PLAN_IN_PROGRESS,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_PLAN_IN_PROGRESS, &s.identifier)?;
@@ -816,8 +827,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_APPROVED_PLAN,
             |s: ToolUsageState| async move {
                 emit_decision_node_event("tool_usage", DENY_MISSING_APPROVED_PLAN, &s.identifier)?;
@@ -829,8 +841,9 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY_MISSING_IN_PROGRESS_TASK,
             |s: ToolUsageState| async move {
                 emit_decision_node_event(
@@ -846,6 +859,7 @@ async fn build_tool_usage_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &ToolUsageState| {

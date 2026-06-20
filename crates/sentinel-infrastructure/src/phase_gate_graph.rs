@@ -454,7 +454,7 @@ async fn build_phase_gate_graph_with_checkpointer(
     let builder = StateGraphBuilder::<PhaseGateState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: PhaseGateState| async move {
                 emit_decision_node_event("phase_gate", CLASSIFY, &s.identifier)?;
@@ -466,8 +466,9 @@ async fn build_phase_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ALLOW,
             |s: PhaseGateState| async move {
                 emit_decision_node_event("phase_gate", ALLOW, &s.identifier)?;
@@ -479,8 +480,9 @@ async fn build_phase_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             BLOCK,
             |s: PhaseGateState| async move {
                 emit_decision_node_event("phase_gate", BLOCK, &s.identifier)?;
@@ -492,8 +494,9 @@ async fn build_phase_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             DENY,
             |s: PhaseGateState| async move {
                 emit_decision_node_event("phase_gate", DENY, &s.identifier)?;
@@ -505,6 +508,7 @@ async fn build_phase_gate_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &PhaseGateState| {

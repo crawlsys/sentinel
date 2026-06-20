@@ -304,7 +304,7 @@ async fn build_ba_draft_graph_with_checkpointer(
     let builder = StateGraphBuilder::<BaDraftState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", CLASSIFY, &s.identifier)?;
@@ -316,8 +316,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MISSING_BODY,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", MISSING_BODY, &s.identifier)?;
@@ -331,8 +332,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MISSING_CITATIONS,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", MISSING_CITATIONS, &s.identifier)?;
@@ -346,8 +348,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             MISSING_REQUIREMENTS,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", MISSING_REQUIREMENTS, &s.identifier)?;
@@ -361,8 +364,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             INCOMPLETE_SPEC_CHALLENGE,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", INCOMPLETE_SPEC_CHALLENGE, &s.identifier)?;
@@ -376,8 +380,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             READY,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", READY, &s.identifier)?;
@@ -391,8 +396,9 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             HIGH_RISK_READY,
             |s: BaDraftState| async move {
                 emit_decision_node_event("ba_draft", HIGH_RISK_READY, &s.identifier)?;
@@ -406,6 +412,7 @@ async fn build_ba_draft_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &BaDraftState| match expected_decision(s) {

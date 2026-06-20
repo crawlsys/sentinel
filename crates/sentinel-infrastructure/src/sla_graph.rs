@@ -393,7 +393,7 @@ async fn build_sla_graph_with_checkpointer(
     let builder = StateGraphBuilder::<SlaState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema)
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", CLASSIFY, &s.identifier)?;
@@ -405,8 +405,9 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_DATA,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", NO_DATA, &s.identifier)?;
@@ -420,8 +421,9 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             NO_WINDOW_BREACHES,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", NO_WINDOW_BREACHES, &s.identifier)?;
@@ -435,8 +437,9 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             REPEATED_BREACH,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", REPEATED_BREACH, &s.identifier)?;
@@ -450,8 +453,9 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             ACTIVE_BREACH,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", ACTIVE_BREACH, &s.identifier)?;
@@ -465,8 +469,9 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
-        .add_async_node_with_config(
+        .add_async_node_with_config_and_error_handler(
             SATURATED_BREACH_LOAD,
             |s: SlaState| async move {
                 emit_decision_node_event("sla", SATURATED_BREACH_LOAD, &s.identifier)?;
@@ -480,6 +485,7 @@ async fn build_sla_graph_with_checkpointer(
                 checkpointer_scope,
                 checkpointer_tenant_scope,
             ),
+            crate::decision_graph_introspection::decision_node_error_handler,
         )
         .add_edge(START, CLASSIFY)
         .add_conditional_edge(CLASSIFY, |s: &SlaState| match expected_decision(s) {
