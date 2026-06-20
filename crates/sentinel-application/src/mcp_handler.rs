@@ -729,6 +729,29 @@ fn validate_decision_graph_run_evidence(
             "{context} stream evidence omitted LangGraph v3 protocol markers"
         ));
     }
+    for payload_kind in [
+        "values",
+        "updates",
+        "tasks",
+        "checkpoints",
+        "debug",
+        "custom",
+    ] {
+        if !stream.iter().any(|part| {
+            part.get("payload_kind").and_then(serde_json::Value::as_str) == Some(payload_kind)
+        }) {
+            return Err(format!(
+                "{context} stream evidence omitted LangGraph {payload_kind} payloads"
+            ));
+        }
+    }
+    if !stream.iter().any(|part| {
+        part.get("event_type").and_then(serde_json::Value::as_str) == Some("ExecutionComplete")
+    }) {
+        return Err(format!(
+            "{context} stream evidence omitted LangGraph ExecutionComplete event"
+        ));
+    }
     if !stream.iter().any(|part| {
         part.get("event_type")
             .and_then(serde_json::Value::as_str)
@@ -3183,6 +3206,57 @@ mod step_tools_tests {
         }
     }
 
+    fn test_decision_v3_stream(node_id: &str) -> serde_json::Value {
+        serde_json::json!([
+            {
+                "stream_protocol": "v3",
+                "event_type": "Values",
+                "payload_kind": "values",
+                "node_id": "__state__",
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "Updates",
+                "payload_kind": "updates",
+                "node_id": node_id,
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "Task",
+                "payload_kind": "tasks",
+                "node_id": node_id,
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "Checkpoint",
+                "payload_kind": "checkpoints",
+                "node_id": node_id,
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "Debug",
+                "payload_kind": "debug",
+                "node_id": node_id,
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "Custom",
+                "payload_kind": "custom",
+                "node_id": node_id,
+                "payload": {
+                    "type": "sentinel.decision_node",
+                    "node_id": node_id,
+                },
+            },
+            {
+                "stream_protocol": "v3",
+                "event_type": "ExecutionComplete",
+                "payload_kind": "values",
+                "node_id": "__end__",
+            }
+        ])
+    }
+
     fn registry_with_verified_adapter(
         adapter_name: &str,
         claim_types: &[&str],
@@ -3293,12 +3367,7 @@ mod step_tools_tests {
                         "checkpoint_id": "checkpoint-1",
                         "channel": "state",
                     }],
-                    "stream": [{
-                        "stream_protocol": "v3",
-                        "event_type": "custom",
-                        "payload_kind": "custom",
-                        "node_id": "classify",
-                    }],
+                    "stream": test_decision_v3_stream("classify"),
                     "topology": {
                         "graph": "severity",
                         "durable_checkpointer": true,
@@ -3403,12 +3472,7 @@ mod step_tools_tests {
                         "checkpoint_id": "checkpoint-1",
                         "channel": "state",
                     }],
-                    "stream": [{
-                        "stream_protocol": "v3",
-                        "event_type": "custom",
-                        "payload_kind": "custom",
-                        "node_id": decision,
-                    }],
+                    "stream": test_decision_v3_stream(decision),
                     "topology": {
                         "graph": "pm_audit",
                         "durable_checkpointer": true,
@@ -3502,12 +3566,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": decision.clone(),
-                }],
+                "stream": test_decision_v3_stream(&decision),
                 "topology": {
                     "graph": "linear_health",
                     "durable_checkpointer": true,
@@ -3589,12 +3648,7 @@ mod step_tools_tests {
                         "checkpoint_id": "checkpoint-1",
                         "channel": "state",
                     }],
-                    "stream": [{
-                        "stream_protocol": "v3",
-                        "event_type": "custom",
-                        "payload_kind": "custom",
-                        "node_id": decision,
-                    }],
+                    "stream": test_decision_v3_stream(decision),
                     "topology": {
                         "graph": "dev_scorecard",
                         "durable_checkpointer": true,
@@ -3694,12 +3748,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": decision.clone(),
-                }],
+                "stream": test_decision_v3_stream(&decision),
                 "topology": {
                     "graph": "token_cost",
                     "durable_checkpointer": true,
@@ -3771,12 +3820,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": decision.clone(),
-                }],
+                "stream": test_decision_v3_stream(&decision),
                 "topology": {
                     "graph": "token_usage",
                     "durable_checkpointer": true,
@@ -3864,12 +3908,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": "validated",
-                }],
+                "stream": test_decision_v3_stream("validated"),
                 "topology": {
                     "graph": graph,
                     "durable_checkpointer": true,
@@ -4041,12 +4080,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": "strong",
-                }],
+                "stream": test_decision_v3_stream("strong"),
                 "topology": {
                     "graph": "eval",
                     "durable_checkpointer": true,
@@ -4182,12 +4216,7 @@ mod step_tools_tests {
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
                 }],
-                "stream": [{
-                    "stream_protocol": "v3",
-                    "event_type": "custom",
-                    "payload_kind": "custom",
-                    "node_id": "high_risk_ready",
-                }],
+                "stream": test_decision_v3_stream("high_risk_ready"),
                 "topology": {
                     "graph": "ba_draft",
                     "durable_checkpointer": true,
@@ -4251,12 +4280,7 @@ mod step_tools_tests {
                         "checkpoint_id": "checkpoint-1",
                         "channel": "state",
                     }],
-                    "stream": [{
-                        "stream_protocol": "v3",
-                        "event_type": "custom",
-                        "payload_kind": "custom",
-                        "node_id": "flag",
-                    }],
+                    "stream": test_decision_v3_stream("flag"),
                     "topology": {
                         "graph": "reconciliation",
                         "durable_checkpointer": true,
@@ -4363,12 +4387,7 @@ mod step_tools_tests {
                         "checkpoint_id": "checkpoint-1",
                         "channel": "state",
                     }],
-                    "stream": [{
-                        "stream_protocol": "v3",
-                        "event_type": "custom",
-                        "payload_kind": "custom",
-                        "node_id": "verified",
-                    }],
+                    "stream": test_decision_v3_stream("verified"),
                     "topology": {
                         "graph": "mcp_proof_read",
                         "durable_checkpointer": true,
@@ -4985,6 +5004,48 @@ mod step_tools_tests {
             }),
             "unexpected error: {:?}",
             result.error
+        );
+    }
+
+    #[test]
+    fn langgraph_audit_validation_rejects_partial_v3_stream_evidence() {
+        let thread_id = "sentinel.decision.token_usage.partial".to_string();
+        let checkpoint = format!("{thread_id}#checkpoint-1");
+        let audit = serde_json::json!({
+            "workflow_authority": "langgraph",
+            "graph": "token_usage",
+            "decision": "forged",
+            "authorization_checkpoint": checkpoint,
+            "thread_id": thread_id,
+            "run": {
+                "thread_id": thread_id,
+                "state": {"decision": "forged"},
+                "checkpoints": [{
+                    "checkpoint_id": "checkpoint-1",
+                    "thread_id": thread_id,
+                }],
+                "write_history": [{
+                    "checkpoint_id": "checkpoint-1",
+                    "channel": "state",
+                }],
+                "stream": [{
+                    "stream_protocol": "v3",
+                    "event_type": "Custom",
+                    "payload_kind": "custom",
+                    "node_id": "forged",
+                }],
+                "topology": {
+                    "graph": "token_usage",
+                    "durable_checkpointer": true,
+                },
+            },
+        });
+
+        let err = validate_langgraph_audit_value("token usage", &audit)
+            .expect_err("partial v3 stream evidence must fail closed");
+        assert!(
+            err.contains("omitted LangGraph values payloads"),
+            "unexpected error: {err}"
         );
     }
 

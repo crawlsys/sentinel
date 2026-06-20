@@ -274,6 +274,7 @@ fn test_nonterminal_phase_graph_run(
     let checkpoint_id = format!("checkpoint-{phase_id}");
     let mut stream = vec![
         serde_json::json!({
+            "stream_protocol": "v3",
             "event_type": "ExecutionComplete",
             "node_id": phase_id,
             "timestamp": "2026-06-17T00:00:00Z",
@@ -282,6 +283,34 @@ fn test_nonterminal_phase_graph_run(
             "payload_json": graph_state.clone()
         }),
         serde_json::json!({
+            "stream_protocol": "v3",
+            "event_type": "Updates",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "updates",
+            "payload_json": {"current_phase": 0}
+        }),
+        serde_json::json!({
+            "stream_protocol": "v3",
+            "event_type": "Task",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "tasks",
+            "payload_json": {"node_id": phase_id}
+        }),
+        serde_json::json!({
+            "stream_protocol": "v3",
+            "event_type": "Debug",
+            "node_id": phase_id,
+            "timestamp": "2026-06-17T00:00:00Z",
+            "superstep": 1,
+            "payload_kind": "debug",
+            "payload_json": {"node_id": phase_id}
+        }),
+        serde_json::json!({
+            "stream_protocol": "v3",
             "event_type": "Checkpoint",
             "node_id": phase_id,
             "timestamp": "2026-06-17T00:00:00Z",
@@ -301,6 +330,7 @@ fn test_nonterminal_phase_graph_run(
     ];
     if let Some(payload) = custom_payload {
         stream.push(serde_json::json!({
+            "stream_protocol": "v3",
             "event_type": "Custom",
             "node_id": phase_id,
             "timestamp": "2026-06-17T00:00:00Z",
@@ -1008,6 +1038,25 @@ impl ProofEngine {
             bail!(
                 "LangGraph phase evidence for '{skill}/{phase_id}' has no stream for a non-terminal transition"
             );
+        }
+
+        if stream.iter().any(|part| {
+            part.get("stream_protocol")
+                .and_then(serde_json::Value::as_str)
+                != Some("v3")
+        }) {
+            bail!(
+                "LangGraph phase evidence for '{skill}/{phase_id}' stream omitted LangGraph v3 protocol markers"
+            );
+        }
+        for payload_kind in ["updates", "tasks", "debug"] {
+            if !stream.iter().any(|part| {
+                part.get("payload_kind").and_then(serde_json::Value::as_str) == Some(payload_kind)
+            }) {
+                bail!(
+                    "LangGraph phase evidence for '{skill}/{phase_id}' stream omitted LangGraph {payload_kind} payload"
+                );
+            }
         }
 
         let has_values = stream.iter().any(|part| {
@@ -4718,6 +4767,7 @@ mod phase_evidence_tests {
                         } else {
                             serde_json::json!([
                                 {
+                                    "stream_protocol": "v3",
                                     "event_type": "ExecutionComplete",
                                     "node_id": phase_id,
                                     "timestamp": "2026-06-17T00:00:00Z",
@@ -4729,6 +4779,34 @@ mod phase_evidence_tests {
                                     }
                                 },
                                 {
+                                    "stream_protocol": "v3",
+                                    "event_type": "Updates",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "updates",
+                                    "payload_json": {"current_phase": state.current_phase}
+                                },
+                                {
+                                    "stream_protocol": "v3",
+                                    "event_type": "Task",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "tasks",
+                                    "payload_json": {"node_id": phase_id}
+                                },
+                                {
+                                    "stream_protocol": "v3",
+                                    "event_type": "Debug",
+                                    "node_id": phase_id,
+                                    "timestamp": "2026-06-17T00:00:00Z",
+                                    "superstep": 1,
+                                    "payload_kind": "debug",
+                                    "payload_json": {"node_id": phase_id}
+                                },
+                                {
+                                    "stream_protocol": "v3",
                                     "event_type": "Checkpoint",
                                     "node_id": phase_id,
                                     "timestamp": "2026-06-17T00:00:00Z",
@@ -4746,6 +4824,7 @@ mod phase_evidence_tests {
                                     }
                                 },
                                 {
+                                    "stream_protocol": "v3",
                                     "event_type": "Custom",
                                     "node_id": phase_id,
                                     "timestamp": "2026-06-17T00:00:00Z",
@@ -5058,6 +5137,7 @@ mod phase_evidence_tests {
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": [
                         {
+                            "stream_protocol": "v3",
                             "event_type": "ExecutionComplete",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5069,6 +5149,34 @@ mod phase_evidence_tests {
                             }
                         },
                         {
+                            "stream_protocol": "v3",
+                            "event_type": "Updates",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "updates",
+                            "payload_json": {"current_phase": 0}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Task",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "tasks",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Debug",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "debug",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
                             "event_type": "Checkpoint",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5142,6 +5250,82 @@ mod phase_evidence_tests {
         assert!(
             !state.has_proof_chain("linear"),
             "invalid graph evidence must not seal a phase proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_rejects_partial_v3_phase_stream() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let mut graph_run = test_nonterminal_phase_graph_run(
+            "linear",
+            "phase-session",
+            "claim",
+            Some(serde_json::json!({
+                "type": "sentinel.phase_gate",
+                "skill": "linear",
+                "session_id": "phase-session",
+                "phase_id": "claim",
+                "phase_index": 0,
+                "last_verdict": "pending"
+            })),
+        );
+        graph_run
+            .get_mut("stream")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("test graph stream")
+            .retain(|part| {
+                part.get("payload_kind").and_then(serde_json::Value::as_str) != Some("debug")
+            });
+        let authority = Arc::new(RecordingPhaseGraph {
+            graph_run_override: Mutex::new(Some(graph_run)),
+            ..Default::default()
+        });
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::fail(0.72, "claim needs evidence", vec![]),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("partial phase stream evidence must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("stream omitted LangGraph debug payload"),
+            "error must identify missing debug stream projection: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), false)],
+            "graph authority should be called, then stream validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "partial stream evidence must not project workflow state"
+        );
+        assert!(
+            state.submission_attempts("linear:claim").is_none(),
+            "local failure counters must not advance when stream evidence is incomplete"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "partial stream evidence must not seal a phase proof"
         );
     }
 
@@ -5339,6 +5523,7 @@ mod phase_evidence_tests {
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": [
                         {
+                            "stream_protocol": "v3",
                             "event_type": "ExecutionComplete",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5347,6 +5532,34 @@ mod phase_evidence_tests {
                             "payload_json": graph_state.clone()
                         },
                         {
+                            "stream_protocol": "v3",
+                            "event_type": "Updates",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "updates",
+                            "payload_json": {"current_phase": 0}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Task",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "tasks",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Debug",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "debug",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
                             "event_type": "Checkpoint",
                             "node_id": "other_gate",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5364,6 +5577,7 @@ mod phase_evidence_tests {
                             }
                         },
                         {
+                            "stream_protocol": "v3",
                             "event_type": "Custom",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5485,6 +5699,7 @@ mod phase_evidence_tests {
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
                     "stream": [
                         {
+                            "stream_protocol": "v3",
                             "event_type": "ExecutionComplete",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5493,6 +5708,34 @@ mod phase_evidence_tests {
                             "payload_json": graph_state.clone()
                         },
                         {
+                            "stream_protocol": "v3",
+                            "event_type": "Updates",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "updates",
+                            "payload_json": {"current_phase": 0}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Task",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "tasks",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
+                            "event_type": "Debug",
+                            "node_id": "claim",
+                            "timestamp": "2026-06-17T00:00:00Z",
+                            "superstep": 1,
+                            "payload_kind": "debug",
+                            "payload_json": {"node_id": "claim"}
+                        },
+                        {
+                            "stream_protocol": "v3",
                             "event_type": "Checkpoint",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
@@ -5510,6 +5753,7 @@ mod phase_evidence_tests {
                             }
                         },
                         {
+                            "stream_protocol": "v3",
                             "event_type": "Custom",
                             "node_id": "claim",
                             "timestamp": "2026-06-17T00:00:00Z",
