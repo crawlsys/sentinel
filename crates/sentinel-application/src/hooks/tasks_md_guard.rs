@@ -61,7 +61,7 @@ pub struct TasksMdGuardEvaluation {
 impl TasksMdGuardEvaluation {
     #[must_use]
     pub const fn graph_authority_required(&self) -> bool {
-        self.guarded_tool && self.file_path_present && self.project_tasks_md
+        self.guarded_tool
     }
 }
 

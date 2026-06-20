@@ -7616,6 +7616,61 @@ description = "Claim"
     }
 
     #[test]
+    fn tasks_md_guard_graph_authority_audits_guarded_tool_without_file_path() {
+        let _lock = env_lock();
+        let home = tempfile::tempdir().expect("temp home");
+        let repo = tempfile::tempdir().expect("temp repo");
+        let _home = EnvGuard::set("SENTINEL_HOME", home.path());
+        let _backend = EnvGuard::set("SENTINEL_DECISION_GRAPH_CHECKPOINTER", "sqlite");
+        let git = TasksRepoGit {
+            root: repo.path().to_path_buf(),
+        };
+        let fs = sentinel_infrastructure::filesystem::RealFileSystem;
+        let process = sentinel_infrastructure::process::RealProcess;
+        let env = NoopEnv;
+        let memory_mcp = NoopMemoryMcp;
+        let ctx = hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &process,
+            llm: None,
+            memory_mcp: &memory_mcp,
+            env: &env,
+            linear_lookup: None,
+        };
+        let input = sentinel_domain::events::HookInput {
+            session_id: Some(format!(
+                "tasks-md-guard-missing-path-{}",
+                uuid::Uuid::new_v4()
+            )),
+            tool_name: Some("Edit".into()),
+            tool_input: Some(serde_json::json!({
+                "old_string": "auto item",
+                "new_string": "manual edit"
+            })),
+            ..Default::default()
+        };
+
+        let output = authorize_tasks_md_guard_with_graph(&input, &ctx);
+
+        assert_ne!(output.blocked, Some(true));
+        let graph_rows = std::fs::read_to_string(
+            home.path()
+                .join(".claude")
+                .join("sentinel")
+                .join("metrics")
+                .join("tasks-md-guard.graph-runs.jsonl"),
+        )
+        .expect("graph audit rows");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"graph\":\"tasks_md_guard\""));
+        assert!(graph_rows.contains("\"decision\":\"allow\""));
+        assert!(graph_rows.contains("\"file_path_present\":false"));
+        assert!(!graph_rows.contains("file-path-sha256"));
+    }
+
+    #[test]
     fn task_decomposition_graph_authority_writes_langgraph_audit_for_block() {
         let _lock = env_lock();
         let home = tempfile::tempdir().expect("temp home");
