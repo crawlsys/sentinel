@@ -7,7 +7,8 @@
 //!
 //! ## `SENTINEL_HOME`
 //!
-//! When `SENTINEL_HOME` is set (non-empty), it overrides the OS home directory.
+//! When `SENTINEL_HOME` is set, it overrides the OS home directory. An explicit
+//! empty value is a configuration error, not a signal to fall back to OS home.
 //! This exists for **test isolation**: `dirs::home_dir()` on Windows queries the
 //! OS user-profile API and **ignores** the `HOME`/`USERPROFILE` env vars, so a
 //! black-box test cannot isolate `~/.claude` by setting `HOME` alone. Routing
@@ -22,16 +23,28 @@
 
 use std::path::PathBuf;
 
-/// The resolved home root: `SENTINEL_HOME` if set (non-empty), else the OS home.
-/// Returns `None` only when neither is available (same as `dirs::home_dir`).
+/// The resolved home root: `SENTINEL_HOME` if set, else the OS home.
+///
+/// Returns `None` when neither is available, or when `SENTINEL_HOME` is
+/// explicitly empty. Use [`home_root_or_fatal`] when callers need the exact
+/// configuration error.
 #[must_use]
 pub fn home_root() -> Option<PathBuf> {
-    if let Ok(h) = std::env::var("SENTINEL_HOME") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
+    try_home_root().ok()
+}
+
+/// Fallible authoritative home-root resolver.
+pub fn try_home_root() -> Result<PathBuf, String> {
+    match std::env::var("SENTINEL_HOME") {
+        Ok(home) if !home.is_empty() => Ok(PathBuf::from(home)),
+        Ok(_) => Err("SENTINEL_HOME is set but empty".to_string()),
+        Err(std::env::VarError::NotPresent) => dirs::home_dir().ok_or_else(|| {
+            "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("SENTINEL_HOME is not valid Unicode".to_string())
         }
     }
-    dirs::home_dir()
 }
 
 /// Like [`home_root`] but panics with the standard FATAL message when no home is
@@ -39,8 +52,7 @@ pub fn home_root() -> Option<PathBuf> {
 /// `state_dir` (Attack #84/#85: never write to CWD).
 #[must_use]
 pub fn home_root_or_fatal() -> PathBuf {
-    home_root()
-        .expect("[sentinel] FATAL: Cannot determine home directory. HOME/USERPROFILE must be set.")
+    try_home_root().unwrap_or_else(|e| panic!("[sentinel] FATAL: {e}"))
 }
 
 /// Root directory for sentinel-owned files under the user's Claude home.
@@ -99,9 +111,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_sentinel_home_is_ignored() {
+    fn empty_sentinel_home_fails_closed() {
         let _guard = env_lock();
         let _env = EnvGuard::set("SENTINEL_HOME", "");
-        assert_eq!(home_root(), dirs::home_dir());
+        assert_eq!(home_root(), None);
+        assert_eq!(
+            try_home_root().unwrap_err(),
+            "SENTINEL_HOME is set but empty"
+        );
     }
 }

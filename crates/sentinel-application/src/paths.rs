@@ -15,13 +15,15 @@ use std::path::PathBuf;
 
 /// Resolve the home root used by application-level path helpers.
 ///
-/// `SENTINEL_HOME` wins when set to a non-empty value; otherwise Sentinel uses
-/// the OS home directory. This mirrors the infrastructure path authority while
-/// keeping the application crate independent from infrastructure.
+/// `SENTINEL_HOME` wins when set. An explicit empty value is a configuration
+/// error; otherwise Sentinel uses the OS home directory. This mirrors the
+/// infrastructure path authority while keeping the application crate independent
+/// from infrastructure.
 pub fn home_root() -> Result<PathBuf, String> {
     match std::env::var("SENTINEL_HOME") {
         Ok(root) if !root.is_empty() => Ok(PathBuf::from(root)),
-        Ok(_) | Err(VarError::NotPresent) => dirs::home_dir().ok_or_else(|| {
+        Ok(_) => Err("SENTINEL_HOME is set but empty".to_string()),
+        Err(VarError::NotPresent) => dirs::home_dir().ok_or_else(|| {
             "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
         }),
         Err(VarError::NotUnicode(_)) => Err("SENTINEL_HOME is not valid Unicode".to_string()),
@@ -66,11 +68,10 @@ fn resolve_claude_dir(
         Ok(_) => Err("SENTINEL_CLAUDE_DIR is set but empty".to_string()),
         Err(VarError::NotPresent) => match home_override {
             Ok(root) if !root.is_empty() => Ok(PathBuf::from(root).join(".claude")),
-            Ok(_) | Err(VarError::NotPresent) => {
-                home.map(|home| home.join(".claude")).ok_or_else(|| {
-                    "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
-                })
-            }
+            Ok(_) => Err("SENTINEL_HOME is set but empty".to_string()),
+            Err(VarError::NotPresent) => home.map(|home| home.join(".claude")).ok_or_else(|| {
+                "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
+            }),
             Err(VarError::NotUnicode(_)) => Err("SENTINEL_HOME is not valid Unicode".to_string()),
         },
         Err(VarError::NotUnicode(_)) => Err("SENTINEL_CLAUDE_DIR is not valid Unicode".to_string()),
@@ -149,6 +150,19 @@ mod tests {
                     try_claude_dir().unwrap(),
                     PathBuf::from("/tmp/sentinel-home-root").join(".claude")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn empty_sentinel_home_fails_closed() {
+        with_envs(
+            &[("SENTINEL_CLAUDE_DIR", None), ("SENTINEL_HOME", Some(""))],
+            || {
+                let err = home_root().expect_err("empty SENTINEL_HOME must fail closed");
+                assert!(err.contains("SENTINEL_HOME is set but empty"));
+                let err = try_claude_dir().expect_err("empty SENTINEL_HOME must fail closed");
+                assert!(err.contains("SENTINEL_HOME is set but empty"));
             },
         );
     }
