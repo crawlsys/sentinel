@@ -5602,10 +5602,23 @@ fn doppler_auth0_graph_identifier(
     let operation = evaluation
         .operation
         .as_deref()
-        .unwrap_or("unknown-operation");
+        .map(str::trim)
+        .filter(|operation| !operation.is_empty())
+        .ok_or_else(|| {
+            anyhow!("Doppler/Auth0 LangGraph authority requires concrete operation evidence")
+        })?;
+    let provider =
+        sentinel_infrastructure::doppler_auth0_graph::provider_label(evaluation.provider);
     Ok(format!(
-        "{session_id}:{tool}:{operation}:block-{}:override-{}",
-        evaluation.should_block, evaluation.signed_override_active
+        "{session_id}:{tool}:provider-{provider}:operation-{operation}:tool-input-present-{}:\
+         prod-{}:autopilot-{}:read-only-{}:mutation-{}:block-{}:override-{}",
+        evaluation.tool_input_present,
+        evaluation.production_target,
+        evaluation.autopilot,
+        evaluation.read_only,
+        evaluation.mutation,
+        evaluation.should_block,
+        evaluation.signed_override_active
     ))
 }
 
@@ -7751,6 +7764,7 @@ description = "Claim"
             ["unwrap_or(", "\"missing"].concat(),
             ["unwrap_or_else(|| ", "\"no-"].concat(),
             ["unwrap_or(", "\"no-"].concat(),
+            ["unknown", "-operation"].concat(),
         ];
 
         for pattern in fallback_patterns {
@@ -8578,6 +8592,83 @@ description = "Claim"
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"doppler_auth0\""));
         assert!(graph_rows.contains("\"decision\":\"block\""));
+    }
+
+    #[test]
+    fn doppler_auth0_graph_authority_records_absent_tool_input_as_prod_evidence() {
+        let _lock = env_lock();
+        let home = tempfile::tempdir().expect("temp home");
+        let _home = EnvGuard::set("SENTINEL_HOME", home.path());
+        let _backend = EnvGuard::set("SENTINEL_DECISION_GRAPH_CHECKPOINTER", "sqlite");
+        let git = sentinel_infrastructure::git::RealGit;
+        let fs = sentinel_infrastructure::filesystem::RealFileSystem;
+        let process = sentinel_infrastructure::process::RealProcess;
+        let env = NoopEnv;
+        let memory_mcp = NoopMemoryMcp;
+        let ctx = hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &process,
+            llm: None,
+            memory_mcp: &memory_mcp,
+            env: &env,
+            linear_lookup: None,
+        };
+        let input = sentinel_domain::events::HookInput {
+            session_id: Some(format!("doppler-auth0-no-input-{}", uuid::Uuid::new_v4())),
+            tool_name: Some("mcp__doppler__set_secret".into()),
+            ..Default::default()
+        };
+
+        let output = authorize_doppler_auth0_with_graph(&input, &ctx);
+
+        assert_eq!(output.blocked, Some(true));
+        let graph_rows = std::fs::read_to_string(
+            home.path()
+                .join(".claude")
+                .join("sentinel")
+                .join("metrics")
+                .join("doppler-auth0.graph-runs.jsonl"),
+        )
+        .expect("graph audit rows");
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
+        assert!(graph_rows.contains("\"graph\":\"doppler_auth0\""));
+        assert!(graph_rows.contains("\"decision\":\"block\""));
+        assert!(graph_rows.contains("\"tool_input_present\":false"));
+        assert!(graph_rows.contains("\"production_target\":true"));
+        let synthetic_operation = ["unknown", "-operation"].concat();
+        assert!(!graph_rows.contains(&synthetic_operation));
+    }
+
+    #[test]
+    fn doppler_auth0_graph_identifier_rejects_missing_operation_evidence() {
+        let input = sentinel_domain::events::HookInput {
+            session_id: Some("doppler-auth0-missing-operation-id".into()),
+            tool_name: Some("mcp__doppler__".into()),
+            ..Default::default()
+        };
+        let evaluation = hooks::doppler_auth0_gate::DopplerAuth0Evaluation {
+            tool: Some("mcp__doppler__".into()),
+            operation: None,
+            provider: hooks::doppler_auth0_gate::DopplerAuth0Provider::Doppler,
+            router_management: false,
+            read_only: false,
+            mutation: true,
+            autopilot: false,
+            tool_input_present: true,
+            production_target: true,
+            session_id_present: true,
+            signed_override_active: false,
+            auth0_override_supported: false,
+            should_block: true,
+            decision: hooks::doppler_auth0_gate::DopplerAuth0Decision::Block,
+            block_reason: Some("blocked".into()),
+        };
+
+        let err = doppler_auth0_graph_identifier(&input, &evaluation).unwrap_err();
+
+        assert!(err.to_string().contains("concrete operation evidence"));
     }
 
     #[test]

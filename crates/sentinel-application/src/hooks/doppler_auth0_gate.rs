@@ -38,9 +38,9 @@ fn is_autopilot(env: &dyn EnvPort) -> bool {
 /// true if any top-level string field named `config`, `project`, `domain`,
 /// `tenant`, or `name` contains the substring `prd`, `prod`, or `production`.
 ///
-/// Conservative: returns **true** when the input is `None` (no args to
-/// inspect → assume prod to stay safe). In Autopilot this forces a fall-back
-/// to the override path rather than a silent allow.
+/// Absence is production-risk evidence: when the input is `None`, there are no
+/// concrete args to prove non-prod scope, so the gate returns `true`. In
+/// Autopilot this forces the explicit override path rather than a silent allow.
 fn targets_production(tool_input: Option<&serde_json::Value>) -> bool {
     let Some(v) = tool_input else { return true };
     const FIELDS: &[&str] = &["config", "project", "domain", "tenant", "name"];
@@ -550,9 +550,7 @@ mod tests {
 
     #[test]
     fn test_autopilot_blocks_doppler_mutation_when_no_args_present() {
-        // Conservative fallback: no `tool_input` → assume prod → still block.
-        // This matters because the hook can't otherwise distinguish a
-        // "set_secret without a config" from a prod call.
+        // No `tool_input` means there is no concrete non-prod scope evidence.
         let ctx = ctx_autopilot_on();
         let out = process(&input_with_tool("mcp__doppler__set_secret"), &ctx);
         assert_eq!(out.blocked, Some(true));
@@ -594,7 +592,7 @@ mod tests {
         assert_eq!(
             out.blocked,
             Some(true),
-            "conservative fallback: no args → assume prod → block"
+            "no args means no concrete non-prod scope evidence"
         );
     }
 
