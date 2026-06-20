@@ -512,9 +512,12 @@ fn required_decision_edge_contract(
         }
     }
 
-    if !edges.iter().any(|edge| edge.kind == "conditional") {
+    if !edges
+        .iter()
+        .any(|edge| matches!(edge.kind.as_str(), "conditional" | "dynamic"))
+    {
         return Err(format!(
-            "{graph_name} decision graph has no conditional decision edge"
+            "{graph_name} decision graph has no conditional or dynamic decision edge"
         ));
     }
     if !edges.iter().any(|edge| edge.to.as_deref() == Some(END)) {
@@ -536,7 +539,7 @@ fn required_decision_edge_contract(
                 edge.from
             ));
         }
-        if edge.kind != "conditional" && edge.to.is_none() {
+        if !matches!(edge.kind.as_str(), "conditional" | "dynamic") && edge.to.is_none() {
             return Err(format!(
                 "{graph_name} decision graph non-conditional edge from '{}' is missing a target",
                 edge.from
@@ -1512,14 +1515,11 @@ where
         ));
     }
 
-    let terminal_identifier = terminal_json
-        .get("identifier")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            format!(
-                "{graph_name} decision graph terminal state omitted identifier for thread '{thread_id}'"
-            )
-        })?;
+    let terminal_identifier = terminal_state_identifier(&terminal_json).ok_or_else(|| {
+        format!(
+            "{graph_name} decision graph terminal state omitted identifier for thread '{thread_id}'"
+        )
+    })?;
     let terminal_decision_write =
         latest_terminal_decision_write(graph_name, thread_id, write_history, &terminal_json)?;
     let _terminal_decision_checkpoint = terminal_decision_checkpoint_from_write(
@@ -1624,6 +1624,17 @@ fn latest_terminal_decision_write<'a>(
             format!(
                 "{graph_name} decision graph write history omitted terminal decision-node state write for thread '{thread_id}'"
             )
+        })
+}
+
+fn terminal_state_identifier(terminal_json: &serde_json::Value) -> Option<&str> {
+    terminal_json
+        .get("identifier")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            terminal_json
+                .pointer("/channels/identifier")
+                .and_then(serde_json::Value::as_str)
         })
 }
 
@@ -2739,6 +2750,15 @@ mod tests {
         required_decision_edge_contract("severity", &nodes, &edges)
             .expect("complete decision edge contract passes");
 
+        let dynamic_edges = vec![
+            edge(START, "normal", Some("classify")),
+            edge("classify", "dynamic", None),
+            edge("set", "normal", Some(END)),
+            edge("skip", "normal", Some(END)),
+        ];
+        required_decision_edge_contract("severity", &nodes, &dynamic_edges)
+            .expect("dynamic Send routing is a first-class decision edge");
+
         let missing_start = vec![
             edge("classify", "conditional", None),
             edge("set", "normal", Some(END)),
@@ -2766,8 +2786,8 @@ mod tests {
             edge("skip", "normal", Some(END)),
         ];
         let err = required_decision_edge_contract("severity", &nodes, &no_conditional)
-            .expect_err("missing conditional decision edge must fail");
-        assert!(err.contains("conditional decision edge"));
+            .expect_err("missing conditional or dynamic decision edge must fail");
+        assert!(err.contains("conditional or dynamic decision edge"));
 
         let no_terminal = vec![
             edge(START, "normal", Some("classify")),

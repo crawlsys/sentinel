@@ -10,6 +10,7 @@ pub mod ba_config;
 pub mod ba_draft_graph;
 pub mod ba_provenance_graph;
 pub mod ba_requirements_graph;
+pub mod batch_audit_graph;
 pub mod bug_task_graph;
 pub mod cache_efficiency_graph;
 pub mod capability_route_graph;

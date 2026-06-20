@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use sentinel_application::linear_pm_audit::PmFlag;
 use sentinel_application::mcp_handler::{PmAuditGraphAudit, PmAuditGraphAuditRun};
+use sentinel_infrastructure::batch_audit_graph::{run_batch_audit_graph_report, BatchAuditItem};
 use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::pm_audit_graph::{
     build_pm_audit_graph, pm_audit_decision_label, run_pm_audit_decision_report, PmAuditDecision,
@@ -25,6 +26,35 @@ pub(crate) async fn run_pm_audit_graph_audit(
     let file = std::fs::File::create(graph_jsonl)
         .with_context(|| format!("create PM audit graph {}", graph_jsonl.display()))?;
     let mut writer = std::io::BufWriter::new(file);
+    let batch_items: Vec<_> = flags
+        .iter()
+        .map(|flag| BatchAuditItem::new(flag.identifier.clone(), Some(flag.category.clone())))
+        .collect();
+    let batch_run = run_batch_audit_graph_report("pm_audit_batch", "pm_audit", &batch_items)
+        .await
+        .map_err(|e| anyhow::anyhow!("PM audit batch graph failed: {e}"))?;
+    let batch_run_json = serde_json::to_value(&batch_run)?;
+    let batch_row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": "pm_audit_batch",
+        "target_graph": "pm_audit",
+        "thread_id": batch_run.thread_id,
+        "items_requested": batch_run.items_requested,
+        "items_dispatched": batch_run.items_dispatched,
+        "run": batch_run_json,
+    });
+    serde_json::to_writer(&mut writer, &batch_row).with_context(|| {
+        format!(
+            "write PM audit batch graph row to {}",
+            graph_jsonl.display()
+        )
+    })?;
+    writer.write_all(b"\n").with_context(|| {
+        format!(
+            "terminate PM audit batch graph row in {}",
+            graph_jsonl.display()
+        )
+    })?;
     let mut runs = Vec::with_capacity(flags.len());
     let mut hard_violations = 0usize;
     let mut advisory_flags = 0usize;
@@ -113,6 +143,7 @@ pub(crate) async fn run_pm_audit_graph_audit(
         hard_violations,
         advisory_flags,
         cleared,
+        batch_run: Some(batch_row["run"].clone()),
         runs,
     })
 }
@@ -159,6 +190,25 @@ mod tests {
         assert_eq!(audit.flags_audited, 2);
         assert_eq!(audit.hard_violations, 1);
         assert_eq!(audit.advisory_flags, 1);
+        assert_eq!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["graph"],
+            "pm_audit_batch"
+        );
+        assert!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["edges"]
+                .as_array()
+                .is_some_and(|edges| edges
+                    .iter()
+                    .any(|edge| edge["kind"].as_str() == Some("dynamic")))
+        );
+        assert!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["nodes"]
+                .as_array()
+                .is_some_and(
+                    |nodes| nodes.iter().any(|node| node["id"].as_str() == Some("join")
+                        && node["deferred"].as_bool() == Some(true))
+                )
+        );
         assert_eq!(audit.runs[0].decision, "hard-violation");
         assert!(audit.runs[0].terminal_checkpoint.contains('#'));
         assert!(audit.runs[0]
@@ -170,6 +220,7 @@ mod tests {
             .as_array()
             .is_some_and(|entries| !entries.is_empty()));
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("PM graph jsonl");
+        assert!(graph_rows.contains("\"graph\":\"pm_audit_batch\""));
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"terminal_checkpoint\""));
 

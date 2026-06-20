@@ -290,6 +290,8 @@ pub struct PmAuditGraphAudit {
     pub hard_violations: usize,
     pub advisory_flags: usize,
     pub cleared: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_run: Option<serde_json::Value>,
     pub runs: Vec<PmAuditGraphAuditRun>,
 }
 
@@ -3428,6 +3430,19 @@ mod step_tools_tests {
                 hard_violations,
                 advisory_flags,
                 cleared: 0,
+                batch_run: Some(serde_json::json!({
+                    "workflow_authority": "langgraph",
+                    "graph": "pm_audit_batch",
+                    "target_graph": "pm_audit",
+                    "items_requested": flags.len(),
+                    "items_dispatched": flags.len(),
+                    "topology": {
+                        "graph": "pm_audit_batch",
+                        "durable_checkpointer": true,
+                        "edges": [{"from": "dispatch", "kind": "dynamic"}],
+                        "nodes": [{"id": "join", "deferred": true}],
+                    },
+                })),
                 runs,
             })
         }
