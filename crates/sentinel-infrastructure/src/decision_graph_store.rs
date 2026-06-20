@@ -6,7 +6,7 @@ use langgraph_core::application::services::CompilationResult;
 use langgraph_core::ports::CheckpointSaver;
 use sentinel_domain::langgraph_thread::{
     tenant_scoped_thread_id as tenant_scoped_langgraph_thread_id, validate_tenant_scope,
-    LANGGRAPH_TENANT_ENV,
+    validate_thread_id_component, LANGGRAPH_TENANT_ENV,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -422,9 +422,11 @@ async fn redis_checkpointer(
 /// Derive a checkpoint thread id for one immutable decision-graph run.
 ///
 /// Durable LangGraph execution resumes by `thread_id`. A bare ticket id would
-/// make a later audit of the same ticket resume an old terminal checkpoint.
-/// Hashing the serialized input keeps retries for the same decision idempotent
-/// while giving changed facts/verdicts a fresh run thread under the same graph.
+/// make a later audit of the same ticket resume an old terminal checkpoint,
+/// and raw identifiers can contain separators or control characters from user
+/// input. Hashing both the identifier and serialized input keeps retries for
+/// the same decision idempotent while giving changed facts/verdicts a fresh run
+/// thread under the same graph.
 ///
 /// Hosted distributed checkpointers require `SENTINEL_LANGGRAPH_TENANT` and
 /// include it in the thread id so shared storage cannot resume across tenant
@@ -466,10 +468,7 @@ fn run_thread_id_for_backend<T: Serialize>(
     identifier: &str,
     input: &T,
 ) -> Result<String, String> {
-    let bytes = serde_json::to_vec(input)
-        .map_err(|e| format!("failed to serialize {graph_name} graph input: {e}"))?;
-    let digest = Sha256::digest(&bytes);
-    let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
+    let base = decision_thread_id_base(graph_name, identifier, input)?;
     let tenant_scope = tenant_scope_for_checkpointer_backend(backend)?;
     tenant_scoped_thread_id(base, tenant_scope.as_deref())
 }
@@ -480,11 +479,25 @@ fn run_thread_id_for_tenant_scope<T: Serialize>(
     identifier: &str,
     input: &T,
 ) -> Result<String, String> {
+    let base = decision_thread_id_base(graph_name, identifier, input)?;
+    tenant_scoped_thread_id(base, tenant_scope)
+}
+
+fn decision_thread_id_base<T: Serialize>(
+    graph_name: &str,
+    identifier: &str,
+    input: &T,
+) -> Result<String, String> {
+    validate_thread_id_component(graph_name, "graph_name")?;
     let bytes = serde_json::to_vec(input)
         .map_err(|e| format!("failed to serialize {graph_name} graph input: {e}"))?;
-    let digest = Sha256::digest(&bytes);
-    let base = format!("{graph_name}:{identifier}:{}", encode_hex(&digest));
-    tenant_scoped_thread_id(base, tenant_scope)
+    let input_digest = Sha256::digest(&bytes);
+    let identifier_digest = Sha256::digest(identifier.as_bytes());
+    Ok(format!(
+        "{graph_name}:id-{}:input-{}",
+        encode_hex(identifier_digest.as_ref()),
+        encode_hex(input_digest.as_ref())
+    ))
 }
 
 fn compiled_checkpointer_backend<S>(
@@ -1105,7 +1118,12 @@ mod tests {
             )
             .expect("sqlite thread id");
 
-            assert!(thread_id.starts_with("severity:SEN-123:"));
+            assert!(thread_id.starts_with("severity:id-"));
+            assert!(thread_id.contains(":input-"));
+            assert!(
+                !thread_id.contains("SEN-123"),
+                "decision graph thread ids must hash raw identifiers: {thread_id}"
+            );
             assert!(
                 !thread_id.starts_with("tenant:"),
                 "local SQLite thread ids must not inherit hosted tenant scope: {thread_id}"
@@ -1130,7 +1148,12 @@ mod tests {
                 )
                 .expect("redis thread id");
 
-                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:id-"));
+                assert!(thread_id.contains(":input-"));
+                assert!(
+                    !thread_id.contains("SEN-123"),
+                    "hosted decision graph thread ids must hash raw identifiers: {thread_id}"
+                );
             },
         );
     }
@@ -1150,9 +1173,38 @@ mod tests {
                 )
                 .expect("postgres thread id");
 
-                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:id-"));
+                assert!(thread_id.contains(":input-"));
+                assert!(
+                    !thread_id.contains("SEN-123"),
+                    "hosted decision graph thread ids must hash raw identifiers: {thread_id}"
+                );
             },
         );
+    }
+
+    #[test]
+    fn decision_graph_run_thread_id_hashes_unsafe_identifier() {
+        with_decision_graph_checkpointer_env(None, None, None, None, || {
+            let first = run_thread_id(
+                "severity",
+                "SEN:123\nescape",
+                &serde_json::json!({"ticket": "SEN-123"}),
+            )
+            .expect("thread id");
+            let second = run_thread_id(
+                "severity",
+                "SEN-123",
+                &serde_json::json!({"ticket": "SEN-123"}),
+            )
+            .expect("thread id");
+
+            assert_ne!(first, second);
+            assert!(first.starts_with("severity:id-"));
+            assert!(first.contains(":input-"));
+            assert!(!first.contains("SEN:123"));
+            assert!(!first.contains('\n'));
+        });
     }
 
     #[test]
@@ -1211,7 +1263,12 @@ mod tests {
                 )
                 .expect("compiled hosted thread id");
 
-                assert!(thread_id.starts_with("tenant:legatus_ai:severity:SEN-123:"));
+                assert!(thread_id.starts_with("tenant:legatus_ai:severity:id-"));
+                assert!(thread_id.contains(":input-"));
+                assert!(
+                    !thread_id.contains("SEN-123"),
+                    "compiled hosted thread ids must hash raw identifiers: {thread_id}"
+                );
             },
         );
     }
