@@ -104,15 +104,56 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
     }
 }
 
+#[test]
+fn langgraph_decision_graph_guard_accounts_for_every_builder_source() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let guarded = langgraph_decision_graph_sources();
+    let all_builders = state_graph_builder_sources(&src);
+    let unguarded = all_builders
+        .iter()
+        .filter(|path| !guarded.contains(path))
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        unguarded,
+        vec!["decision_graph_store.rs".to_string()],
+        "every production StateGraphBuilder must be covered by the enterprise LangGraph decision graph guard"
+    );
+}
+
 fn langgraph_decision_graph_sources() -> Vec<PathBuf> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    state_graph_builder_sources(&src)
+        .into_iter()
+        .filter(|path| {
+            if is_test_only_state_graph_builder_source(path) {
+                return false;
+            }
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            source.contains("build_")
+        })
+        .collect()
+}
+
+fn is_test_only_state_graph_builder_source(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("decision_graph_store.rs")
+}
+
+fn state_graph_builder_sources(src: &Path) -> Vec<PathBuf> {
     let mut files = std::fs::read_dir(&src)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", src.display()))
         .map(|entry| entry.expect("source entry should be readable").path())
         .filter_map(|path| {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            (source.contains("StateGraphBuilder") && source.contains("build_")).then_some(path)
+            source.contains("StateGraphBuilder").then_some(path)
         })
         .collect::<Vec<_>>();
 
