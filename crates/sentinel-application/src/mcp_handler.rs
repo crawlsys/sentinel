@@ -514,6 +514,374 @@ fn parse_submit_step_args(args: &serde_json::Value) -> Result<SubmitStepArgs<'_>
     })
 }
 
+fn validated_langgraph_audit_value<T: Serialize>(
+    context: &str,
+    audit: &T,
+) -> Result<serde_json::Value, McpToolResult> {
+    let value = serde_json::to_value(audit).map_err(|err| {
+        McpToolResult::err(format!("{context} graph audit serialization failed: {err}"))
+    })?;
+    validate_langgraph_audit_value(context, &value).map_err(|err| {
+        McpToolResult::err(format!(
+            "{context} LangGraph audit returned invalid durable evidence: {err}"
+        ))
+    })?;
+    Ok(value)
+}
+
+fn langgraph_authorized_response<S: Serialize, T: Serialize>(
+    context: &str,
+    body_key: &str,
+    body: &S,
+    audit_key: &str,
+    audit: &T,
+) -> McpToolResult {
+    let audit = match validated_langgraph_audit_value(context, audit) {
+        Ok(audit) => audit,
+        Err(result) => return result,
+    };
+    let body = match serde_json::to_value(body) {
+        Ok(body) => body,
+        Err(err) => {
+            return McpToolResult::err(format!("{context} response serialization failed: {err}"));
+        }
+    };
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    response.insert(body_key.to_string(), body);
+    response.insert(audit_key.to_string(), audit);
+    McpToolResult::ok(serde_json::Value::Object(response))
+}
+
+fn validate_langgraph_audit_value(context: &str, audit: &serde_json::Value) -> Result<(), String> {
+    let obj = audit
+        .as_object()
+        .ok_or_else(|| format!("{context} audit is not a JSON object"))?;
+    require_langgraph_authority(obj, context)?;
+    let graph = required_string(obj.get("graph"), context, "graph")?;
+
+    let mut validated_runs = 0usize;
+    if let Some(run) = obj.get("run") {
+        let thread_id = required_string(obj.get("thread_id"), context, "thread_id")?;
+        let checkpoint_ref = required_string(
+            obj.get("authorization_checkpoint")
+                .or_else(|| obj.get("terminal_checkpoint")),
+            context,
+            "authorization_checkpoint",
+        )?;
+        validate_decision_graph_run_evidence(context, graph, thread_id, checkpoint_ref, run)?;
+        validated_runs += 1;
+    }
+
+    if let Some(runs) = obj.get("runs") {
+        let runs = runs
+            .as_array()
+            .ok_or_else(|| format!("{context} audit field 'runs' is not an array"))?;
+        for (idx, run_obj) in runs.iter().enumerate() {
+            let run_context = format!("{context} run[{idx}]");
+            let run_obj = run_obj
+                .as_object()
+                .ok_or_else(|| format!("{run_context} is not a JSON object"))?;
+            let thread_id = required_string(run_obj.get("thread_id"), &run_context, "thread_id")?;
+            let checkpoint_ref = required_string(
+                run_obj
+                    .get("authorization_checkpoint")
+                    .filter(|value| !value.is_null())
+                    .or_else(|| run_obj.get("terminal_checkpoint")),
+                &run_context,
+                "terminal_checkpoint",
+            )?;
+            let run = run_obj
+                .get("run")
+                .ok_or_else(|| format!("{run_context} omitted run evidence"))?;
+            validate_decision_graph_run_evidence(
+                &run_context,
+                graph,
+                thread_id,
+                checkpoint_ref,
+                run,
+            )?;
+            validated_runs += 1;
+        }
+    }
+
+    if validated_runs == 0 && !obj.contains_key("runs") {
+        return Err(format!(
+            "{context} audit omitted decision graph run evidence"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_decision_graph_run_evidence(
+    context: &str,
+    graph: &str,
+    thread_id: &str,
+    checkpoint_ref: &str,
+    run: &serde_json::Value,
+) -> Result<(), String> {
+    let thread_checkpoint_prefix = format!("{thread_id}#");
+    if !checkpoint_ref.starts_with(&thread_checkpoint_prefix) {
+        return Err(format!(
+            "{context} checkpoint ref '{checkpoint_ref}' is not scoped to thread '{thread_id}'"
+        ));
+    }
+    let checkpoint_id = checkpoint_ref
+        .rsplit_once('#')
+        .map(|(_, checkpoint_id)| checkpoint_id)
+        .filter(|checkpoint_id| !checkpoint_id.is_empty())
+        .ok_or_else(|| {
+            format!("{context} checkpoint ref '{checkpoint_ref}' has no checkpoint id")
+        })?;
+
+    let run = run
+        .as_object()
+        .ok_or_else(|| format!("{context} run evidence is not a JSON object"))?;
+    let run_thread_id = required_string(run.get("thread_id"), context, "run.thread_id")?;
+    if run_thread_id != thread_id {
+        return Err(format!(
+            "{context} run thread mismatch: expected '{thread_id}', got '{run_thread_id}'"
+        ));
+    }
+
+    let topology = run
+        .get("topology")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{context} run omitted topology"))?;
+    let topology_graph = required_string(topology.get("graph"), context, "run.topology.graph")?;
+    if topology_graph != graph {
+        return Err(format!(
+            "{context} topology graph mismatch: expected '{graph}', got '{topology_graph}'"
+        ));
+    }
+    if topology
+        .get("durable_checkpointer")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(format!(
+            "{context} topology did not prove a durable LangGraph checkpointer"
+        ));
+    }
+
+    let checkpoints = required_non_empty_array(run.get("checkpoints"), context, "run.checkpoints")?;
+    if !checkpoints.iter().any(|checkpoint| {
+        checkpoint
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(checkpoint_id)
+            && checkpoint
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|checkpoint_thread| checkpoint_thread == thread_id)
+    }) {
+        return Err(format!(
+            "{context} checkpoint history omitted authorization checkpoint '{checkpoint_id}'"
+        ));
+    }
+
+    let writes = required_non_empty_array(
+        run.get("write_history").or_else(|| run.get("writes")),
+        context,
+        "run.write_history",
+    )?;
+    if writes.iter().any(|write| {
+        write
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|write_thread| write_thread != thread_id)
+    }) {
+        return Err(format!(
+            "{context} write history contains entries from a different thread"
+        ));
+    }
+    if !writes.iter().any(|write| {
+        write
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(checkpoint_id)
+            && write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
+    }) {
+        return Err(format!(
+            "{context} write history omitted a state-channel write for checkpoint '{checkpoint_id}'"
+        ));
+    }
+
+    let stream = required_non_empty_array(run.get("stream"), context, "run.stream")?;
+    if stream.iter().any(|part| {
+        part.get("stream_protocol")
+            .and_then(serde_json::Value::as_str)
+            != Some("v3")
+    }) {
+        return Err(format!(
+            "{context} stream evidence omitted LangGraph v3 protocol markers"
+        ));
+    }
+    if !stream.iter().any(|part| {
+        part.get("event_type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|event_type| event_type.eq_ignore_ascii_case("custom"))
+            || part
+                .get("payload_kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|payload_kind| payload_kind == "custom")
+    }) {
+        return Err(format!(
+            "{context} stream evidence omitted Sentinel custom decision-node events"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_phase_graph_authority_run(
+    context: &str,
+    graph_run: &serde_json::Value,
+) -> Result<(), McpToolResult> {
+    validate_phase_graph_authority_run_inner(context, graph_run).map_err(|err| {
+        McpToolResult::err(format!(
+            "{context} LangGraph phase authority returned invalid durable evidence: {err}"
+        ))
+    })
+}
+
+fn validate_phase_graph_authority_run_inner(
+    context: &str,
+    graph_run: &serde_json::Value,
+) -> Result<(), String> {
+    let graph = graph_run
+        .as_object()
+        .ok_or_else(|| format!("{context} phase graph run is not a JSON object"))?;
+    require_langgraph_authority(graph, context)?;
+
+    let topology = graph
+        .get("graph_topology")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{context} phase graph run omitted graph_topology"))?;
+    if topology
+        .get("durable_checkpointer")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(format!(
+            "{context} phase graph topology did not prove a durable LangGraph checkpointer"
+        ));
+    }
+    let thread_id = required_string(
+        topology.get("thread_id"),
+        context,
+        "graph_topology.thread_id",
+    )?;
+
+    let latest = graph
+        .get("latest_checkpoint")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{context} phase graph run omitted latest_checkpoint"))?;
+    let checkpoint_id = required_string(
+        latest.get("checkpoint_id"),
+        context,
+        "latest_checkpoint.checkpoint_id",
+    )?;
+    let latest_thread = required_string(
+        latest.get("thread_id"),
+        context,
+        "latest_checkpoint.thread_id",
+    )?;
+    if latest_thread != thread_id {
+        return Err(format!(
+            "{context} latest checkpoint thread mismatch: expected '{thread_id}', got '{latest_thread}'"
+        ));
+    }
+    let latest_writes =
+        required_non_empty_array(latest.get("writes"), context, "latest_checkpoint.writes")?;
+    if !latest_writes
+        .iter()
+        .any(|write| write.get("channel").and_then(serde_json::Value::as_str) == Some("state"))
+    {
+        return Err(format!(
+            "{context} latest checkpoint omitted state-channel write metadata"
+        ));
+    }
+
+    let checkpoints = required_non_empty_array(graph.get("checkpoints"), context, "checkpoints")?;
+    if !checkpoints.iter().any(|checkpoint| {
+        checkpoint
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(checkpoint_id)
+            && checkpoint
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(thread_id)
+    }) {
+        return Err(format!(
+            "{context} checkpoint history omitted latest checkpoint '{checkpoint_id}'"
+        ));
+    }
+
+    let writes = required_non_empty_array(graph.get("writes"), context, "writes")?;
+    if !writes.iter().any(|write| {
+        write
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(checkpoint_id)
+            && write.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+            && write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
+    }) {
+        return Err(format!(
+            "{context} write history omitted latest checkpoint state-channel write"
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_langgraph_authority(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    context: &str,
+) -> Result<(), String> {
+    match obj
+        .get("workflow_authority")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("langgraph") => Ok(()),
+        Some(other) => Err(format!(
+            "{context} workflow_authority was '{other}', expected 'langgraph'"
+        )),
+        None => Err(format!("{context} omitted workflow_authority")),
+    }
+}
+
+fn required_string<'a>(
+    value: Option<&'a serde_json::Value>,
+    context: &str,
+    field: &str,
+) -> Result<&'a str, String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{context} omitted non-empty string field '{field}'"))
+}
+
+fn required_non_empty_array<'a>(
+    value: Option<&'a serde_json::Value>,
+    context: &str,
+    field: &str,
+) -> Result<&'a Vec<serde_json::Value>, String> {
+    let array = value
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{context} omitted array field '{field}'"))?;
+    if array.is_empty() {
+        return Err(format!("{context} array field '{field}' is empty"));
+    }
+    Ok(array)
+}
+
 /// MCP handler — routes tool calls to engine functions
 pub struct McpHandler {
     state: Arc<RwLock<SessionState>>,
@@ -892,6 +1260,7 @@ impl McpHandler {
                     surface.label()
                 ))
             })?;
+        let graph_audit = validated_langgraph_audit_value("MCP proof read", &graph_audit)?;
         let Some(obj) = payload.as_object_mut() else {
             return Err(McpToolResult::err(
                 "Serialization error: MCP proof read payload is not an object",
@@ -901,7 +1270,7 @@ impl McpHandler {
             "workflow_authority".to_string(),
             serde_json::json!("langgraph"),
         );
-        obj.insert("graph_audit".to_string(), serde_json::json!(graph_audit));
+        obj.insert("graph_audit".to_string(), graph_audit);
         Ok(payload)
     }
 
@@ -1434,11 +1803,13 @@ impl McpHandler {
                 .audit_pm_flags(&report.flags, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report.summary,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "PM audit",
+                    "summary",
+                    &report.summary,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("PM audit LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("PM audit failed: {e}")),
@@ -1490,11 +1861,13 @@ impl McpHandler {
                         return McpToolResult::err(format!("Severity LangGraph audit failed: {e}"));
                     }
                 };
-                McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": summary,
-                    "graph_audit": graph_audit,
-                }))
+                langgraph_authorized_response(
+                    "severity scan",
+                    "summary",
+                    &summary,
+                    "graph_audit",
+                    &graph_audit,
+                )
             }
             Err(e) => McpToolResult::err(format!("Severity scan failed: {e}")),
         }
@@ -1526,11 +1899,13 @@ impl McpHandler {
                 .audit_dev_scores(&summary.devs, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": summary,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "developer scorecard",
+                    "summary",
+                    &summary,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => {
                     McpToolResult::err(format!("Developer scorecard LangGraph audit failed: {e}"))
                 }
@@ -1565,11 +1940,13 @@ impl McpHandler {
                 .audit_code_flags(&summary.flags, &graph_jsonl)
                 .await
             {
-                Ok(reconciliation_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": summary,
-                    "reconciliation_audit": reconciliation_audit,
-                })),
+                Ok(reconciliation_audit) => langgraph_authorized_response(
+                    "code reconciliation",
+                    "summary",
+                    &summary,
+                    "reconciliation_audit",
+                    &reconciliation_audit,
+                ),
                 Err(e) => {
                     McpToolResult::err(format!("Code reconciliation LangGraph audit failed: {e}"))
                 }
@@ -1602,11 +1979,13 @@ impl McpHandler {
                 .audit_linear_health(&summary, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": summary,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "linear health",
+                    "summary",
+                    &summary,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("Linear health LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Health score failed: {e}")),
@@ -1637,11 +2016,13 @@ impl McpHandler {
 
         match scan_token_usage(&projects, &output) {
             Ok(report) => match graph_auditor.audit_token_usage(&report, &graph_jsonl).await {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "token usage",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("Token usage LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Token usage scan failed: {e}")),
@@ -1676,11 +2057,13 @@ impl McpHandler {
                 .audit_cache_efficiency(&report, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "cache efficiency",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => {
                     McpToolResult::err(format!("Cache efficiency LangGraph audit failed: {e}"))
                 }
@@ -1715,11 +2098,13 @@ impl McpHandler {
                 .audit_cost_per_point(&report, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "cost per point",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("Cost-per-point LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Cost-per-point scan failed: {e}")),
@@ -1749,11 +2134,13 @@ impl McpHandler {
                 .audit_deploy_frequency(&report, &graph_jsonl)
                 .await
             {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "deploy frequency",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => {
                     McpToolResult::err(format!("Deploy frequency LangGraph audit failed: {e}"))
                 }
@@ -1785,11 +2172,13 @@ impl McpHandler {
 
         match scan_pr_reviews(window_days, &repos, &output_dir) {
             Ok(report) => match graph_auditor.audit_pr_review(&report, &graph_jsonl).await {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "PR review",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("PR review LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("PR review scan failed: {e}")),
@@ -1823,11 +2212,13 @@ impl McpHandler {
             &output_summary,
         ) {
             Ok(report) => match graph_auditor.audit_roi(&report, &graph_jsonl).await {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "ROI",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("ROI LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("ROI scan failed: {e}")),
@@ -1854,11 +2245,13 @@ impl McpHandler {
 
         match aggregate(&breaches, &summary) {
             Ok(report) => match graph_auditor.audit_sla(&report, &graph_jsonl).await {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": report,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "SLA",
+                    "summary",
+                    &report,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("SLA LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("SLA aggregate failed: {e}")),
@@ -1886,11 +2279,13 @@ impl McpHandler {
 
         match scan_token_cost(&tokens_input, &output_summary) {
             Ok(summary) => match graph_auditor.audit_token_cost(&summary, &graph_jsonl).await {
-                Ok(graph_audit) => McpToolResult::ok(serde_json::json!({
-                    "workflow_authority": "langgraph",
-                    "summary": summary,
-                    "graph_audit": graph_audit,
-                })),
+                Ok(graph_audit) => langgraph_authorized_response(
+                    "token cost",
+                    "summary",
+                    &summary,
+                    "graph_audit",
+                    &graph_audit,
+                ),
                 Err(e) => McpToolResult::err(format!("Token cost LangGraph audit failed: {e}")),
             },
             Err(e) => McpToolResult::err(format!("Token cost failed: {e}")),
@@ -1959,11 +2354,21 @@ impl McpHandler {
             })
             .await
         {
-            Ok(audit) => McpToolResult::ok(serde_json::json!({
-                "workflow_authority": audit.workflow_authority,
-                "run": audit.run,
-                "graph_audit": audit.graph_audit,
-            })),
+            Ok(audit) => {
+                if audit.workflow_authority != "langgraph" {
+                    return McpToolResult::err(format!(
+                        "Eval LangGraph run returned workflow_authority '{}', expected 'langgraph'",
+                        audit.workflow_authority
+                    ));
+                }
+                langgraph_authorized_response(
+                    "eval run",
+                    "run",
+                    &audit.run,
+                    "graph_audit",
+                    &audit.graph_audit,
+                )
+            }
             Err(e) => McpToolResult::err(format!("Eval LangGraph run failed: {e}")),
         }
     }
@@ -2018,11 +2423,21 @@ impl McpHandler {
             })
             .await
         {
-            Ok(result) => McpToolResult::ok(serde_json::json!({
-                "workflow_authority": result.workflow_authority,
-                "recommendation": result.recommendation,
-                "graph_audit": result.graph_audit,
-            })),
+            Ok(result) => {
+                if result.workflow_authority != "langgraph" {
+                    return McpToolResult::err(format!(
+                        "BA draft LangGraph run returned workflow_authority '{}', expected 'langgraph'",
+                        result.workflow_authority
+                    ));
+                }
+                langgraph_authorized_response(
+                    "BA draft",
+                    "recommendation",
+                    &result.recommendation,
+                    "graph_audit",
+                    &result.graph_audit,
+                )
+            }
             Err(e) => McpToolResult::err(format!("BA draft LangGraph run failed: {e}")),
         }
     }
@@ -2516,6 +2931,11 @@ impl McpHandler {
                 obj.insert("status".to_string(), serde_json::json!("accepted"));
                 obj.insert("proof".to_string(), proof);
                 let phase_graph = report.step_graph.graph_run.clone();
+                if let Err(err) =
+                    validate_phase_graph_authority_run("submit_step_complete", &phase_graph)
+                {
+                    return err;
+                }
                 obj.insert("phase_graph".to_string(), phase_graph.clone());
                 obj.insert(
                     "workflow_authority".to_string(),
@@ -2866,7 +3286,9 @@ mod step_tools_tests {
                         "channel": "state",
                     }],
                     "stream": [{
+                        "stream_protocol": "v3",
                         "event_type": "custom",
+                        "payload_kind": "custom",
                         "node_id": "classify",
                     }],
                     "topology": {
@@ -2961,7 +3383,9 @@ mod step_tools_tests {
                         "channel": "state",
                     }],
                     "stream": [{
+                        "stream_protocol": "v3",
                         "event_type": "custom",
+                        "payload_kind": "custom",
                         "node_id": decision,
                     }],
                     "topology": {
@@ -3045,7 +3469,9 @@ mod step_tools_tests {
                     "channel": "state",
                 }],
                 "stream": [{
+                    "stream_protocol": "v3",
                     "event_type": "custom",
+                    "payload_kind": "custom",
                     "node_id": decision.clone(),
                 }],
                 "topology": {
@@ -3130,7 +3556,9 @@ mod step_tools_tests {
                         "channel": "state",
                     }],
                     "stream": [{
+                        "stream_protocol": "v3",
                         "event_type": "custom",
+                        "payload_kind": "custom",
                         "node_id": decision,
                     }],
                     "topology": {
@@ -3220,7 +3648,9 @@ mod step_tools_tests {
                     "channel": "state",
                 }],
                 "stream": [{
+                    "stream_protocol": "v3",
                     "event_type": "custom",
+                    "payload_kind": "custom",
                     "node_id": decision.clone(),
                 }],
                 "topology": {
@@ -3295,7 +3725,9 @@ mod step_tools_tests {
                     "channel": "state",
                 }],
                 "stream": [{
+                    "stream_protocol": "v3",
                     "event_type": "custom",
+                    "payload_kind": "custom",
                     "node_id": decision.clone(),
                 }],
                 "topology": {
@@ -3324,6 +3756,44 @@ mod step_tools_tests {
         }
     }
 
+    struct ForgedTokenUsageGraphAuditor;
+
+    #[async_trait::async_trait]
+    impl TokenUsageGraphAuditPort for ForgedTokenUsageGraphAuditor {
+        async fn audit_token_usage(
+            &self,
+            _report: &ScanReport,
+            graph_jsonl: &Path,
+        ) -> anyhow::Result<AggregateGraphAudit> {
+            let thread_id = "sentinel.decision.token_usage.forged".to_string();
+            let checkpoint = format!("{thread_id}#checkpoint-1");
+            Ok(AggregateGraphAudit {
+                workflow_authority: "langgraph",
+                graph: "token_usage",
+                graph_runs_path: graph_jsonl.to_path_buf(),
+                decision: "forged".to_string(),
+                authorization_checkpoint: checkpoint,
+                thread_id: thread_id.clone(),
+                run: serde_json::json!({
+                    "thread_id": thread_id.clone(),
+                    "state": {"decision": "forged"},
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-1",
+                        "thread_id": thread_id.clone(),
+                    }],
+                    "write_history": [{
+                        "checkpoint_id": "checkpoint-1",
+                        "channel": "state",
+                    }],
+                    "topology": {
+                        "graph": "token_usage",
+                        "durable_checkpointer": true,
+                    },
+                }),
+            })
+        }
+    }
+
     struct TestAggregateGraphAuditor;
 
     fn aggregate_audit_for(graph: &'static str, graph_jsonl: &Path) -> AggregateGraphAudit {
@@ -3346,6 +3816,12 @@ mod step_tools_tests {
                 "write_history": [{
                     "checkpoint_id": "checkpoint-1",
                     "channel": "state",
+                }],
+                "stream": [{
+                    "stream_protocol": "v3",
+                    "event_type": "custom",
+                    "payload_kind": "custom",
+                    "node_id": "validated",
                 }],
                 "topology": {
                     "graph": graph,
@@ -3519,7 +3995,9 @@ mod step_tools_tests {
                     "channel": "state",
                 }],
                 "stream": [{
+                    "stream_protocol": "v3",
                     "event_type": "custom",
+                    "payload_kind": "custom",
                     "node_id": "strong",
                 }],
                 "topology": {
@@ -3658,7 +4136,9 @@ mod step_tools_tests {
                     "channel": "state",
                 }],
                 "stream": [{
+                    "stream_protocol": "v3",
                     "event_type": "custom",
+                    "payload_kind": "custom",
                     "node_id": "high_risk_ready",
                 }],
                 "topology": {
@@ -3725,7 +4205,9 @@ mod step_tools_tests {
                         "channel": "state",
                     }],
                     "stream": [{
+                        "stream_protocol": "v3",
                         "event_type": "custom",
+                        "payload_kind": "custom",
                         "node_id": "flag",
                     }],
                     "topology": {
@@ -3804,10 +4286,29 @@ mod step_tools_tests {
                 graph_runs_path: graph_jsonl.to_path_buf(),
                 response_sha256,
                 decision: "verified".to_string(),
-                authorization_checkpoint: checkpoint,
-                thread_id,
+                authorization_checkpoint: checkpoint.clone(),
+                thread_id: thread_id.clone(),
                 run: serde_json::json!({
+                    "thread_id": thread_id.clone(),
                     "surface": surface.label(),
+                    "state": {
+                        "surface": surface.label(),
+                        "decision": "verified",
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": "checkpoint-1",
+                        "thread_id": thread_id.clone(),
+                    }],
+                    "write_history": [{
+                        "checkpoint_id": "checkpoint-1",
+                        "channel": "state",
+                    }],
+                    "stream": [{
+                        "stream_protocol": "v3",
+                        "event_type": "custom",
+                        "payload_kind": "custom",
+                        "node_id": "verified",
+                    }],
                     "topology": {
                         "graph": "mcp_proof_read",
                         "durable_checkpointer": true,
@@ -4392,6 +4893,36 @@ mod step_tools_tests {
                 .error
                 .as_deref()
                 .is_some_and(|err| err.contains("token usage LangGraph audit port")),
+            "unexpected error: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tokens_scan_rejects_forged_langgraph_audit_without_stream_evidence() {
+        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _home = HomeGuard::set(tmp.path());
+
+        let state = Arc::new(RwLock::new(SessionState::new("tokens-forged-graph")));
+        let engine = test_engine(state.clone());
+        let handler = McpHandler::new(state, engine)
+            .with_token_usage_graph_auditor(Arc::new(ForgedTokenUsageGraphAuditor));
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__tokens_scan".into(),
+                arguments: serde_json::json!({}),
+            })
+            .await;
+
+        assert!(!result.success, "forged graph audit must fail closed");
+        assert_eq!(result.content, serde_json::Value::Null);
+        assert!(
+            result.error.as_deref().is_some_and(|err| {
+                err.contains("invalid durable evidence") && err.contains("run.stream")
+            }),
             "unexpected error: {:?}",
             result.error
         );
