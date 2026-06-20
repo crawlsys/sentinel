@@ -2102,8 +2102,8 @@ impl CompiledPhaseGraph {
     ///
     /// # Errors
     /// Returns [`GraphEngineError`] if the stream closes without the expected
-    /// phase-node checkpoint and matching active interrupt, or if a node error
-    /// is observed in the stream.
+    /// phase-node checkpoint, Sentinel custom event, matching active interrupt,
+    /// or if a node error is observed in the stream.
     pub async fn run_until_gate_report(
         &self,
         skill: &str,
@@ -2217,7 +2217,9 @@ impl CompiledPhaseGraph {
         Self::require_phase_stream_payload_kind(&stream, &thread_id, "values", "values")?;
         Self::require_phase_stream_payload_kind(&stream, &thread_id, "updates", "v3 updates")?;
         Self::require_phase_stream_payload_kind(&stream, &thread_id, "tasks", "v3 task")?;
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "checkpoints", "checkpoint")?;
         Self::require_phase_stream_payload_kind(&stream, &thread_id, "debug", "v3 debug")?;
+        Self::require_phase_stream_payload_kind(&stream, &thread_id, "custom", "custom")?;
         if !saw_expected_gate_checkpoint {
             return Err(GraphEngineError::Graph(format!(
                 "phase stream for thread {thread_id} did not persist expected gate checkpoint for node {expected_gate}; observed checkpoint sources: {}",
