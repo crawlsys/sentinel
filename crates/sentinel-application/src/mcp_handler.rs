@@ -251,6 +251,8 @@ pub struct SeverityGraphAudit {
     pub proposals_audited: usize,
     pub authorized_sets: usize,
     pub skipped: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_run: Option<serde_json::Value>,
     pub runs: Vec<SeverityGraphAuditRun>,
 }
 
@@ -350,6 +352,8 @@ pub struct DevScorecardGraphAudit {
     pub excellent: usize,
     pub healthy: usize,
     pub needs_attention: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_run: Option<serde_json::Value>,
     pub runs: Vec<DevScorecardGraphAuditRun>,
 }
 
@@ -405,6 +409,8 @@ pub struct CodeReconciliationGraphAudit {
     pub flags_audited: usize,
     pub authorized_flags: usize,
     pub cleared: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_run: Option<serde_json::Value>,
     pub runs: Vec<CodeReconciliationGraphAuditRun>,
 }
 
@@ -3330,6 +3336,19 @@ mod step_tools_tests {
                 proposals_audited: proposals.len(),
                 authorized_sets,
                 skipped,
+                batch_run: Some(serde_json::json!({
+                    "workflow_authority": "langgraph",
+                    "graph": "severity_batch",
+                    "target_graph": "severity",
+                    "items_requested": proposals.len(),
+                    "items_dispatched": proposals.len(),
+                    "topology": {
+                        "graph": "severity_batch",
+                        "durable_checkpointer": true,
+                        "edges": [{"from": "dispatch", "kind": "dynamic"}],
+                        "nodes": [{"id": "join", "deferred": true}],
+                    },
+                })),
                 runs,
             })
         }
@@ -3613,6 +3632,19 @@ mod step_tools_tests {
                 excellent,
                 healthy,
                 needs_attention,
+                batch_run: Some(serde_json::json!({
+                    "workflow_authority": "langgraph",
+                    "graph": "dev_scorecard_batch",
+                    "target_graph": "dev_scorecard",
+                    "items_requested": scores.len(),
+                    "items_dispatched": scores.len(),
+                    "topology": {
+                        "graph": "dev_scorecard_batch",
+                        "durable_checkpointer": true,
+                        "edges": [{"from": "dispatch", "kind": "dynamic"}],
+                        "nodes": [{"id": "join", "deferred": true}],
+                    },
+                })),
                 runs,
             })
         }
@@ -4262,6 +4294,19 @@ mod step_tools_tests {
                 flags_audited: flags.len(),
                 authorized_flags: flags.len(),
                 cleared: 0,
+                batch_run: Some(serde_json::json!({
+                    "workflow_authority": "langgraph",
+                    "graph": "reconciliation_batch",
+                    "target_graph": "reconciliation",
+                    "items_requested": flags.len(),
+                    "items_dispatched": flags.len(),
+                    "topology": {
+                        "graph": "reconciliation_batch",
+                        "durable_checkpointer": true,
+                        "edges": [{"from": "dispatch", "kind": "dynamic"}],
+                        "nodes": [{"id": "join", "deferred": true}],
+                    },
+                })),
                 runs,
             })
         }

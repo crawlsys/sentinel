@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use sentinel_application::mcp_handler::{SeverityGraphAudit, SeverityGraphAuditRun};
 use sentinel_application::severity::SeverityProposal;
+use sentinel_infrastructure::batch_audit_graph::{run_batch_audit_graph_report, BatchAuditItem};
 use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::severity_graph::{
     build_severity_mutation_graph, run_severity_mutation_decision_report, SeverityMutationState,
@@ -41,6 +42,37 @@ pub(crate) async fn audit_severity_proposals(
     let file = std::fs::File::create(graph_jsonl)
         .with_context(|| format!("create severity graph audit {}", graph_jsonl.display()))?;
     let mut writer = BufWriter::new(file);
+    let batch_items: Vec<_> = proposals
+        .iter()
+        .map(|proposal| {
+            BatchAuditItem::new(proposal.identifier.clone(), Some(proposal.action.clone()))
+        })
+        .collect();
+    let batch_run = run_batch_audit_graph_report("severity_batch", "severity", &batch_items)
+        .await
+        .map_err(|e| anyhow::anyhow!("severity batch graph failed: {e}"))?;
+    let batch_run_json = serde_json::to_value(&batch_run)?;
+    let batch_row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": "severity_batch",
+        "target_graph": "severity",
+        "thread_id": batch_run.thread_id,
+        "items_requested": batch_run.items_requested,
+        "items_dispatched": batch_run.items_dispatched,
+        "run": batch_run_json,
+    });
+    serde_json::to_writer(&mut writer, &batch_row).with_context(|| {
+        format!(
+            "write severity batch graph row to {}",
+            graph_jsonl.display()
+        )
+    })?;
+    writer.write_all(b"\n").with_context(|| {
+        format!(
+            "terminate severity batch graph row in {}",
+            graph_jsonl.display()
+        )
+    })?;
     let mut runs = Vec::with_capacity(proposals.len());
     let mut authorized_sets = 0usize;
     let mut skipped = 0usize;
@@ -119,6 +151,7 @@ pub(crate) async fn audit_severity_proposals(
         proposals_audited: proposals.len(),
         authorized_sets,
         skipped,
+        batch_run: Some(batch_row["run"].clone()),
         runs,
     })
 }
@@ -195,6 +228,17 @@ mod tests {
         assert_eq!(audit.proposals_audited, 1);
         assert_eq!(audit.authorized_sets, 1);
         assert_eq!(audit.skipped, 0);
+        assert_eq!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["graph"],
+            "severity_batch"
+        );
+        assert!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["edges"]
+                .as_array()
+                .is_some_and(|edges| edges
+                    .iter()
+                    .any(|edge| edge["kind"].as_str() == Some("dynamic")))
+        );
         assert_eq!(audit.runs[0].identifier, "FPCRM-777");
         assert_eq!(audit.runs[0].decision, "set");
         assert!(audit.runs[0].terminal_checkpoint.contains('#'));
@@ -205,6 +249,7 @@ mod tests {
         assert_eq!(audit.runs[0].run["topology"]["graph"], "severity");
         assert_eq!(audit.runs[0].run["topology"]["durable_checkpointer"], true);
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("graph jsonl");
+        assert!(graph_rows.contains("\"graph\":\"severity_batch\""));
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"graph\":\"severity\""));
         assert!(graph_rows.contains("\"terminal_checkpoint\""));

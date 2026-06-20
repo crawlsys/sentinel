@@ -7,6 +7,7 @@ use sentinel_application::linear_code_audit::CodeFlag;
 use sentinel_application::mcp_handler::{
     CodeReconciliationGraphAudit, CodeReconciliationGraphAuditRun,
 };
+use sentinel_infrastructure::batch_audit_graph::{run_batch_audit_graph_report, BatchAuditItem};
 use sentinel_infrastructure::decision_graph_introspection::terminal_decision_checkpoint_result;
 use sentinel_infrastructure::reconciliation_graph::{
     build_reconciliation_graph, run_recon_decision_report, ReconState, ReconVerdict,
@@ -31,6 +32,36 @@ pub(crate) async fn run_code_reconciliation_graph_audit(
         )
     })?;
     let mut writer = std::io::BufWriter::new(file);
+    let batch_items: Vec<_> = flags
+        .iter()
+        .map(|flag| BatchAuditItem::new(flag.identifier.clone(), Some(flag.category.clone())))
+        .collect();
+    let batch_run =
+        run_batch_audit_graph_report("reconciliation_batch", "reconciliation", &batch_items)
+            .await
+            .map_err(|e| anyhow::anyhow!("reconciliation batch graph failed: {e}"))?;
+    let batch_run_json = serde_json::to_value(&batch_run)?;
+    let batch_row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": "reconciliation_batch",
+        "target_graph": "reconciliation",
+        "thread_id": batch_run.thread_id,
+        "items_requested": batch_run.items_requested,
+        "items_dispatched": batch_run.items_dispatched,
+        "run": batch_run_json,
+    });
+    serde_json::to_writer(&mut writer, &batch_row).with_context(|| {
+        format!(
+            "write reconciliation batch graph row to {}",
+            graph_jsonl.display()
+        )
+    })?;
+    writer.write_all(b"\n").with_context(|| {
+        format!(
+            "terminate reconciliation batch graph row in {}",
+            graph_jsonl.display()
+        )
+    })?;
     let mut runs = Vec::with_capacity(flags.len());
     let mut authorized_flags = 0usize;
     let mut cleared = 0usize;
@@ -128,6 +159,7 @@ pub(crate) async fn run_code_reconciliation_graph_audit(
         flags_audited: flags.len(),
         authorized_flags,
         cleared,
+        batch_run: Some(batch_row["run"].clone()),
         runs,
     })
 }
@@ -163,6 +195,17 @@ mod tests {
         assert_eq!(audit.graph, "reconciliation");
         assert_eq!(audit.flags_audited, 1);
         assert_eq!(audit.authorized_flags, 1);
+        assert_eq!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["graph"],
+            "reconciliation_batch"
+        );
+        assert!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["edges"]
+                .as_array()
+                .is_some_and(|edges| edges
+                    .iter()
+                    .any(|edge| edge["kind"].as_str() == Some("dynamic")))
+        );
         assert_eq!(audit.runs[0].identifier, "FPCRM-888");
         assert_eq!(audit.runs[0].decision, "flag");
         assert!(audit.runs[0].terminal_checkpoint.contains('#'));
@@ -175,6 +218,7 @@ mod tests {
             .as_array()
             .is_some_and(|entries| !entries.is_empty()));
         let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("graph jsonl");
+        assert!(graph_rows.contains("\"graph\":\"reconciliation_batch\""));
         assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
         assert!(graph_rows.contains("\"terminal_checkpoint\""));
 

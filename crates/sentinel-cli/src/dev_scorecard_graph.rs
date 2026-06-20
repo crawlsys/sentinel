@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use sentinel_application::dev_scorecard::DevScore;
 use sentinel_application::mcp_handler::{DevScorecardGraphAudit, DevScorecardGraphAuditRun};
+use sentinel_infrastructure::batch_audit_graph::{run_batch_audit_graph_report, BatchAuditItem};
 use sentinel_infrastructure::dev_scorecard_graph::{
     build_dev_scorecard_graph, dev_scorecard_decision_label, run_dev_scorecard_decision_report,
     DevScorecardDecision, DevScorecardState,
@@ -24,6 +25,36 @@ pub(crate) async fn run_dev_scorecard_graph_audit(
     let file = std::fs::File::create(graph_jsonl)
         .with_context(|| format!("create dev scorecard graph {}", graph_jsonl.display()))?;
     let mut writer = std::io::BufWriter::new(file);
+    let batch_items: Vec<_> = scores
+        .iter()
+        .map(|score| BatchAuditItem::new(score.name.clone(), None))
+        .collect();
+    let batch_run =
+        run_batch_audit_graph_report("dev_scorecard_batch", "dev_scorecard", &batch_items)
+            .await
+            .map_err(|e| anyhow::anyhow!("dev scorecard batch graph failed: {e}"))?;
+    let batch_run_json = serde_json::to_value(&batch_run)?;
+    let batch_row = serde_json::json!({
+        "workflow_authority": "langgraph",
+        "graph": "dev_scorecard_batch",
+        "target_graph": "dev_scorecard",
+        "thread_id": batch_run.thread_id,
+        "items_requested": batch_run.items_requested,
+        "items_dispatched": batch_run.items_dispatched,
+        "run": batch_run_json,
+    });
+    serde_json::to_writer(&mut writer, &batch_row).with_context(|| {
+        format!(
+            "write dev scorecard batch graph row to {}",
+            graph_jsonl.display()
+        )
+    })?;
+    writer.write_all(b"\n").with_context(|| {
+        format!(
+            "terminate dev scorecard batch graph row in {}",
+            graph_jsonl.display()
+        )
+    })?;
     let mut runs = Vec::with_capacity(scores.len());
     let mut attribution_divergences = 0usize;
     let mut excellent = 0usize;
@@ -99,6 +130,7 @@ pub(crate) async fn run_dev_scorecard_graph_audit(
         excellent,
         healthy,
         needs_attention,
+        batch_run: Some(batch_row["run"].clone()),
         runs,
     })
 }
@@ -157,15 +189,26 @@ mod tests {
         assert_eq!(audit.devs_audited, 2);
         assert_eq!(audit.attribution_divergences, 1);
         assert_eq!(audit.excellent, 1);
+        assert_eq!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["graph"],
+            "dev_scorecard_batch"
+        );
+        assert!(
+            audit.batch_run.as_ref().expect("batch run")["topology"]["edges"]
+                .as_array()
+                .is_some_and(|edges| edges
+                    .iter()
+                    .any(|edge| edge["kind"].as_str() == Some("dynamic")))
+        );
         assert_eq!(audit.runs[0].decision, "attribution-divergence");
         assert!(audit.runs[0].authorization_checkpoint.contains('#'));
         assert_eq!(audit.runs[0].run["topology"]["graph"], "dev_scorecard");
         assert!(audit.runs[0].run["checkpoints"]
             .as_array()
             .is_some_and(|entries| !entries.is_empty()));
-        assert!(std::fs::read_to_string(&graph_jsonl)
-            .expect("scorecard graph jsonl")
-            .contains("\"workflow_authority\":\"langgraph\""));
+        let graph_rows = std::fs::read_to_string(&graph_jsonl).expect("scorecard graph jsonl");
+        assert!(graph_rows.contains("\"graph\":\"dev_scorecard_batch\""));
+        assert!(graph_rows.contains("\"workflow_authority\":\"langgraph\""));
 
         match previous_home {
             Some(value) => std::env::set_var("SENTINEL_HOME", value),
