@@ -284,9 +284,9 @@ fn session_api_stats_state_schema() -> StateSchema<SessionApiStatsState> {
                     "session API stats digest must identify a serialized response".to_string(),
                 ));
             }
-            if state.workflow_authority_present && !state.workflow_authority_langgraph {
+            if state.workflow_authority_present {
                 return Err(StateError::ValidationFailed(
-                    "session API stats response must not declare non-LangGraph workflow authority"
+                    "session API stats response must not declare workflow authority before read graph audit"
                         .to_string(),
                 ));
             }
@@ -516,17 +516,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graph_schema_rejects_untrusted_authority() {
+    async fn graph_schema_rejects_explicit_workflow_authority_before_read_audit() {
         let graph = build_session_api_stats_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
         let mut forged = response();
-        forged["workflow_authority"] = serde_json::json!("local");
+        forged["workflow_authority"] = serde_json::json!("langgraph");
         let state = SessionApiStatsState::from_response("api-stats-forged", &forged);
         let err = run_session_api_stats_decision_report(&graph, state)
             .await
             .unwrap_err();
-        assert!(err.contains("LangGraph workflow authority"), "{err}");
+        assert!(err.contains("before read graph audit"), "{err}");
     }
 
     #[tokio::test]

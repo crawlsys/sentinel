@@ -327,9 +327,9 @@ fn session_api_read_state_schema() -> StateSchema<SessionApiReadState> {
                         .to_string(),
                 ));
             }
-            if state.workflow_authority_present && !state.workflow_authority_langgraph {
+            if state.workflow_authority_present {
                 return Err(StateError::ValidationFailed(
-                    "session API read response must not declare non-LangGraph workflow authority"
+                    "session API read response must not declare workflow authority before read graph audit"
                         .to_string(),
                 ));
             }
@@ -571,12 +571,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graph_rejects_explicit_non_langgraph_authority() {
+    async fn graph_rejects_explicit_workflow_authority_before_read_audit() {
         let graph = build_session_api_read_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
         let mut forged = summary_response();
-        forged["workflow_authority"] = serde_json::json!("local");
+        forged["workflow_authority"] = serde_json::json!("langgraph");
         let state = SessionApiReadState::from_response(
             SessionApiReadSurface::Summary,
             "summary-session-forged-authority",
@@ -585,7 +585,7 @@ mod tests {
         let err = run_session_api_read_decision_report(&graph, state)
             .await
             .unwrap_err();
-        assert!(err.contains("non-LangGraph workflow authority"), "{err}");
+        assert!(err.contains("before read graph audit"), "{err}");
     }
 
     #[tokio::test]
