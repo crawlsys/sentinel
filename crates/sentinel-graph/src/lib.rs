@@ -74,7 +74,7 @@ use langgraph_core::SqliteCheckpointer;
 use langgraph_core::StateGraphBuilder;
 
 use sentinel_domain::workflow::{
-    DyadVerdicts, SkillWorkflow, StepState, StepStatus, WorkflowState,
+    DyadVerdicts, SkillWorkflow, StepState, StepStatus, WorkflowState, WorkflowStep,
 };
 
 mod error;
@@ -158,6 +158,10 @@ pub struct PhaseGraphState {
     /// as phase progress.
     #[serde(default)]
     pub step_states: Vec<StepState>,
+    /// Runtime policy captured from the configured [`WorkflowStep`] at the
+    /// moment a step-status mutation is checkpointed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_policy_evidence: Vec<StepRuntimePolicyEvidence>,
     /// Currently active step ID, mirrored from [`WorkflowState`].
     #[serde(default)]
     pub current_step: Option<String>,
@@ -184,6 +188,36 @@ pub struct PhaseGraphErrorEvent {
     pub node_id: String,
     /// Display form of the underlying LangGraph error.
     pub error: String,
+}
+
+/// Checkpointed runtime policy for a step-status mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRuntimePolicyEvidence {
+    pub phase_id: String,
+    pub step_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    pub retry_max_attempts: u32,
+    pub retry_backoff_ms: u64,
+    pub retry_on: Vec<String>,
+    pub circuit_failure_threshold: u32,
+    pub circuit_cooldown_ms: u64,
+}
+
+impl StepRuntimePolicyEvidence {
+    #[must_use]
+    pub fn from_workflow_step(phase_id: impl Into<String>, step: &WorkflowStep) -> Self {
+        Self {
+            phase_id: phase_id.into(),
+            step_id: step.id.clone(),
+            timeout_ms: step.timeout_ms,
+            retry_max_attempts: step.retry_policy.max_attempts,
+            retry_backoff_ms: step.retry_policy.backoff_ms,
+            retry_on: step.retry_policy.retry_on.clone(),
+            circuit_failure_threshold: step.circuit_breaker.failure_threshold,
+            circuit_cooldown_ms: step.circuit_breaker.cooldown_ms,
+        }
+    }
 }
 
 /// Durable replay/time-travel audit metadata attached to [`PhaseGraphState`].
@@ -419,6 +453,7 @@ impl PhaseGraphState {
             complete: false,
             dyad_verdicts: std::collections::BTreeMap::new(),
             step_states: Vec::new(),
+            step_policy_evidence: Vec::new(),
             current_step: None,
             replay_events: Vec::new(),
             phase_error_events: Vec::new(),
@@ -454,6 +489,7 @@ impl PhaseGraphState {
             complete: ws.complete,
             dyad_verdicts: ws.dyad_verdicts.clone(),
             step_states: ws.step_states.clone(),
+            step_policy_evidence: Vec::new(),
             current_step: ws.current_step.clone(),
             replay_events: Vec::new(),
             phase_error_events: Vec::new(),
@@ -934,6 +970,23 @@ fn step_status_name(status: &StepStatus) -> &'static str {
     }
 }
 
+fn upsert_step_policy_evidence(
+    state: &mut PhaseGraphState,
+    phase_id: &str,
+    step_policy: &WorkflowStep,
+) {
+    let evidence = StepRuntimePolicyEvidence::from_workflow_step(phase_id, step_policy);
+    if let Some(existing) = state
+        .step_policy_evidence
+        .iter_mut()
+        .find(|candidate| candidate.phase_id == phase_id && candidate.step_id == step_policy.id)
+    {
+        *existing = evidence;
+    } else {
+        state.step_policy_evidence.push(evidence);
+    }
+}
+
 fn phase_graph_state_schema(
     workflow: &SkillWorkflow,
     phase_ids: &[String],
@@ -1024,6 +1077,35 @@ fn phase_graph_state_json_schema(
             "step_states": {
                 "type": "array",
                 "items": step_state_schema
+            },
+            "step_policy_evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "phase_id",
+                        "step_id",
+                        "retry_max_attempts",
+                        "retry_backoff_ms",
+                        "retry_on",
+                        "circuit_failure_threshold",
+                        "circuit_cooldown_ms"
+                    ],
+                    "properties": {
+                        "phase_id": { "type": "string", "enum": phase_ids },
+                        "step_id": { "type": "string", "minLength": 1 },
+                        "timeout_ms": { "type": "integer" },
+                        "retry_max_attempts": { "type": "integer", "minimum": 1 },
+                        "retry_backoff_ms": { "type": "integer" },
+                        "retry_on": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "circuit_failure_threshold": { "type": "integer" },
+                        "circuit_cooldown_ms": { "type": "integer" }
+                    }
+                }
             },
             "current_step": {
                 "anyOf": [
@@ -1200,6 +1282,44 @@ fn validate_phase_graph_state(
             return Err(validation_failed(format!(
                 "step_state phase '{}' is not in the compiled workflow",
                 step.phase_id
+            )));
+        }
+    }
+    let mut seen_step_policies = BTreeSet::new();
+    for policy in &state.step_policy_evidence {
+        if policy.step_id.trim().is_empty() {
+            return Err(validation_failed(
+                "step_policy_evidence step_id must not be empty",
+            ));
+        }
+        if !expected_phase_order
+            .iter()
+            .any(|candidate| candidate == &policy.phase_id)
+        {
+            return Err(validation_failed(format!(
+                "step_policy_evidence phase '{}' is not in the compiled workflow",
+                policy.phase_id
+            )));
+        }
+        if policy.retry_max_attempts == 0 {
+            return Err(validation_failed(
+                "step_policy_evidence retry_max_attempts must be at least 1",
+            ));
+        }
+        if !seen_step_policies.insert((policy.phase_id.as_str(), policy.step_id.as_str())) {
+            return Err(validation_failed(format!(
+                "step_policy_evidence for '{}.{}' appears more than once",
+                policy.phase_id, policy.step_id
+            )));
+        }
+        if !state
+            .step_states
+            .iter()
+            .any(|step| step.phase_id == policy.phase_id && step.step_id == policy.step_id)
+        {
+            return Err(validation_failed(format!(
+                "step_policy_evidence '{}.{}' must reference a persisted step_state",
+                policy.phase_id, policy.step_id
             )));
         }
     }
@@ -2699,6 +2819,7 @@ impl CompiledPhaseGraph {
             "complete": state.complete,
             "dyad_verdicts": &state.dyad_verdicts,
             "step_states": &state.step_states,
+            "step_policy_evidence": &state.step_policy_evidence,
             "current_step": &state.current_step,
             "replay_events": replay_events,
             "phase_error_events": &state.phase_error_events,
@@ -3024,6 +3145,7 @@ impl CompiledPhaseGraph {
         session_id: &str,
         phase_id: &str,
         step_id: &str,
+        step_policy: &WorkflowStep,
         status: StepStatus,
         summary: Option<String>,
     ) -> Result<PhaseGraphState> {
@@ -3033,6 +3155,12 @@ impl CompiledPhaseGraph {
                 skill: skill.to_string(),
                 phase: phase_id.to_string(),
             });
+        }
+        if step_policy.id != step_id {
+            return Err(GraphEngineError::Graph(format!(
+                "step policy id '{}' does not match requested step '{step_id}' in phase '{phase_id}' for skill '{skill}'",
+                step_policy.id
+            )));
         }
 
         let mut state = self.load_latest(session_id).await?.ok_or_else(|| {
@@ -3061,6 +3189,7 @@ impl CompiledPhaseGraph {
         let mut workflow_state = state.to_workflow_state();
         workflow_state.update_step(phase_id, step_id, status, summary);
         state.step_states = workflow_state.step_states;
+        upsert_step_policy_evidence(&mut state, phase_id, step_policy);
         state.current_step = workflow_state.current_step;
 
         self.complete_active_interrupts()?;
@@ -3542,6 +3671,11 @@ impl CompiledPhaseGraph {
                 .iter()
                 .position(|phase| phase == &step.phase_id)
                 .is_some_and(|step_idx| step_idx < idx)
+        });
+        fork.step_policy_evidence.retain(|policy| {
+            fork.step_states
+                .iter()
+                .any(|step| step.phase_id == policy.phase_id && step.step_id == policy.step_id)
         });
         if fork
             .current_step

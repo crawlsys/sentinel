@@ -33,7 +33,7 @@ use sentinel_application::proof_engine::{
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::state::SessionState;
 use sentinel_domain::workflow::{
-    DyadVerdicts, SkillSteps, SkillWorkflow, StepStatus, WorkflowState,
+    DyadVerdicts, SkillSteps, SkillWorkflow, StepStatus, WorkflowState, WorkflowStep,
 };
 use sentinel_infrastructure::mcp_transport::{JsonRpcRequest, JsonRpcResponse};
 use sentinel_infrastructure::workflow_api_read_graph::WorkflowApiReadSurface;
@@ -57,6 +57,27 @@ fn load_workflow_configs_for_rpc(
             ),
         )
     })
+}
+
+fn load_step_configs_for_workflows(
+    workflows: &HashMap<String, SkillWorkflow>,
+) -> Result<HashMap<String, SkillSteps>> {
+    let config_dir = sentinel_infrastructure::config::config_dir();
+    let mut step_configs = HashMap::new();
+    for skill in workflows.keys() {
+        let steps = sentinel_infrastructure::config::load_skill_steps(&config_dir, skill)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "configured LangGraph workflow '{skill}' is missing required step config '{}'",
+                    config_dir
+                        .join("steps")
+                        .join(format!("{skill}.toml"))
+                        .display()
+                )
+            })?;
+        step_configs.insert(skill.clone(), steps);
+    }
+    Ok(step_configs)
 }
 
 struct CliPhaseGraphAuthority;
@@ -103,6 +124,7 @@ impl StepGraphAuthority for CliPhaseGraphAuthority {
         workflow: &sentinel_domain::workflow::SkillWorkflow,
         phase_id: &str,
         step_id: &str,
+        step_policy: &WorkflowStep,
         status: StepStatus,
         summary: Option<String>,
     ) -> anyhow::Result<StepGraphApplyResult> {
@@ -113,7 +135,15 @@ impl StepGraphAuthority for CliPhaseGraphAuthority {
         let graph = sentinel_graph::compile_skill_graph_with_checkpointer(workflow, saver)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let graph_state = graph
-            .update_step(skill, session_id, phase_id, step_id, status, summary)
+            .update_step(
+                skill,
+                session_id,
+                phase_id,
+                step_id,
+                step_policy,
+                status,
+                summary,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let graph_run = phase_graph_mutation_evidence(&graph, session_id, &graph_state).await?;
@@ -1582,6 +1612,8 @@ pub async fn run() -> Result<()> {
     );
     let workflow_configs = load_workflow_configs()
         .map_err(|e| anyhow::anyhow!("workflow config load failed during MCP startup: {e}"))?;
+    let step_configs = load_step_configs_for_workflows(&workflow_configs)
+        .map_err(|e| anyhow::anyhow!("step config load failed during MCP startup: {e:#}"))?;
     // Wire cross-session proof archive backing (#39): query_proof_corpus
     // walks the index at ~/.claude/sentinel/proofs/index.jsonl in addition
     // to live state. MCP startup fails if home cannot be resolved because
@@ -1591,6 +1623,7 @@ pub async fn run() -> Result<()> {
         Arc::new(sentinel_infrastructure::filesystem::RealFileSystem);
     let handler = McpHandler::new(state.clone(), proof_engine.clone())
         .with_workflows(workflow_configs.clone())
+        .with_step_configs(step_configs.clone())
         .with_severity_graph_auditor(Arc::new(CliSeverityGraphAuditor))
         .with_pm_audit_graph_auditor(Arc::new(CliPmAuditGraphAuditor))
         .with_linear_health_graph_auditor(Arc::new(CliLinearHealthGraphAuditor))
@@ -3191,6 +3224,21 @@ async fn handle_update_step(
         Ok(config) => config,
         Err(response) => return response,
     };
+    let Some(step_policy) = steps_config
+        .phase_steps(&phase_id)
+        .and_then(|phase_steps| phase_steps.steps.iter().find(|step| step.id == step_id))
+        .cloned()
+    else {
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            mcp_tool_result(
+                false,
+                langgraph_tool_error(format!(
+                    "configured step policy for '{skill}/{phase_id}.{step_id}' is missing"
+                )),
+            ),
+        );
+    };
 
     let outcome = async {
         let session_id = {
@@ -3210,6 +3258,7 @@ async fn handle_update_step(
                 &session_id,
                 &phase_id,
                 &step_id,
+                &step_policy,
                 status.clone(),
                 summary.clone(),
             )
@@ -5927,6 +5976,14 @@ description = "Claim"
         )
         .unwrap();
         write_linear_step_config(&config_dir);
+        let steps_config = sentinel_infrastructure::config::load_skill_steps(&config_dir, "linear")
+            .expect("step config loads")
+            .expect("linear step config");
+        let step_policy = steps_config
+            .phase_steps("claim")
+            .and_then(|phase| phase.steps.iter().find(|step| step.id == "0.1"))
+            .expect("claim step policy")
+            .clone();
 
         let session_id = "phase-steps-evidence";
         let workflow_configs = load_workflow_configs().expect("workflow config loads");
@@ -5946,6 +6003,7 @@ description = "Claim"
                 session_id,
                 "claim",
                 "0.1",
+                &step_policy,
                 StepStatus::InProgress,
                 Some("step underway".to_string()),
             )
@@ -6287,8 +6345,10 @@ description = "Claim"
 "#,
         )
         .unwrap();
+        write_linear_step_config(&config_dir);
 
         let workflows = load_workflow_configs().expect("workflow config loads");
+        let step_configs = load_step_configs_for_workflows(&workflows).expect("step config loads");
         let workflow = workflows.get("linear").expect("linear workflow");
         let state = Arc::new(RwLock::new(SessionState::new("submit-step-evidence")));
         let db_path = phase_graph_db_path("submit-step-evidence").expect("db path");
@@ -6306,8 +6366,9 @@ description = "Claim"
                 .with_signing(None, false)
                 .with_step_graph_authority(Arc::new(CliPhaseGraphAuthority)),
         );
-        let handler =
-            McpHandler::new(state.clone(), proof_engine.clone()).with_workflows(workflows);
+        let handler = McpHandler::new(state.clone(), proof_engine.clone())
+            .with_workflows(workflows)
+            .with_step_configs(step_configs);
         let args = serde_json::json!({
             "skill": "linear",
             "phase_id": "claim",
@@ -6413,8 +6474,10 @@ description = "Claim"
 "#,
         )
         .unwrap();
+        write_linear_step_config(&config_dir);
 
         let workflows = load_workflow_configs().expect("workflow config loads");
+        let step_configs = load_step_configs_for_workflows(&workflows).expect("step config loads");
         let workflow = workflows.get("linear").expect("linear workflow");
         let state = Arc::new(RwLock::new(SessionState::new("duplicate-step-submit")));
         let db_path = phase_graph_db_path("duplicate-step-submit").expect("db path");
@@ -6432,7 +6495,9 @@ description = "Claim"
                 .with_signing(None, false)
                 .with_step_graph_authority(Arc::new(CliPhaseGraphAuthority)),
         );
-        let handler = McpHandler::new(state.clone(), proof_engine).with_workflows(workflows);
+        let handler = McpHandler::new(state.clone(), proof_engine)
+            .with_workflows(workflows)
+            .with_step_configs(step_configs);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(serde_json::json!(1)),
@@ -6553,18 +6618,22 @@ description = "Claim"
 "#,
         )
         .unwrap();
+        write_linear_step_config(&config_dir);
         let state_dir = sentinel_dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("phase-graphs"), b"not a directory").unwrap();
 
         let workflows = load_workflow_configs().expect("workflow config loads");
+        let step_configs = load_step_configs_for_workflows(&workflows).expect("step config loads");
         let state = Arc::new(RwLock::new(SessionState::new("submit-step-graph-fails")));
         let proof_engine = Arc::new(
             ProofEngine::new(state.clone(), Arc::new(UnusedJudge))
                 .with_signing(None, false)
                 .with_step_graph_authority(Arc::new(CliPhaseGraphAuthority)),
         );
-        let handler = McpHandler::new(state.clone(), proof_engine).with_workflows(workflows);
+        let handler = McpHandler::new(state.clone(), proof_engine)
+            .with_workflows(workflows)
+            .with_step_configs(step_configs);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(serde_json::json!(1)),

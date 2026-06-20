@@ -16,7 +16,7 @@ use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
 use sentinel_domain::proof::{PhaseProof, ProofChain};
 use sentinel_domain::state::SessionState;
 use sentinel_domain::step_proof::StepProof;
-use sentinel_domain::workflow::{SkillWorkflow, StepStatus, WorkflowState};
+use sentinel_domain::workflow::{SkillWorkflow, StepStatus, WorkflowState, WorkflowStep};
 
 use crate::judge_service::JudgeService;
 
@@ -38,6 +38,37 @@ fn test_graph_run_with_authority(mut graph_run: serde_json::Value) -> serde_json
 }
 
 #[cfg(test)]
+fn test_step_graph_state(
+    workflow_state: &WorkflowState,
+    phase_id: &str,
+    step_policy: &WorkflowStep,
+) -> Result<serde_json::Value> {
+    let mut graph_state = serde_json::to_value(workflow_state)?;
+    let Some(obj) = graph_state.as_object_mut() else {
+        bail!("test workflow state did not serialize to an object");
+    };
+    obj.insert(
+        "step_policy_evidence".to_string(),
+        serde_json::json!([step_policy_evidence_json(phase_id, step_policy)]),
+    );
+    Ok(graph_state)
+}
+
+#[cfg(test)]
+fn step_policy_evidence_json(phase_id: &str, step_policy: &WorkflowStep) -> serde_json::Value {
+    serde_json::json!({
+        "phase_id": phase_id,
+        "step_id": &step_policy.id,
+        "timeout_ms": step_policy.timeout_ms,
+        "retry_max_attempts": step_policy.retry_policy.max_attempts,
+        "retry_backoff_ms": step_policy.retry_policy.backoff_ms,
+        "retry_on": &step_policy.retry_policy.retry_on,
+        "circuit_failure_threshold": step_policy.circuit_breaker.failure_threshold,
+        "circuit_cooldown_ms": step_policy.circuit_breaker.cooldown_ms,
+    })
+}
+
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TestStepGraphAuthority {
     states: std::sync::Mutex<std::collections::BTreeMap<(String, String), WorkflowState>>,
@@ -53,6 +84,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
         workflow: &SkillWorkflow,
         phase_id: &str,
         step_id: &str,
+        step_policy: &WorkflowStep,
         status: StepStatus,
         summary: Option<String>,
     ) -> Result<StepGraphApplyResult> {
@@ -73,7 +105,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
         }
         workflow_state.update_step(phase_id, step_id, status, summary);
         let workflow_state = workflow_state.clone();
-        let graph_state = serde_json::to_value(&workflow_state)?;
+        let graph_state = test_step_graph_state(&workflow_state, phase_id, step_policy)?;
         let checkpoint_id = format!("test-{session_id}-{phase_id}-{step_id}");
         let phase_order: Vec<&str> = workflow
             .phases
@@ -130,6 +162,27 @@ fn test_step_workflow(skill: &str, phase_id: &str) -> SkillWorkflow {
         blocked_tool_prefixes: Vec::new(),
         blocked_bash_patterns: Vec::new(),
         bash_allowlist: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn test_workflow_step(step_id: &str, description: &str) -> WorkflowStep {
+    WorkflowStep {
+        id: step_id.to_string(),
+        description: description.to_string(),
+        blocker: false,
+        baseline_threshold: 0,
+        judge: None,
+        timeout_ms: None,
+        retry_policy: Default::default(),
+        circuit_breaker: Default::default(),
+        provides: Vec::new(),
+        requires: Vec::new(),
+        external: Vec::new(),
+        inaccessible: false,
+        deprecated: None,
+        r#override: None,
+        extra: serde_json::Value::Null,
     }
 }
 
@@ -333,6 +386,7 @@ pub trait StepGraphAuthority: Send + Sync {
         workflow: &SkillWorkflow,
         phase_id: &str,
         step_id: &str,
+        step_policy: &WorkflowStep,
         status: StepStatus,
         summary: Option<String>,
     ) -> Result<StepGraphApplyResult>;
@@ -1695,6 +1749,7 @@ impl ProofEngine {
         #[cfg(test)]
         {
             let workflow = test_step_workflow(skill, phase_id);
+            let step_policy = test_workflow_step(step_id, step_description);
             Ok(self
                 .submit_step_evidence_report(
                     skill,
@@ -1708,6 +1763,7 @@ impl ProofEngine {
                     _account_context,
                     _started_at,
                     &workflow,
+                    &step_policy,
                     Some(step_description.to_string()),
                 )
                 .await?
@@ -1745,6 +1801,7 @@ impl ProofEngine {
         account_context: Option<String>,
         started_at: chrono::DateTime<Utc>,
         workflow: &SkillWorkflow,
+        step_policy: &WorkflowStep,
         summary: Option<String>,
     ) -> Result<StepSubmissionReport> {
         info!(
@@ -1839,6 +1896,7 @@ impl ProofEngine {
                     workflow,
                     phase_id,
                     step_id,
+                    step_policy,
                     StepStatus::Completed,
                     summary,
                 )
@@ -1854,6 +1912,7 @@ impl ProofEngine {
                 phase_id,
                 step_id,
                 workflow,
+                step_policy,
                 &step_graph,
             )?;
 
@@ -1883,6 +1942,7 @@ impl ProofEngine {
         phase_id: &str,
         step_id: &str,
         workflow: &SkillWorkflow,
+        step_policy: &WorkflowStep,
         result: &StepGraphApplyResult,
     ) -> Result<()> {
         let graph = result.graph_run.as_object().ok_or_else(|| {
@@ -1966,6 +2026,7 @@ impl ProofEngine {
                 "LangGraph step projection for '{skill}/{phase_id}.{step_id}' did not include the completed step"
             );
         }
+        Self::validate_step_policy_evidence(state, skill, phase_id, step_id, step_policy)?;
         let latest_checkpoint = graph
             .get("latest_checkpoint")
             .and_then(serde_json::Value::as_object)
@@ -2036,6 +2097,123 @@ impl ProofEngine {
             state_value,
             &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
         )?;
+        Ok(())
+    }
+
+    fn validate_step_policy_evidence(
+        state: &serde_json::Map<String, serde_json::Value>,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        step_policy: &WorkflowStep,
+    ) -> Result<()> {
+        if step_policy.id != step_id {
+            bail!(
+                "Configured step policy id '{}' does not match '{skill}/{phase_id}.{step_id}'",
+                step_policy.id
+            );
+        }
+
+        let policies = state
+            .get("step_policy_evidence")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' omitted state.step_policy_evidence"
+                )
+            })?;
+        let mut matches = policies.iter().filter(|policy| {
+            policy.get("phase_id").and_then(serde_json::Value::as_str) == Some(phase_id)
+                && policy.get("step_id").and_then(serde_json::Value::as_str) == Some(step_id)
+        });
+        let Some(policy) = matches.next() else {
+            bail!(
+                "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' did not record configured step policy"
+            );
+        };
+        if matches.next().is_some() {
+            bail!(
+                "LangGraph step evidence for '{skill}/{phase_id}.{step_id}' recorded duplicate step policy evidence"
+            );
+        }
+
+        let field_u64 = |field: &str| -> Result<u64> {
+            policy
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph step policy evidence for '{skill}/{phase_id}.{step_id}' omitted numeric {field}"
+                    )
+                })
+        };
+
+        match step_policy.timeout_ms {
+            Some(expected)
+                if policy.get("timeout_ms").and_then(serde_json::Value::as_u64)
+                    != Some(expected) =>
+            {
+                bail!(
+                    "LangGraph step policy evidence timeout mismatch for '{skill}/{phase_id}.{step_id}'"
+                );
+            }
+            None if policy
+                .get("timeout_ms")
+                .is_some_and(|value| !value.is_null()) =>
+            {
+                bail!(
+                    "LangGraph step policy evidence timeout mismatch for '{skill}/{phase_id}.{step_id}'"
+                );
+            }
+            _ => {}
+        }
+        if field_u64("retry_max_attempts")? != u64::from(step_policy.retry_policy.max_attempts) {
+            bail!(
+                "LangGraph step policy evidence retry_max_attempts mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
+        if field_u64("retry_backoff_ms")? != step_policy.retry_policy.backoff_ms {
+            bail!(
+                "LangGraph step policy evidence retry_backoff_ms mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
+        let retry_on = policy
+            .get("retry_on")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph step policy evidence for '{skill}/{phase_id}.{step_id}' omitted retry_on"
+                )
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(std::string::ToString::to_string)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "LangGraph step policy evidence retry_on for '{skill}/{phase_id}.{step_id}' contained a non-string value"
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if retry_on.as_slice() != step_policy.retry_policy.retry_on.as_slice() {
+            bail!(
+                "LangGraph step policy evidence retry_on mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
+        if field_u64("circuit_failure_threshold")?
+            != u64::from(step_policy.circuit_breaker.failure_threshold)
+        {
+            bail!(
+                "LangGraph step policy evidence circuit_failure_threshold mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
+        if field_u64("circuit_cooldown_ms")? != step_policy.circuit_breaker.cooldown_ms {
+            bail!(
+                "LangGraph step policy evidence circuit_cooldown_ms mismatch for '{skill}/{phase_id}.{step_id}'"
+            );
+        }
         Ok(())
     }
 
@@ -2605,12 +2783,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let checkpoint_id = format!("forged-{session_id}-{phase_id}-{step_id}");
             Ok(StepGraphApplyResult {
                 workflow_state: workflow_state.clone(),
@@ -2661,12 +2840,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let latest_checkpoint_id = format!("latest-{session_id}-{phase_id}-{step_id}");
             let previous_checkpoint_id = format!("previous-{session_id}-{phase_id}-{step_id}");
             Ok(StepGraphApplyResult {
@@ -2714,12 +2894,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let checkpoint_id = format!("mismatched-thread-{session_id}-{phase_id}-{step_id}");
             Ok(StepGraphApplyResult {
                 workflow_state,
@@ -2766,12 +2947,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let latest_checkpoint_id =
                 format!("out-of-order-latest-{session_id}-{phase_id}-{step_id}");
             let previous_checkpoint_id =
@@ -2830,12 +3012,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let latest_checkpoint_id =
                 format!("out-of-order-checkpoint-latest-{session_id}-{phase_id}-{step_id}");
             let previous_checkpoint_id =
@@ -2902,12 +3085,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let stale_state = serde_json::json!({
                 "skill": skill,
                 "session_id": session_id,
@@ -2959,12 +3143,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let checkpoint_id = format!("no-topology-{session_id}-{phase_id}-{step_id}");
             Ok(StepGraphApplyResult {
                 workflow_state,
@@ -3012,12 +3197,13 @@ mod step_evidence_tests {
             _workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            _step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let mut workflow_state = WorkflowState::new(skill, session_id);
             workflow_state.update_step(phase_id, step_id, status, summary);
-            let graph_state = serde_json::to_value(&workflow_state)?;
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
             let checkpoint_id = format!("forged-topology-{session_id}-{phase_id}-{step_id}");
             let mut graph_topology = test_graph_topology(skill, session_id, &[phase_id]);
             (self.mutate)(&mut graph_topology);
@@ -3066,13 +3252,21 @@ mod step_evidence_tests {
             workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let authority = TestStepGraphAuthority::default();
             let mut result = authority
                 .apply_step_status(
-                    skill, session_id, workflow, phase_id, step_id, status, summary,
+                    skill,
+                    session_id,
+                    workflow,
+                    phase_id,
+                    step_id,
+                    step_policy,
+                    status,
+                    summary,
                 )
                 .await?;
             result
@@ -3095,13 +3289,21 @@ mod step_evidence_tests {
             workflow: &SkillWorkflow,
             phase_id: &str,
             step_id: &str,
+            step_policy: &WorkflowStep,
             status: StepStatus,
             summary: Option<String>,
         ) -> Result<StepGraphApplyResult> {
             let authority = TestStepGraphAuthority::default();
             let mut result = authority
                 .apply_step_status(
-                    skill, session_id, workflow, phase_id, step_id, status, summary,
+                    skill,
+                    session_id,
+                    workflow,
+                    phase_id,
+                    step_id,
+                    step_policy,
+                    status,
+                    summary,
                 )
                 .await?;
             result.workflow_state.session_id = "other-session".to_string();

@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 use sentinel_domain::proof::ProofEntry;
 use sentinel_domain::state::SessionState;
-use sentinel_domain::workflow::{SkillWorkflow, WorkflowState};
+use sentinel_domain::workflow::{SkillSteps, SkillWorkflow, WorkflowState, WorkflowStep};
 
 use crate::cache_efficiency::CacheReport;
 use crate::cost_per_point::CostPerPointReport;
@@ -525,6 +525,10 @@ pub struct McpHandler {
     /// Without this catalog, `submit_step_complete` fails closed instead of
     /// sealing a proof without durable workflow authority.
     workflows: Option<Arc<HashMap<String, SkillWorkflow>>>,
+    /// Configured step runtime policies used by graph-backed step submission.
+    /// Production startup requires this catalog so the LangGraph checkpoint can
+    /// evidence the exact timeout/retry/circuit policy in force for the step.
+    step_configs: Option<Arc<HashMap<String, SkillSteps>>>,
     /// Optional THE BIBLE evidence-adapter registry (sentinel #68). When
     /// set, `submit_step_complete` calls that pass `evidence_claim` get
     /// a receipt fetched via the registry and folded into
@@ -652,6 +656,112 @@ fn default_test_workflows() -> HashMap<String, SkillWorkflow> {
     workflows
 }
 
+#[cfg(test)]
+fn default_test_step_configs() -> HashMap<String, SkillSteps> {
+    use sentinel_domain::workflow::PhaseSteps;
+
+    fn step(id: &str, description: impl Into<String>) -> WorkflowStep {
+        WorkflowStep {
+            id: id.to_string(),
+            description: description.into(),
+            blocker: false,
+            baseline_threshold: 0,
+            judge: None,
+            timeout_ms: None,
+            retry_policy: Default::default(),
+            circuit_breaker: Default::default(),
+            provides: Vec::new(),
+            requires: Vec::new(),
+            external: Vec::new(),
+            inaccessible: false,
+            deprecated: None,
+            r#override: None,
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn phase(phase_id: &str, steps: Vec<WorkflowStep>) -> PhaseSteps {
+        PhaseSteps {
+            phase_id: phase_id.to_string(),
+            steps,
+        }
+    }
+
+    fn numbered_steps(ids: impl IntoIterator<Item = String>, prefix: &str) -> Vec<WorkflowStep> {
+        ids.into_iter()
+            .map(|id| step(&id, format!("{prefix} {id}")))
+            .collect()
+    }
+
+    let mut claim_steps = numbered_steps((0..30).map(|i| format!("0.{i}")), "claim concurrency");
+    claim_steps.extend(numbered_steps(
+        (0..100).map(|i| i.to_string()),
+        "claim batch",
+    ));
+    claim_steps.extend([
+        step("0.1", "claim issue"),
+        step("1", "fetch ticket"),
+        step("2", "create branch"),
+    ]);
+    claim_steps.sort_by(|left, right| left.id.cmp(&right.id));
+    claim_steps.dedup_by(|left, right| left.id == right.id);
+
+    let mut fetch_steps = numbered_steps((0..100).map(|i| i.to_string()), "fetch batch");
+    fetch_steps.push(step("1.1", "fetch issue"));
+    fetch_steps.sort_by(|left, right| left.id.cmp(&right.id));
+    fetch_steps.dedup_by(|left, right| left.id == right.id);
+
+    let linear_steps = SkillSteps {
+        skill: "linear".to_string(),
+        federation_version: "1".to_string(),
+        phases: vec![
+            phase("claim", claim_steps),
+            phase("fetch", fetch_steps),
+            phase("intelligence", vec![step("1.5.2", "size issue")]),
+            phase(
+                "worktree",
+                vec![step("2.1", "create worktree"), step("2.5", "implement fix")],
+            ),
+            phase(
+                "review",
+                vec![
+                    step("3.L0", "test validation"),
+                    step("3.L3", "open pull request"),
+                    step("3.L4", "review triage"),
+                    step("3.L5", "merge pull request"),
+                ],
+            ),
+            phase(
+                "qa-handoff",
+                vec![
+                    step("3.5.0", "deploy staging"),
+                    step("3.5.1", "run smoke test"),
+                    step("3.5.2", "upload evidence"),
+                    step("3.5.3", "transition qa"),
+                    step("3.5.4", "assign qa"),
+                    step("3.5.5", "post implementation comment"),
+                    step("3.5.6", "qa pass"),
+                ],
+            ),
+            phase("cleanup", vec![step("4.1", "remove worktree")]),
+        ],
+    };
+
+    let mut configs = HashMap::from([("linear".to_string(), linear_steps)]);
+    configs.extend((0..50).map(|i| {
+        let skill = format!("stress_skill_{i:03}");
+        (
+            skill.clone(),
+            SkillSteps {
+                skill,
+                federation_version: "1".to_string(),
+                phases: vec![phase("claim", vec![step("0.1", "stress skill submission")])],
+            },
+        )
+    }));
+    configs
+}
+
 fn load_severity_proposals(path: &Path) -> anyhow::Result<Vec<SeverityProposal>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read severity proposals {}: {e}", path.display()))?;
@@ -740,6 +850,7 @@ impl McpHandler {
             proof_engine,
             archive: None,
             workflows: None,
+            step_configs: None,
             evidence_adapters: None,
             step_verifiers: Vec::new(),
             llm: None,
@@ -802,6 +913,7 @@ impl McpHandler {
     #[must_use]
     pub(crate) fn with_default_test_workflows(self) -> Self {
         self.with_workflows(default_test_workflows())
+            .with_step_configs(default_test_step_configs())
     }
 
     /// Wire configured workflows for graph-backed step submission.
@@ -809,6 +921,47 @@ impl McpHandler {
     pub fn with_workflows(mut self, workflows: HashMap<String, SkillWorkflow>) -> Self {
         self.workflows = Some(Arc::new(workflows));
         self
+    }
+
+    /// Wire configured step runtime policies for graph-backed step submission.
+    #[must_use]
+    pub fn with_step_configs(mut self, step_configs: HashMap<String, SkillSteps>) -> Self {
+        self.step_configs = Some(Arc::new(step_configs));
+        self
+    }
+
+    fn resolve_step_policy(
+        &self,
+        skill: &str,
+        phase_id: &str,
+        step_id: &str,
+        _step_description: &str,
+    ) -> Result<WorkflowStep, McpToolResult> {
+        let Some(step_configs) = self.step_configs.as_ref() else {
+            return Err(McpToolResult::err(
+                "submit_step_complete requires configured step policy catalog at MCP startup",
+            ));
+        };
+        let Some(skill_steps) = step_configs.get(skill) else {
+            return Err(McpToolResult::err(format!(
+                "submit_step_complete requires configured step policy catalog for skill '{skill}'"
+            )));
+        };
+        let Some(phase_steps) = skill_steps.phase_steps(phase_id) else {
+            return Err(McpToolResult::err(format!(
+                "submit_step_complete requires configured step policy for '{skill}/{phase_id}.{step_id}', but phase '{phase_id}' is missing from the step catalog"
+            )));
+        };
+        phase_steps
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .cloned()
+            .ok_or_else(|| {
+                McpToolResult::err(format!(
+                    "submit_step_complete requires configured step policy for '{skill}/{phase_id}.{step_id}'"
+                ))
+            })
     }
 
     /// Wire an LLM port (for `sentinel__severity_scan`). The CLI's `mcp_cmd`
@@ -1027,6 +1180,9 @@ impl McpHandler {
         }
         if self.workflows.is_none() {
             missing.push("workflow_catalog");
+        }
+        if self.step_configs.is_none() {
+            missing.push("step_config_catalog");
         }
         if self.archive.is_none() {
             missing.push("proof_archive_backing");
@@ -2315,6 +2471,11 @@ impl McpHandler {
                 "Unknown phase '{phase_id}' for workflow '{skill}'. Cannot submit step completion."
             ));
         };
+        let step_policy = match self.resolve_step_policy(skill, phase_id, step_id, step_description)
+        {
+            Ok(policy) => policy,
+            Err(result) => return result,
+        };
         let judge_model = phase_config.judge;
         let summary = args
             .get("summary")
@@ -2336,6 +2497,7 @@ impl McpHandler {
                 account_context,
                 started_at,
                 workflow,
+                &step_policy,
                 summary,
             )
             .await
@@ -3697,6 +3859,7 @@ mod step_tools_tests {
 
         assert!(err.contains("proof_engine.phase_graph_authority"));
         assert!(err.contains("workflow_catalog"));
+        assert!(err.contains("step_config_catalog"));
         assert!(err.contains("llm_port"));
         assert!(err.contains("severity_graph_auditor"));
         assert!(err.contains("ba_draft_runner"));
@@ -4713,6 +4876,40 @@ mod step_tools_tests {
         })
     }
 
+    fn test_step_policy(step_id: &str, description: &str) -> WorkflowStep {
+        WorkflowStep {
+            id: step_id.to_string(),
+            description: description.to_string(),
+            blocker: false,
+            baseline_threshold: 0,
+            judge: None,
+            timeout_ms: None,
+            retry_policy: Default::default(),
+            circuit_breaker: Default::default(),
+            provides: Vec::new(),
+            requires: Vec::new(),
+            external: Vec::new(),
+            inaccessible: false,
+            deprecated: None,
+            r#override: None,
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn linear_step_configs(step: WorkflowStep) -> HashMap<String, SkillSteps> {
+        HashMap::from([(
+            "linear".to_string(),
+            SkillSteps {
+                skill: "linear".to_string(),
+                federation_version: "1".to_string(),
+                phases: vec![sentinel_domain::workflow::PhaseSteps {
+                    phase_id: "claim".to_string(),
+                    steps: vec![step],
+                }],
+            },
+        )])
+    }
+
     #[tokio::test]
     async fn unknown_step_tool_name_errors_with_clear_message() {
         let handler = handler_with_chain().await;
@@ -5073,6 +5270,50 @@ mod step_tools_tests {
     }
 
     #[tokio::test]
+    async fn submit_step_complete_requires_explicit_step_policy_catalog() {
+        let state = Arc::new(RwLock::new(SessionState::new("test-session")));
+        let engine = test_engine(state.clone());
+        record_independent_verdict(&state, "claim", "1", true, 0.93).await;
+        let handler =
+            McpHandler::new(state.clone(), engine).with_workflows(default_test_workflows());
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.93,
+                        "reasoning": "caller says evidence present",
+                    },
+                    "started_at": step_started_at(),
+                    "evidence": empty_evidence_json(),
+                }),
+            })
+            .await;
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("requires configured step policy catalog"),
+            "error must identify missing step policy catalog: {err}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chains_is_empty(),
+            "missing step policy catalog must not seal a StepProof"
+        );
+        assert!(
+            !state.has_any_graph_workflow(),
+            "missing step policy catalog must not synthesize workflow state"
+        );
+    }
+
+    #[tokio::test]
     async fn submit_step_complete_seals_step_with_required_args() {
         // Smallest legal call: skill + phase_id + step_id + step_description +
         // verdict + evidence + started_at. Optional non-proof payload fields
@@ -5128,6 +5369,101 @@ mod step_tools_tests {
             proof.get("judge_model").and_then(|v| v.as_str()),
             Some("anthropic/claude-sonnet-4.6"),
         );
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_projects_configured_step_runtime_policy() {
+        let state = Arc::new(RwLock::new(SessionState::new("policy-session")));
+        let engine = test_engine(state.clone());
+        record_independent_verdict(&state, "claim", "1", true, 0.93).await;
+        let mut policy = test_step_policy("1", "fetch ticket");
+        policy.timeout_ms = Some(45_000);
+        policy.retry_policy = sentinel_domain::workflow::RetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 250,
+            retry_on: vec!["timeout".to_string(), "rate-limit".to_string()],
+        };
+        policy.circuit_breaker = sentinel_domain::workflow::CircuitBreaker {
+            failure_threshold: 2,
+            cooldown_ms: 5_000,
+        };
+        let handler = McpHandler::new(state, engine)
+            .with_default_test_workflows()
+            .with_step_configs(linear_step_configs(policy));
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "1",
+                    "step_description": "fetch ticket",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.93,
+                        "reasoning": "evidence present",
+                    },
+                    "started_at": step_started_at(),
+                    "evidence": empty_evidence_json(),
+                }),
+            })
+            .await;
+
+        assert!(result.success, "error: {:?}", result.error);
+        let policy_evidence = result
+            .content
+            .pointer("/phase_graph/state/step_policy_evidence/0")
+            .expect("policy evidence");
+        assert_eq!(policy_evidence["phase_id"], "claim");
+        assert_eq!(policy_evidence["step_id"], "1");
+        assert_eq!(policy_evidence["timeout_ms"], 45_000);
+        assert_eq!(policy_evidence["retry_max_attempts"], 3);
+        assert_eq!(policy_evidence["retry_backoff_ms"], 250);
+        assert_eq!(
+            policy_evidence["retry_on"],
+            serde_json::json!(["timeout", "rate-limit"])
+        );
+        assert_eq!(policy_evidence["circuit_failure_threshold"], 2);
+        assert_eq!(policy_evidence["circuit_cooldown_ms"], 5_000);
+    }
+
+    #[tokio::test]
+    async fn submit_step_complete_rejects_missing_configured_step_policy() {
+        let state = Arc::new(RwLock::new(SessionState::new("missing-policy-session")));
+        let engine = test_engine(state.clone());
+        record_independent_verdict(&state, "claim", "missing", true, 0.93).await;
+        let handler = McpHandler::new(state, engine)
+            .with_default_test_workflows()
+            .with_step_configs(linear_step_configs(test_step_policy(
+                "configured",
+                "configured step",
+            )));
+
+        let result = handler
+            .handle(McpToolCall {
+                name: "sentinel__submit_step_complete".into(),
+                arguments: serde_json::json!({
+                    "skill": "linear",
+                    "phase_id": "claim",
+                    "step_id": "missing",
+                    "step_description": "missing step",
+                    "verdict": {
+                        "sufficient": true,
+                        "confidence": 0.93,
+                        "reasoning": "evidence present",
+                    },
+                    "started_at": step_started_at(),
+                    "evidence": empty_evidence_json(),
+                }),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|err| err.contains("requires configured step policy")));
     }
 
     #[tokio::test]

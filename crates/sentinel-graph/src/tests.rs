@@ -15,7 +15,7 @@ use langgraph_core::application::services::ChatModelStream;
 use langgraph_core::domain::value_objects::{Message, TokenUsage, ToolCall, START};
 use sentinel_domain::judge::JudgeModel;
 use sentinel_domain::workflow::{
-    DyadVerdicts, RoleDyad, SkillWorkflow, StepStatus, WorkflowPhase, WorkflowState,
+    DyadVerdicts, RoleDyad, SkillWorkflow, StepStatus, WorkflowPhase, WorkflowState, WorkflowStep,
 };
 
 use crate::{
@@ -133,6 +133,26 @@ fn phase(id: &str) -> WorkflowPhase {
         judge: JudgeModel::Sonnet,
         description: format!("{id} phase"),
         required_dyad: None,
+    }
+}
+
+fn step(id: &str) -> WorkflowStep {
+    WorkflowStep {
+        id: id.to_string(),
+        description: format!("{id} step"),
+        blocker: false,
+        baseline_threshold: 0,
+        judge: None,
+        timeout_ms: None,
+        retry_policy: Default::default(),
+        circuit_breaker: Default::default(),
+        provides: Vec::new(),
+        requires: Vec::new(),
+        external: Vec::new(),
+        inaccessible: false,
+        deprecated: None,
+        r#override: None,
+        extra: serde_json::Value::Null,
     }
 }
 
@@ -2751,6 +2771,7 @@ async fn replay_phase_forks_before_target() {
             "r",
             "claim",
             "0.1",
+            &step("0.1"),
             StepStatus::Completed,
             Some("claim step".into()),
         )
@@ -2766,6 +2787,7 @@ async fn replay_phase_forks_before_target() {
             "r",
             "fetch",
             "1.1",
+            &step("1.1"),
             StepStatus::InProgress,
             Some("fetch step".into()),
         )
@@ -2925,12 +2947,20 @@ async fn update_step_persists_through_langgraph_checkpoint_history() {
         .run_until_gate("linear", "step-session")
         .await
         .expect("initial gate checkpoint");
+    let mut step_policy = step("0.1");
+    step_policy.timeout_ms = Some(30_000);
+    step_policy.retry_policy.max_attempts = 3;
+    step_policy.retry_policy.backoff_ms = 250;
+    step_policy.retry_policy.retry_on = vec!["timeout".to_string()];
+    step_policy.circuit_breaker.failure_threshold = 2;
+    step_policy.circuit_breaker.cooldown_ms = 5_000;
     let updated = graph
         .update_step(
             "linear",
             "step-session",
             "claim",
             "0.1",
+            &step_policy,
             StepStatus::Completed,
             Some("claim drafted".into()),
         )
@@ -2955,6 +2985,16 @@ async fn update_step_persists_through_langgraph_checkpoint_history() {
     assert_eq!(latest.step_states[0].step_id, "0.1");
     assert_eq!(latest.step_states[0].phase_id, "claim");
     assert_eq!(latest.step_states[0].status, StepStatus::Completed);
+    assert_eq!(latest.step_policy_evidence.len(), 1);
+    let policy = &latest.step_policy_evidence[0];
+    assert_eq!(policy.phase_id, "claim");
+    assert_eq!(policy.step_id, "0.1");
+    assert_eq!(policy.timeout_ms, Some(30_000));
+    assert_eq!(policy.retry_max_attempts, 3);
+    assert_eq!(policy.retry_backoff_ms, 250);
+    assert_eq!(policy.retry_on, vec!["timeout".to_string()]);
+    assert_eq!(policy.circuit_failure_threshold, 2);
+    assert_eq!(policy.circuit_cooldown_ms, 5_000);
 
     let history = fresh.phase_history("step-session").await.expect("history");
     assert!(
@@ -2977,6 +3017,7 @@ async fn update_step_rejects_terminal_rewrite_without_new_checkpoint() {
             "duplicate-step-session",
             "claim",
             "0.1",
+            &step("0.1"),
             StepStatus::Completed,
             Some("sealed step".into()),
         )
@@ -2995,6 +3036,7 @@ async fn update_step_rejects_terminal_rewrite_without_new_checkpoint() {
                 "duplicate-step-session",
                 "claim",
                 "0.1",
+                &step("0.1"),
                 status,
                 Some("rewrite".into()),
             )
@@ -3042,6 +3084,7 @@ async fn update_step_keeps_checkpointed_steps_when_session_projection_is_stale()
             "stale-session",
             "claim",
             "0.1",
+            &step("0.1"),
             StepStatus::Completed,
             Some("checkpointed".into()),
         )
@@ -3054,6 +3097,7 @@ async fn update_step_keeps_checkpointed_steps_when_session_projection_is_stale()
             "stale-session",
             "claim",
             "0.2",
+            &step("0.2"),
             StepStatus::Completed,
             Some("second".into()),
         )
@@ -3112,6 +3156,7 @@ async fn update_step_without_checkpoint_fails_closed() {
             "stale-step-no-checkpoint",
             "claim",
             "0.1",
+            &step("0.1"),
             StepStatus::Completed,
             Some("step only".into()),
         )
