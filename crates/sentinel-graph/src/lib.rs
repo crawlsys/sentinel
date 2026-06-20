@@ -3135,10 +3135,11 @@ impl CompiledPhaseGraph {
     /// Persist a step-status transition through the durable LangGraph timeline.
     ///
     /// Step updates do not advance phase routing, so this stores the edited
-    /// state as a `START` checkpoint. A prior phase-gate checkpoint is required;
-    /// step state cannot bootstrap a graph thread from session-local workflow data. The
-    /// next graph invocation re-enters normal conditional routing from `START`
-    /// using the checkpointed phase position.
+    /// state as a checkpoint attributed to the owning phase node. A prior
+    /// phase-gate checkpoint is required; step state cannot bootstrap a graph
+    /// thread from session-local workflow data. The next graph invocation
+    /// re-enters normal conditional routing from `START` using the checkpointed
+    /// phase position.
     pub async fn update_step(
         &self,
         skill: &str,
@@ -3193,7 +3194,7 @@ impl CompiledPhaseGraph {
         state.current_step = workflow_state.current_step;
 
         self.complete_active_interrupts()?;
-        self.update_state_as_node(session_id, state, START).await
+        self.update_state_as_node(session_id, state, phase_id).await
     }
 
     /// Persist role-dyad authorization context through the durable LangGraph
@@ -3246,7 +3247,7 @@ impl CompiledPhaseGraph {
         }
 
         self.complete_active_interrupts()?;
-        self.update_state_as_node(session_id, state, START).await
+        self.update_state_as_node(session_id, state, phase_id).await
     }
 
     async fn update_state_as_node(

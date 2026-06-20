@@ -120,7 +120,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
                 "step_number": 1,
                 "state": graph_state.clone(),
                 "writes": [{
-                    "node_id": "START",
+                    "node_id": phase_id,
                     "channel": "state",
                     "ts": "2026-06-17T00:00:00Z",
                 }],
@@ -136,6 +136,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
                 "checkpoint_id": checkpoint_id,
                 "step_number": 1,
                 "channel": "state",
+                "node_id": phase_id,
                 "value_json": graph_state,
             }],
             "graph_topology": test_graph_topology(skill, session_id, &phase_order),
@@ -333,6 +334,7 @@ fn test_nonterminal_phase_graph_run(
             "checkpoint_id": checkpoint_id,
             "step_number": 1,
             "channel": "state",
+            "node_id": phase_id,
             "value_json": graph_state
         }],
         "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
@@ -987,6 +989,7 @@ impl ProofEngine {
             latest_checkpoint,
             checkpoint_id,
             &expected_thread_id,
+            phase_id,
             state_value,
             &format!("phase evidence for '{skill}/{phase_id}'"),
         )?;
@@ -2094,6 +2097,7 @@ impl ProofEngine {
             latest_checkpoint,
             checkpoint_id,
             &expected_thread_id,
+            phase_id,
             state_value,
             &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
         )?;
@@ -2370,6 +2374,7 @@ impl ProofEngine {
         latest_checkpoint: &serde_json::Map<String, serde_json::Value>,
         checkpoint_id: &str,
         expected_thread_id: &str,
+        expected_node_id: &str,
         state_value: &serde_json::Value,
         evidence_label: &str,
     ) -> Result<()> {
@@ -2381,12 +2386,27 @@ impl ProofEngine {
                     "LangGraph {evidence_label} latest checkpoint omitted write metadata"
                 )
             })?;
-        if checkpoint_writes
+        let state_checkpoint_writes: Vec<_> = checkpoint_writes
             .iter()
-            .all(|write| write.get("channel").and_then(serde_json::Value::as_str) != Some("state"))
-        {
+            .filter(|write| {
+                write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
+            })
+            .collect();
+        if state_checkpoint_writes.is_empty() {
             bail!(
                 "LangGraph {evidence_label} latest checkpoint omitted state-channel write metadata"
+            );
+        }
+        if !state_checkpoint_writes.iter().any(|write| {
+            write.get("node_id").and_then(serde_json::Value::as_str) == Some(expected_node_id)
+        }) {
+            let observed = state_checkpoint_writes
+                .iter()
+                .filter_map(|write| write.get("node_id").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "LangGraph {evidence_label} latest checkpoint state write was attributed to [{observed}], expected phase node '{expected_node_id}'"
             );
         }
 
@@ -2443,11 +2463,13 @@ impl ProofEngine {
                     .and_then(serde_json::Value::as_str)
                     == Some(checkpoint_id)
                 && write.get("channel").and_then(serde_json::Value::as_str) == Some("state")
+                && write.get("node_id").and_then(serde_json::Value::as_str)
+                    == Some(expected_node_id)
                 && write.get("value_json") == Some(state_value)
         });
         if !state_write_records_graph_state {
             bail!(
-                "LangGraph {evidence_label} omitted a latest-checkpoint state-channel write containing the accepted graph state"
+                "LangGraph {evidence_label} omitted a latest-checkpoint state-channel write from phase node '{expected_node_id}' containing the accepted graph state"
             );
         }
         Ok(())
@@ -2801,6 +2823,64 @@ mod step_evidence_tests {
                         "step_number": 1,
                         "state": graph_state.clone(),
                         "writes": [{
+                            "node_id": phase_id,
+                            "channel": "state",
+                            "ts": "2026-06-17T00:00:00Z"
+                        }]
+                    },
+                    "checkpoints": [{
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone()
+                    }],
+                    "writes": [{
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "checkpoint_id": checkpoint_id,
+                        "step_number": 1,
+                        "channel": "state",
+                        "node_id": phase_id,
+                        "value_json": {
+                            "skill": skill,
+                            "session_id": session_id,
+                            "step_states": []
+                        }
+                    }],
+                    "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
+                })),
+            })
+        }
+    }
+
+    struct StepGraphWithBoundaryWrite;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithBoundaryWrite {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            _workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            _step_policy: &WorkflowStep,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let mut workflow_state = WorkflowState::new(skill, session_id);
+            workflow_state.update_step(phase_id, step_id, status, summary);
+            let graph_state = test_step_graph_state(&workflow_state, phase_id, _step_policy)?;
+            let checkpoint_id = format!("boundary-{session_id}-{phase_id}-{step_id}");
+            Ok(StepGraphApplyResult {
+                workflow_state,
+                graph_run: test_graph_run_with_authority(serde_json::json!({
+                    "state": graph_state.clone(),
+                    "latest_checkpoint": {
+                        "checkpoint_id": checkpoint_id,
+                        "thread_id": format!("sentinel.phase.{skill}.{session_id}"),
+                        "step_number": 1,
+                        "state": graph_state.clone(),
+                        "writes": [{
                             "node_id": "START",
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
@@ -2817,11 +2897,8 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
-                        "value_json": {
-                            "skill": skill,
-                            "session_id": session_id,
-                            "step_states": []
-                        }
+                        "node_id": "START",
+                        "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
                 })),
@@ -2859,7 +2936,7 @@ mod step_evidence_tests {
                         "step_number": 2,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -2875,6 +2952,7 @@ mod step_evidence_tests {
                         "checkpoint_id": previous_checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": phase_id,
                         "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
@@ -2912,7 +2990,7 @@ mod step_evidence_tests {
                         "step_number": 1,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -2928,6 +3006,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": phase_id,
                         "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
@@ -2968,7 +3047,7 @@ mod step_evidence_tests {
                         "step_number": 2,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -2985,6 +3064,7 @@ mod step_evidence_tests {
                             "checkpoint_id": latest_checkpoint_id,
                             "step_number": 2,
                             "channel": "state",
+                            "node_id": phase_id,
                             "value_json": graph_state.clone()
                         },
                         {
@@ -2992,6 +3072,7 @@ mod step_evidence_tests {
                             "checkpoint_id": previous_checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
+                            "node_id": phase_id,
                             "value_json": graph_state
                         }
                     ],
@@ -3033,7 +3114,7 @@ mod step_evidence_tests {
                         "step_number": 2,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -3058,6 +3139,7 @@ mod step_evidence_tests {
                             "checkpoint_id": previous_checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
+                            "node_id": phase_id,
                             "value_json": graph_state.clone()
                         },
                         {
@@ -3065,6 +3147,7 @@ mod step_evidence_tests {
                             "checkpoint_id": latest_checkpoint_id,
                             "step_number": 2,
                             "channel": "state",
+                            "node_id": phase_id,
                             "value_json": graph_state
                         }
                     ],
@@ -3108,7 +3191,7 @@ mod step_evidence_tests {
                         "step_number": 1,
                         "state": stale_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -3124,6 +3207,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": phase_id,
                         "value_json": graph_state
                     }],
                     "graph_topology": test_graph_topology(skill, session_id, &[phase_id])
@@ -3161,7 +3245,7 @@ mod step_evidence_tests {
                         "step_number": 1,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -3177,6 +3261,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": phase_id,
                         "value_json": graph_state
                     }]
                 })),
@@ -3217,7 +3302,7 @@ mod step_evidence_tests {
                         "step_number": 1,
                         "state": graph_state.clone(),
                         "writes": [{
-                            "node_id": "START",
+                            "node_id": phase_id,
                             "channel": "state",
                             "ts": "2026-06-17T00:00:00Z"
                         }]
@@ -3233,6 +3318,7 @@ mod step_evidence_tests {
                         "checkpoint_id": checkpoint_id,
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": phase_id,
                         "value_json": graph_state
                     }],
                     "graph_topology": graph_topology
@@ -3670,6 +3756,44 @@ mod step_evidence_tests {
         assert!(
             !state.has_graph_workflow("linear"),
             "invalid graph write evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_boundary_attributed_graph_write() {
+        let state = Arc::new(RwLock::new(SessionState::new("boundary-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithBoundaryWrite));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("boundary-attributed graph writes must fail closed");
+
+        assert!(
+            err.to_string().contains("expected phase node 'claim'"),
+            "error must identify boundary-attributed graph write: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "boundary-attributed graph write must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "boundary-attributed graph write must not project workflow progress"
         );
     }
 
@@ -4578,6 +4702,7 @@ mod phase_evidence_tests {
                             "checkpoint_id": checkpoint_id,
                             "step_number": 1,
                             "channel": "state",
+                            "node_id": phase_id,
                             "value_json": graph_state.clone(),
                         }],
                         "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
@@ -4913,6 +5038,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
@@ -5200,6 +5326,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": graph_state.clone()
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
@@ -5345,6 +5472,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": graph_state.clone()
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
@@ -5488,6 +5616,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
@@ -5582,6 +5711,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": {
                             "skill": "linear",
                             "session_id": "phase-session",
@@ -5761,6 +5891,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "previous-checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": accepted_state
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
@@ -5852,6 +5983,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": accepted_state
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
@@ -5942,6 +6074,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": accepted_state
                     }],
                     "graph_topology": test_graph_topology("linear", "phase-session", &["claim"]),
@@ -6034,6 +6167,7 @@ mod phase_evidence_tests {
                             "checkpoint_id": "checkpoint-claim",
                             "step_number": 2,
                             "channel": "state",
+                            "node_id": "claim",
                             "value_json": accepted_state.clone()
                         },
                         {
@@ -6041,6 +6175,7 @@ mod phase_evidence_tests {
                             "checkpoint_id": "previous-checkpoint-claim",
                             "step_number": 1,
                             "channel": "state",
+                            "node_id": "claim",
                             "value_json": accepted_state
                         }
                     ],
@@ -6133,6 +6268,7 @@ mod phase_evidence_tests {
                         "checkpoint_id": "checkpoint-claim",
                         "step_number": 1,
                         "channel": "state",
+                        "node_id": "claim",
                         "value_json": accepted_state
                     }],
                     "stream": []

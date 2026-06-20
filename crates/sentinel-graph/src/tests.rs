@@ -3001,6 +3001,23 @@ async fn update_step_persists_through_langgraph_checkpoint_history() {
         history.iter().any(|state| !state.step_states.is_empty()),
         "step update must be visible in graph checkpoint history"
     );
+    let writes = fresh
+        .phase_writes_history("step-session", Some("state"))
+        .await
+        .expect("state write history");
+    let latest_step_write = writes
+        .iter()
+        .rev()
+        .find(|write| write.value_json == serde_json::to_value(&latest).expect("latest json"))
+        .expect("latest step state write");
+    assert_eq!(
+        latest_step_write.node_id, "claim",
+        "step updates must be attributed to the owning phase node"
+    );
+    assert_ne!(
+        latest_step_write.node_id, START,
+        "step updates must not be boundary-attributed START writes"
+    );
 }
 
 #[tokio::test]
