@@ -6,11 +6,11 @@
 //! LangGraph evidence at the API boundary before callers stamp it onto the
 //! rendered response.
 
-use std::{io::Write as _, time::Duration};
+use std::io::Write as _;
 
 use langgraph_core::application::services::{CompilationResult, GraphCompiler};
 use langgraph_core::domain::value_objects::{
-    NodeConfig, NodeError, NodeTimeoutPolicy, StateError, StateSchema, END, START,
+    NodeConfig, NodeError, StateError, StateSchema, END, START,
 };
 use langgraph_core::StateGraphBuilder;
 use serde::{Deserialize, Serialize};
@@ -249,7 +249,6 @@ fn node_config(
             "sentinel.checkpointer_tenant_scope",
             checkpointer_tenant_scope,
         )
-        .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
 fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
@@ -496,6 +495,7 @@ async fn build_workflow_api_read_graph_with_checkpointer(
         .with_input_schema(schema.clone())
         .with_output_schema(schema.clone())
         .with_context_schema(schema)
+        .set_node_defaults(crate::decision_graph_introspection::decision_node_defaults())
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: WorkflowApiReadState| async move {

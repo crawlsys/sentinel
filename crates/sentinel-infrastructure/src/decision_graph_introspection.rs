@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use futures::StreamExt;
@@ -12,7 +13,9 @@ use langgraph_core::application::services::{
     GraphRunStream, LifecycleEvent, Projection, RunV3Options, StateSnapshot, StateUpdateEvent,
     SubgraphHandle, TaskEvent, TasksTransformer, UpdatesTransformer, V3StreamTransformer,
 };
-use langgraph_core::domain::value_objects::{Command, NodeError, NodeErrorContext, END, START};
+use langgraph_core::domain::value_objects::{
+    Command, NodeDefaults, NodeError, NodeErrorContext, NodeTimeoutPolicy, END, START,
+};
 use langgraph_core::ports::WriteHistoryEntry;
 use sentinel_domain::langgraph_thread::validate_tenant_scope;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -21,6 +24,14 @@ use tokio::sync::mpsc;
 
 const DECISION_STREAM_PROTOCOL: &str = "v3";
 const STATE_SNAPSHOT_NODE: &str = "__state__";
+
+/// Graph-wide LangGraph defaults for every Sentinel infrastructure decision node.
+///
+/// Decision graphs authorize external behavior, so timeout policy is a graph
+/// construction invariant rather than per-node boilerplate.
+pub(crate) fn decision_node_defaults() -> NodeDefaults {
+    NodeDefaults::new().with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
+}
 
 /// Serializable view of one checkpoint write recorded by LangGraph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1937,6 +1948,16 @@ mod tests {
             interrupt_before: false,
             interrupt_after: false,
         }
+    }
+
+    #[test]
+    fn decision_node_defaults_carry_langgraph_timeout_policy() {
+        let defaults = decision_node_defaults();
+        let timeout = defaults
+            .timeout()
+            .expect("decision node defaults must carry timeout policy");
+        assert_eq!(timeout.run_timeout(), Some(Duration::from_secs(2)));
+        assert_eq!(timeout.idle_timeout(), None);
     }
 
     #[test]

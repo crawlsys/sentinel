@@ -20,12 +20,12 @@ use sentinel_domain::workflow::{
 
 use crate::{
     compile_skill_graph_with_backend, compile_skill_graph_with_checkpointer, next_phase_target,
-    phase_checkpointer, required_phase_edge_contract, required_phase_node_metadata,
-    required_phase_node_runtime_contract, required_phase_runtime_contract,
-    required_phase_schema_contract, PhaseCheckpointerConfig, PhaseGraphCheckpointSnapshot,
-    PhaseGraphCheckpointWrite, PhaseGraphEdgeInfo, PhaseGraphErrorEvent, PhaseGraphNodeInfo,
-    PhaseGraphState, PhaseGraphStreamPart, PhaseGraphWriteHistoryEntry, V3PhaseProjectionDrain,
-    Verdict,
+    phase_checkpointer, phase_node_defaults, required_phase_edge_contract,
+    required_phase_node_metadata, required_phase_node_runtime_contract,
+    required_phase_runtime_contract, required_phase_schema_contract, PhaseCheckpointerConfig,
+    PhaseGraphCheckpointSnapshot, PhaseGraphCheckpointWrite, PhaseGraphEdgeInfo,
+    PhaseGraphErrorEvent, PhaseGraphNodeInfo, PhaseGraphState, PhaseGraphStreamPart,
+    PhaseGraphWriteHistoryEntry, V3PhaseProjectionDrain, Verdict,
 };
 
 static PHASE_CHECKPOINTER_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1044,6 +1044,19 @@ fn phase_schema_contract_requires_langgraph_authority_schemas() {
         required_phase_schema_contract("linear", &missing_authority, &schema, &schema, &schema)
             .expect_err("missing authority marker must fail");
     assert!(err.to_string().contains("x-sentinel.authority"));
+}
+
+#[test]
+fn phase_node_defaults_carry_langgraph_timeout_policy() {
+    let defaults = phase_node_defaults();
+    let timeout = defaults
+        .timeout()
+        .expect("phase node defaults must carry timeout policy");
+    assert_eq!(
+        timeout.run_timeout(),
+        Some(std::time::Duration::from_secs(2))
+    );
+    assert_eq!(timeout.idle_timeout(), None);
 }
 
 #[test]

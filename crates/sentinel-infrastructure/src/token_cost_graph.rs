@@ -3,11 +3,9 @@
 //! The token-cost scanner prices cached vs uncached usage. This graph validates
 //! the arithmetic and emits a checkpointed operational verdict for CLI and MCP.
 
-use std::time::Duration;
-
 use langgraph_core::application::services::{CompilationResult, GraphCompiler};
 use langgraph_core::domain::value_objects::{
-    NodeConfig, NodeError, NodeTimeoutPolicy, StateError, StateSchema, END, START,
+    NodeConfig, NodeError, StateError, StateSchema, END, START,
 };
 use langgraph_core::StateGraphBuilder;
 use serde::{Deserialize, Serialize};
@@ -179,7 +177,6 @@ fn node_config(
             "sentinel.checkpointer_tenant_scope",
             checkpointer_tenant_scope,
         )
-        .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
 fn approx_eq(left: f64, right: f64) -> bool {
@@ -335,6 +332,7 @@ async fn build_token_cost_graph_with_checkpointer(
         .with_input_schema(schema.clone())
         .with_output_schema(schema.clone())
         .with_context_schema(schema)
+        .set_node_defaults(crate::decision_graph_introspection::decision_node_defaults())
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: TokenCostState| async move {

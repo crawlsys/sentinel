@@ -5,13 +5,10 @@
 //! with `NodeSend`, merges worker results through dynamic channel reducers, and
 //! joins through a deferred LangGraph node before the CLI writes JSONL rows.
 
-use std::time::Duration;
-
 use langgraph_core::application::services::{CompilationResult, GraphCompiler};
 use langgraph_core::domain::services::FunctionReducer;
 use langgraph_core::domain::value_objects::{
-    DynamicState, EdgeResult, NodeConfig, NodeError, NodeSend, NodeTimeoutPolicy, StateError,
-    StateSchema, END, START,
+    DynamicState, EdgeResult, NodeConfig, NodeError, NodeSend, StateError, StateSchema, END, START,
 };
 use langgraph_core::StateGraphBuilder;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -87,7 +84,6 @@ fn node_config(
             "sentinel.checkpointer_tenant_scope",
             checkpointer_tenant_scope,
         )
-        .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
 fn deferred_node_config(
@@ -299,6 +295,7 @@ async fn build_batch_audit_graph_with_checkpointer(
         .with_input_schema(schema.clone())
         .with_output_schema(schema.clone())
         .with_context_schema(schema)
+        .set_node_defaults(crate::decision_graph_introspection::decision_node_defaults())
         .set_channel_reducer("planned_items", FunctionReducer::new(append_json_arrays))
         .set_channel_reducer("items_dispatched", FunctionReducer::new(sum_json_u64))
         .set_channel_reducer("item_identifier", FunctionReducer::new(keep_left_json))

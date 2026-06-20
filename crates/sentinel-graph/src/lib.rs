@@ -61,7 +61,7 @@ use langgraph_core::application::services::{
     UpdatesTransformer, V3StreamTransformer,
 };
 use langgraph_core::domain::value_objects::{
-    Command, Interrupt, InterruptConfig, NodeConfig, NodeError, NodeErrorContext,
+    Command, Interrupt, InterruptConfig, NodeConfig, NodeDefaults, NodeError, NodeErrorContext,
     NodeTimeoutPolicy, StateError, StateSchema, END, START,
 };
 use langgraph_core::ports::CheckpointSaver;
@@ -1464,7 +1464,8 @@ fn compile_skill_graph_with_backend(
     let mut builder = StateGraphBuilder::<PhaseGraphState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
         .with_output_schema(schema.clone())
-        .with_context_schema(schema);
+        .with_context_schema(schema)
+        .set_node_defaults(phase_node_defaults());
 
     // One async node per phase. The node marks the phase active (records its index)
     // and is the interrupt point — actual phase *work* happens in the agent,
@@ -1476,8 +1477,7 @@ fn compile_skill_graph_with_backend(
             .with_metadata("sentinel.graph", PHASE_GRAPH_NAME)
             .with_metadata("sentinel.node", phase_id.clone())
             .with_metadata("sentinel.skill", workflow.skill.clone())
-            .with_metadata("sentinel.phase", phase_id.clone())
-            .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)));
+            .with_metadata("sentinel.phase", phase_id.clone());
         node_config = node_config
             .with_metadata(CHECKPOINTER_BACKEND_METADATA, checkpointer_backend.clone())
             .with_metadata(CHECKPOINTER_SCOPE_METADATA, checkpointer_scope.clone())
@@ -1593,6 +1593,10 @@ fn compile_skill_graph_with_backend(
         checkpointer_scope,
         tenant_scope,
     })
+}
+
+fn phase_node_defaults() -> NodeDefaults {
+    NodeDefaults::new().with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
 /// Pure routing decision for the conditional edge leaving the phase at

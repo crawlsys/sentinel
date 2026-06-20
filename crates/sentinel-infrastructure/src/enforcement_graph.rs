@@ -20,11 +20,9 @@
 //! CONFIRM the ticket is genuinely un-ready before a strict revert fires —
 //! this guards against reverting on a Linear API race or label-propagation lag.
 
-use std::time::Duration;
-
 use langgraph_core::application::services::GraphCompiler;
 use langgraph_core::domain::value_objects::{
-    NodeConfig, NodeError, NodeTimeoutPolicy, StateError, StateSchema, END, START,
+    NodeConfig, NodeError, StateError, StateSchema, END, START,
 };
 use langgraph_core::StateGraphBuilder;
 use serde::{Deserialize, Serialize};
@@ -178,7 +176,6 @@ fn node_config(
             "sentinel.checkpointer_tenant_scope",
             checkpointer_tenant_scope,
         )
-        .with_timeout(NodeTimeoutPolicy::run_only(Duration::from_secs(2)))
 }
 
 fn enforcement_state_schema() -> StateSchema<EscalationState> {
@@ -288,6 +285,7 @@ async fn build_escalation_graph_with_checkpointer(
         .with_input_schema(schema.clone())
         .with_output_schema(schema.clone())
         .with_context_schema(schema)
+        .set_node_defaults(crate::decision_graph_introspection::decision_node_defaults())
         // classify: pass through; routing is decided by the conditional edge.
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,

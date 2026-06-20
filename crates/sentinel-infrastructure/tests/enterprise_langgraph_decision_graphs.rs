@@ -82,6 +82,14 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} must preserve LangGraph execution context schema during compilation"
         );
         assert!(
+            source.contains(".set_node_defaults("),
+            "{label} must use LangGraph graph-wide node defaults for runtime policy"
+        );
+        assert!(
+            !source.contains("NodeTimeoutPolicy::run_only("),
+            "{label} must inherit timeout policy from graph-wide node defaults"
+        );
+        assert!(
             !source.contains("get_stream_writer("),
             "{label} must use emit_decision_node_event instead of direct stream-writer calls"
         );
