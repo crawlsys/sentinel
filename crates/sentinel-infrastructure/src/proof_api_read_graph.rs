@@ -3,7 +3,7 @@
 //! Proof API responses are only authoritative when paired with
 //! LangGraph-projected workflow state. This graph checkpoints each rendered API
 //! proof response so that the API boundary itself carries durable LangGraph
-//! evidence for the `workflow_authority = "langgraph"` claim.
+//! evidence before callers stamp the `workflow_authority = "langgraph"` claim.
 
 use std::time::Duration;
 
@@ -45,6 +45,7 @@ pub struct ProofApiReadState {
     pub surface: ProofApiReadSurface,
     pub response_sha256: String,
     pub response_len: u64,
+    pub workflow_authority_present: bool,
     pub workflow_authority_langgraph: bool,
     pub chains_count: Option<u64>,
     pub child_authority_count: u64,
@@ -74,6 +75,7 @@ impl ProofApiReadState {
             surface,
             response_sha256: hex::encode(Sha256::digest(&response_bytes)),
             response_len: response_bytes.len() as u64,
+            workflow_authority_present: response.get("workflow_authority").is_some(),
             workflow_authority_langgraph: response
                 .get("workflow_authority")
                 .and_then(Value::as_str)
@@ -235,6 +237,7 @@ fn proof_api_read_state_schema() -> StateSchema<ProofApiReadState> {
                 "surface",
                 "response_sha256",
                 "response_len",
+                "workflow_authority_present",
                 "workflow_authority_langgraph",
                 "chains_count",
                 "child_authority_count",
@@ -256,6 +259,7 @@ fn proof_api_read_state_schema() -> StateSchema<ProofApiReadState> {
                 },
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
+                "workflow_authority_present": { "type": "boolean" },
                 "workflow_authority_langgraph": { "type": "boolean" },
                 "chains_count": {
                     "anyOf": [
@@ -293,9 +297,9 @@ fn proof_api_read_state_schema() -> StateSchema<ProofApiReadState> {
                     "proof API response digest must identify a serialized response".to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph && !state.error_present {
+            if state.workflow_authority_present && !state.workflow_authority_langgraph {
                 return Err(StateError::ValidationFailed(
-                    "non-error proof API response must declare LangGraph workflow authority"
+                    "proof API response must not declare non-LangGraph workflow authority"
                         .to_string(),
                 ));
             }
@@ -503,7 +507,6 @@ mod tests {
 
     fn summary_response() -> Value {
         serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "session_id": "sess",
             "phases": 1,
@@ -519,6 +522,10 @@ mod tests {
     fn audited_summary_response() -> Value {
         let mut summary = summary_response();
         summary.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
+        summary.as_object_mut().unwrap().insert(
             "graph_audit".to_string(),
             serde_json::json!({
                 "workflow_authority": "langgraph",
@@ -530,7 +537,6 @@ mod tests {
 
     fn chain_response() -> Value {
         serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "session_id": "sess",
             "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -547,7 +553,6 @@ mod tests {
 
     fn verify_response() -> Value {
         serde_json::json!({
-            "workflow_authority": "langgraph",
             "valid": true,
             "phases_verified": 0,
             "steps_verified": 1,
@@ -580,6 +585,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run.state.decision, ProofApiReadDecision::Verified);
+        assert!(!run.state.workflow_authority_present);
         assert!(run
             .proof_api_read_authorization()
             .unwrap()
@@ -594,7 +600,6 @@ mod tests {
             .await
             .unwrap();
         let response = serde_json::json!({
-            "workflow_authority": "langgraph",
             "chains": [audited_summary_response()]
         });
         let state = ProofApiReadState::from_response(ProofApiReadSurface::List, "list", &response);
@@ -638,9 +643,13 @@ mod tests {
         let graph = build_proof_api_read_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
+        let mut child = summary_response();
+        child.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
         let response = serde_json::json!({
-            "workflow_authority": "langgraph",
-            "chains": [summary_response()]
+            "chains": [child]
         });
         let state =
             ProofApiReadState::from_response(ProofApiReadSurface::List, "list-forged", &response);
@@ -648,5 +657,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("graph audit"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_explicit_non_langgraph_workflow_authority() {
+        let graph = build_proof_api_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut response = summary_response();
+        response.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("legacy"),
+        );
+        let state =
+            ProofApiReadState::from_response(ProofApiReadSurface::Summary, "forged", &response);
+        let err = run_proof_api_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("non-LangGraph workflow authority"),
+            "unexpected error: {err}"
+        );
     }
 }

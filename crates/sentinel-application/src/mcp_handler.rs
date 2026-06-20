@@ -793,7 +793,7 @@ fn require_graph_workflow_projection<'a>(
     })
 }
 
-fn attach_langgraph_workflow_authority(
+fn attach_graph_workflow_projection(
     mut payload: serde_json::Value,
     workflow_state: &WorkflowState,
 ) -> Result<serde_json::Value, McpToolResult> {
@@ -801,13 +801,9 @@ fn attach_langgraph_workflow_authority(
         .map_err(|e| McpToolResult::err(format!("Workflow serialization error: {e}")))?;
     let Some(obj) = payload.as_object_mut() else {
         return Err(McpToolResult::err(
-            "Serialization error: authority payload did not serialize to an object",
+            "Serialization error: workflow projection payload did not serialize to an object",
         ));
     };
-    obj.insert(
-        "workflow_authority".to_string(),
-        serde_json::json!("langgraph"),
-    );
     obj.insert("graph_workflow".to_string(), workflow);
     Ok(payload)
 }
@@ -879,7 +875,7 @@ impl McpHandler {
         payload: serde_json::Value,
         workflow_state: &WorkflowState,
     ) -> Result<serde_json::Value, McpToolResult> {
-        let mut payload = attach_langgraph_workflow_authority(payload, workflow_state)?;
+        let mut payload = attach_graph_workflow_projection(payload, workflow_state)?;
         let Some(graph_auditor) = self.mcp_proof_read_graph_auditor.as_ref() else {
             return Err(McpToolResult::err(format!(
                 "{} needs the MCP proof read LangGraph audit port wired at MCP startup",
@@ -901,6 +897,10 @@ impl McpHandler {
                 "Serialization error: MCP proof read payload is not an object",
             ));
         };
+        obj.insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("langgraph"),
+        );
         obj.insert("graph_audit".to_string(), serde_json::json!(graph_audit));
         Ok(payload)
     }
@@ -3782,6 +3782,12 @@ mod step_tools_tests {
         ) -> anyhow::Result<McpProofReadGraphAudit> {
             use sha2::Digest as _;
 
+            if response.get("workflow_authority").is_some() {
+                anyhow::bail!("raw MCP proof read audit input must not claim workflow authority");
+            }
+            if response.get("graph_workflow").is_none() {
+                anyhow::bail!("raw MCP proof read audit input requires graph_workflow projection");
+            }
             let response_sha256 = hex::encode(sha2::Sha256::digest(
                 serde_json::to_vec(response).unwrap_or_default(),
             ));

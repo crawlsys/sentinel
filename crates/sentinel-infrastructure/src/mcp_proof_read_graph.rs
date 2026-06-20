@@ -3,7 +3,7 @@
 //! Proof chains are already hash-verifiable, but MCP read responses are still
 //! an external authority boundary. This graph checkpoints each rendered proof
 //! read response so the MCP boundary itself carries durable LangGraph evidence
-//! for `workflow_authority = "langgraph"`.
+//! before callers stamp `workflow_authority = "langgraph"` onto the response.
 
 use std::time::Duration;
 
@@ -46,6 +46,7 @@ pub struct McpProofReadState {
     pub surface: McpProofReadSurface,
     pub response_sha256: String,
     pub response_len: u64,
+    pub workflow_authority_present: bool,
     pub workflow_authority_langgraph: bool,
     pub graph_workflow_present: bool,
     pub skill_present: bool,
@@ -79,6 +80,7 @@ impl McpProofReadState {
             surface,
             response_sha256: hex::encode(Sha256::digest(&response_bytes)),
             response_len: response_bytes.len() as u64,
+            workflow_authority_present: response.get("workflow_authority").is_some(),
             workflow_authority_langgraph: response
                 .get("workflow_authority")
                 .and_then(Value::as_str)
@@ -361,6 +363,7 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                 "surface",
                 "response_sha256",
                 "response_len",
+                "workflow_authority_present",
                 "workflow_authority_langgraph",
                 "graph_workflow_present",
                 "skill_present",
@@ -394,6 +397,7 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                 },
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
+                "workflow_authority_present": { "type": "boolean" },
                 "workflow_authority_langgraph": { "type": "boolean" },
                 "graph_workflow_present": { "type": "boolean" },
                 "skill_present": { "type": "boolean" },
@@ -437,9 +441,10 @@ fn mcp_proof_read_state_schema() -> StateSchema<McpProofReadState> {
                         .to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph {
+            if state.workflow_authority_present && !state.workflow_authority_langgraph {
                 return Err(StateError::ValidationFailed(
-                    "MCP proof read response must declare LangGraph workflow authority".to_string(),
+                    "MCP proof read response must not declare non-LangGraph workflow authority"
+                        .to_string(),
                 ));
             }
             if !state.graph_workflow_present {
@@ -641,7 +646,6 @@ mod tests {
 
     fn base_response(extra: serde_json::Value) -> Value {
         let mut response = serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "session_id": "sess",
             "graph_workflow": {
@@ -791,6 +795,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(run.state.decision, McpProofReadDecision::Verified);
+            assert!(!run.state.workflow_authority_present);
             assert!(run
                 .mcp_proof_read_authorization()
                 .unwrap()
@@ -838,7 +843,6 @@ mod tests {
             .await
             .unwrap();
         let response = serde_json::json!({
-            "workflow_authority": "langgraph",
             "skill": "linear",
             "session_id": "sess",
             "entries": []
@@ -873,5 +877,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("verification result fields"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_explicit_non_langgraph_workflow_authority() {
+        let graph = build_mcp_proof_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut response = base_response(serde_json::json!({"entries": []}));
+        response.as_object_mut().unwrap().insert(
+            "workflow_authority".to_string(),
+            serde_json::json!("legacy"),
+        );
+        let state = McpProofReadState::from_response(
+            McpProofReadSurface::ProofChain,
+            "forged-authority",
+            &response,
+        );
+        let err = run_mcp_proof_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("non-LangGraph workflow authority"),
+            "unexpected error: {err}"
+        );
     }
 }

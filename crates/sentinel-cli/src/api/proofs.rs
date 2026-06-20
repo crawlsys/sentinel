@@ -50,7 +50,6 @@ async fn list_proofs(State(state): State<AppState>) -> Result<Json<serde_json::V
         Err(error) => return proof_json(ProofApiReadSurface::Error, error).await,
     };
     proof_list_json(serde_json::json!({
-        "workflow_authority": "langgraph",
         "chains": chains,
     }))
     .await
@@ -120,7 +119,7 @@ async fn verify_chain(
                 Err(error) => {
                     return proof_json(
                         ProofApiReadSurface::Error,
-                        attach_proof_authority(
+                        attach_proof_graph_workflow_projection(
                             proof_error_json(format!(
                                 "proof signature verification unavailable: {error:#}"
                             )),
@@ -132,7 +131,7 @@ async fn verify_chain(
             };
             proof_json(
                 ProofApiReadSurface::Verify,
-                attach_proof_authority(
+                attach_proof_graph_workflow_projection(
                     verify_chain_json(&chain, Some(verify_key)),
                     &workflow_state,
                 ),
@@ -345,7 +344,6 @@ fn proof_summary_json(
     workflow_state: &WorkflowState,
 ) -> serde_json::Value {
     serde_json::json!({
-        "workflow_authority": "langgraph",
         "skill": skill,
         "session_id": chain.session_id,
         "phases": chain.phase_count(),
@@ -361,20 +359,19 @@ fn proof_chain_json(
 ) -> Result<serde_json::Value, String> {
     let value = serde_json::to_value(chain)
         .map_err(|e| format!("proof chain serialization failed: {e}"))?;
-    Ok(attach_proof_authority(value, workflow_state))
+    Ok(attach_proof_graph_workflow_projection(
+        value,
+        workflow_state,
+    ))
 }
 
-fn attach_proof_authority(
+fn attach_proof_graph_workflow_projection(
     mut value: serde_json::Value,
     workflow_state: &WorkflowState,
 ) -> serde_json::Value {
     let obj = value
         .as_object_mut()
-        .expect("proof authority payload must be a JSON object");
-    obj.insert(
-        "workflow_authority".to_string(),
-        serde_json::json!("langgraph"),
-    );
+        .expect("proof workflow projection payload must be a JSON object");
     obj.insert(
         "graph_workflow".to_string(),
         serde_json::json!(workflow_state),
