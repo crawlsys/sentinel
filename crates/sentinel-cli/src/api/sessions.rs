@@ -41,7 +41,6 @@ struct SessionSummary {
     tool_calls: u64,
     phases_read: Vec<String>,
     langgraph_workflow_count: usize,
-    workflow_authority: String,
     proof_chain_count: usize,
     hook_stats: HookStats,
 }
@@ -116,7 +115,6 @@ fn load_sessions() -> Result<Vec<SessionSummary>, String> {
                 tool_calls: state.tool_calls,
                 phases_read: phases_flat,
                 langgraph_workflow_count: 0,
-                workflow_authority: "langgraph".to_string(),
                 proof_chain_count: state.proof_chain_count(),
                 hook_stats: state.hook_stats.clone(),
             });
@@ -236,10 +234,6 @@ async fn get_session(
             "langgraph_workflow_count".to_string(),
             serde_json::json!(langgraph_workflow_count),
         );
-        obj.insert(
-            "workflow_authority".to_string(),
-            serde_json::json!("langgraph"),
-        );
     }
     json = attach_session_api_read_graph_audit(SessionApiReadSurface::Detail, json)
         .await
@@ -285,12 +279,14 @@ async fn attach_session_api_read_graph_audit_with_graph(
     mut response: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let graph_audit = run_session_api_read_graph_audit(graph, surface, &response).await?;
-    response
-        .as_object_mut()
-        .ok_or_else(|| {
-            "session API read graph audit can only attach to object responses".to_string()
-        })?
-        .insert("graph_audit".to_string(), graph_audit);
+    let obj = response.as_object_mut().ok_or_else(|| {
+        "session API read graph audit can only attach to object responses".to_string()
+    })?;
+    obj.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_audit".to_string(), graph_audit);
     Ok(response)
 }
 
@@ -517,7 +513,6 @@ async fn get_stats() -> Result<Json<serde_json::Value>, axum::http::StatusCode> 
     let mut stats = serde_json::json!({
         "total_sessions": sessions.len(),
         "active_sessions": sessions.iter().filter(|s| s.active).count(),
-        "workflow_authority": "langgraph",
         "total_langgraph_workflows": total_langgraph_workflows,
         "sessions_with_langgraph_workflows": sessions_with_langgraph_workflows,
         "total_proof_chains": total_proof_chains,
@@ -530,6 +525,10 @@ async fn get_stats() -> Result<Json<serde_json::Value>, axum::http::StatusCode> 
     match run_session_api_stats_graph_audit(&stats).await {
         Ok(graph_audit) => {
             if let Some(obj) = stats.as_object_mut() {
+                obj.insert(
+                    "workflow_authority".to_string(),
+                    serde_json::json!("langgraph"),
+                );
                 obj.insert("graph_audit".to_string(), graph_audit);
             }
             Ok(Json(stats))

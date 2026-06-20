@@ -43,6 +43,7 @@ pub struct SessionApiReadState {
     pub session_id: Option<String>,
     pub response_sha256: String,
     pub response_len: u64,
+    pub workflow_authority_present: bool,
     pub workflow_authority_langgraph: bool,
     pub active: bool,
     pub active_skill_present: bool,
@@ -83,6 +84,7 @@ impl SessionApiReadState {
             session_id,
             response_sha256: hex::encode(Sha256::digest(&response_bytes)),
             response_len: response_bytes.len() as u64,
+            workflow_authority_present: response.get("workflow_authority").is_some(),
             workflow_authority_langgraph: response
                 .get("workflow_authority")
                 .and_then(Value::as_str)
@@ -257,6 +259,7 @@ fn session_api_read_state_schema() -> StateSchema<SessionApiReadState> {
                 "session_id",
                 "response_sha256",
                 "response_len",
+                "workflow_authority_present",
                 "workflow_authority_langgraph",
                 "active",
                 "active_skill_present",
@@ -280,6 +283,7 @@ fn session_api_read_state_schema() -> StateSchema<SessionApiReadState> {
                 },
                 "response_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "response_len": { "type": "integer", "minimum": 1 },
+                "workflow_authority_present": { "type": "boolean" },
                 "workflow_authority_langgraph": { "type": "boolean" },
                 "active": { "type": "boolean" },
                 "active_skill_present": { "type": "boolean" },
@@ -323,9 +327,9 @@ fn session_api_read_state_schema() -> StateSchema<SessionApiReadState> {
                         .to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph {
+            if state.workflow_authority_present && !state.workflow_authority_langgraph {
                 return Err(StateError::ValidationFailed(
-                    "session API read response must declare LangGraph workflow authority"
+                    "session API read response must not declare non-LangGraph workflow authority"
                         .to_string(),
                 ));
             }
@@ -491,7 +495,6 @@ mod tests {
             "tool_calls": 2,
             "phases_read": ["claim.md"],
             "langgraph_workflow_count": 1,
-            "workflow_authority": "langgraph",
             "proof_chain_count": 0,
             "hook_stats": {
                 "total_invocations": 2
@@ -519,7 +522,6 @@ mod tests {
                 }
             },
             "langgraph_workflow_count": 1,
-            "workflow_authority": "langgraph"
         })
     }
 
@@ -566,6 +568,24 @@ mod tests {
             .unwrap()
             .checkpoint_ref()
             .contains('#'));
+    }
+
+    #[tokio::test]
+    async fn graph_rejects_explicit_non_langgraph_authority() {
+        let graph = build_session_api_read_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut forged = summary_response();
+        forged["workflow_authority"] = serde_json::json!("local");
+        let state = SessionApiReadState::from_response(
+            SessionApiReadSurface::Summary,
+            "summary-session-forged-authority",
+            &forged,
+        );
+        let err = run_session_api_read_decision_report(&graph, state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("non-LangGraph workflow authority"), "{err}");
     }
 
     #[tokio::test]
