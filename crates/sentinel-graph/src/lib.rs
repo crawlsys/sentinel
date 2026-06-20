@@ -467,10 +467,10 @@ impl PhaseGraphState {
 pub enum PhaseCheckpointerConfig {
     /// Durable local SQLite database path.
     Sqlite { database_path: String },
-    /// Durable Postgres database URL plus optional schema.
+    /// Durable Postgres database URL plus explicit schema.
     Postgres {
         database_url: String,
-        schema: Option<String>,
+        schema: String,
     },
     /// Durable Redis connection URL plus optional checkpoint TTL.
     Redis {
@@ -525,7 +525,7 @@ impl PhaseCheckpointerConfig {
     pub const BACKEND_ENV: &'static str = "SENTINEL_PHASE_GRAPH_CHECKPOINTER";
     /// Env var providing the Postgres database URL when backend is `postgres`.
     pub const POSTGRES_URL_ENV: &'static str = "SENTINEL_PHASE_GRAPH_POSTGRES_URL";
-    /// Optional schema for Postgres checkpoints.
+    /// Required schema for Postgres checkpoints.
     pub const POSTGRES_SCHEMA_ENV: &'static str = "SENTINEL_PHASE_GRAPH_POSTGRES_SCHEMA";
     /// Env var providing the Redis URL when backend is `redis`.
     pub const REDIS_URL_ENV: &'static str = "SENTINEL_PHASE_GRAPH_REDIS_URL";
@@ -562,7 +562,13 @@ impl PhaseCheckpointerConfig {
                         Self::POSTGRES_URL_ENV
                     )));
                 }
-                let schema = optional_non_empty_env(Self::POSTGRES_SCHEMA_ENV)?;
+                let schema = required_non_empty_env(Self::POSTGRES_SCHEMA_ENV, || {
+                    format!(
+                        "{}=postgres requires {}",
+                        Self::BACKEND_ENV,
+                        Self::POSTGRES_SCHEMA_ENV
+                    )
+                })?;
                 require_enterprise_tenant_scope(Self::BACKEND_ENV, "postgres")?;
                 Ok(Self::Postgres {
                     database_url,
@@ -611,9 +617,7 @@ impl PhaseCheckpointerConfig {
     pub fn scope_name(&self) -> String {
         match self {
             Self::Sqlite { database_path } => format!("database_path:{database_path}"),
-            Self::Postgres { schema, .. } => {
-                format!("schema:{}", schema.as_deref().unwrap_or("public"))
-            }
+            Self::Postgres { schema, .. } => format!("schema:{schema}"),
             Self::Redis { ttl_seconds, .. } => match ttl_seconds {
                 Some(ttl_seconds) => format!("ttl_seconds:{ttl_seconds}"),
                 None => "ttl_seconds:none".to_string(),
@@ -669,6 +673,13 @@ fn optional_non_empty_env(name: &str) -> Result<Option<String>> {
         Err(err) => Err(GraphEngineError::Checkpointer(format!(
             "failed to read {name}: {err}"
         ))),
+    }
+}
+
+fn required_non_empty_env(name: &str, missing: impl FnOnce() -> String) -> Result<String> {
+    match optional_non_empty_env(name)? {
+        Some(value) => Ok(value),
+        None => Err(GraphEngineError::Checkpointer(missing())),
     }
 }
 
@@ -842,7 +853,7 @@ pub async fn phase_checkpointer_for_config(
         PhaseCheckpointerConfig::Postgres {
             database_url,
             schema,
-        } => phase_saver_postgres(&database_url, schema.as_deref()).await,
+        } => phase_saver_postgres(&database_url, &schema).await,
         PhaseCheckpointerConfig::Redis {
             redis_url,
             ttl_seconds,
@@ -868,20 +879,18 @@ pub async fn phase_checkpointer_from_env(sqlite_database_path: &str) -> Result<P
 #[cfg(feature = "postgres")]
 async fn phase_saver_postgres(
     database_url: &str,
-    schema: Option<&str>,
+    schema: &str,
 ) -> Result<Arc<dyn CheckpointSaver>> {
-    let saver = match schema {
-        Some(schema) => PostgresCheckpointer::with_schema(database_url, schema).await,
-        None => PostgresCheckpointer::new(database_url).await,
-    }
-    .map_err(GraphEngineError::from_graph)?;
+    let saver = PostgresCheckpointer::with_schema(database_url, schema)
+        .await
+        .map_err(GraphEngineError::from_graph)?;
     Ok(Arc::new(saver))
 }
 
 #[cfg(not(feature = "postgres"))]
 async fn phase_saver_postgres(
     _database_url: &str,
-    _schema: Option<&str>,
+    _schema: &str,
 ) -> Result<Arc<dyn CheckpointSaver>> {
     Err(GraphEngineError::Checkpointer(
         "phase graph Postgres checkpointer requested, but sentinel-graph was built without the postgres feature".into(),

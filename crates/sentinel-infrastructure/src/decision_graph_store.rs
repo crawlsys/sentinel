@@ -26,10 +26,10 @@ const CHECKPOINTER_TENANT_SCOPE_METADATA: &str = "sentinel.checkpointer_tenant_s
 pub(crate) enum DecisionGraphCheckpointerConfig {
     /// Durable local SQLite database path.
     Sqlite { database_path: String },
-    /// Durable Postgres database URL plus optional schema.
+    /// Durable Postgres database URL plus explicit schema.
     Postgres {
         database_url: String,
-        schema: Option<String>,
+        schema: String,
     },
     /// Durable Redis connection URL plus optional checkpoint TTL.
     Redis {
@@ -78,7 +78,7 @@ impl DecisionGraphCheckpointerConfig {
     pub(crate) const BACKEND_ENV: &'static str = "SENTINEL_DECISION_GRAPH_CHECKPOINTER";
     /// Env var providing the Postgres database URL when backend is `postgres`.
     pub(crate) const POSTGRES_URL_ENV: &'static str = "SENTINEL_DECISION_GRAPH_POSTGRES_URL";
-    /// Optional schema for Postgres checkpoints.
+    /// Required schema for Postgres checkpoints.
     pub(crate) const POSTGRES_SCHEMA_ENV: &'static str = "SENTINEL_DECISION_GRAPH_POSTGRES_SCHEMA";
     /// Env var providing the Redis URL when backend is `redis`.
     pub(crate) const REDIS_URL_ENV: &'static str = "SENTINEL_DECISION_GRAPH_REDIS_URL";
@@ -115,7 +115,13 @@ impl DecisionGraphCheckpointerConfig {
                         Self::POSTGRES_URL_ENV
                     ));
                 }
-                let schema = optional_non_empty_env(Self::POSTGRES_SCHEMA_ENV)?;
+                let schema = required_non_empty_env(Self::POSTGRES_SCHEMA_ENV, || {
+                    format!(
+                        "{}=postgres requires {}",
+                        Self::BACKEND_ENV,
+                        Self::POSTGRES_SCHEMA_ENV
+                    )
+                })?;
                 require_enterprise_tenant_scope(Self::BACKEND_ENV, "postgres")?;
                 Ok(Self::Postgres {
                     database_url,
@@ -164,9 +170,7 @@ impl DecisionGraphCheckpointerConfig {
     pub(crate) fn scope_name(&self) -> String {
         match self {
             Self::Sqlite { database_path } => format!("database_path:{database_path}"),
-            Self::Postgres { schema, .. } => {
-                format!("schema:{}", schema.as_deref().unwrap_or("public"))
-            }
+            Self::Postgres { schema, .. } => format!("schema:{schema}"),
             Self::Redis { ttl_seconds, .. } => match ttl_seconds {
                 Some(ttl_seconds) => format!("ttl_seconds:{ttl_seconds}"),
                 None => "ttl_seconds:none".to_string(),
@@ -218,6 +222,13 @@ fn optional_non_empty_env(name: &str) -> Result<Option<String>, String> {
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(err) => Err(format!("failed to read {name}: {err}")),
+    }
+}
+
+fn required_non_empty_env(name: &str, missing: impl FnOnce() -> String) -> Result<String, String> {
+    match optional_non_empty_env(name)? {
+        Some(value) => Ok(value),
+        None => Err(missing()),
     }
 }
 
@@ -341,7 +352,7 @@ pub(crate) async fn checkpointer_for_config(
         DecisionGraphCheckpointerConfig::Postgres {
             database_url,
             schema,
-        } => postgres_checkpointer(&database_url, schema.as_deref()).await,
+        } => postgres_checkpointer(&database_url, &schema).await,
         DecisionGraphCheckpointerConfig::Redis {
             redis_url,
             ttl_seconds,
@@ -374,20 +385,18 @@ async fn sqlite_checkpointer(_database_path: &str) -> Result<Arc<dyn CheckpointS
 #[cfg(feature = "postgres")]
 async fn postgres_checkpointer(
     database_url: &str,
-    schema: Option<&str>,
+    schema: &str,
 ) -> Result<Arc<dyn CheckpointSaver>, String> {
-    let checkpointer = match schema {
-        Some(schema) => PostgresCheckpointer::with_schema(database_url, schema).await,
-        None => PostgresCheckpointer::new(database_url).await,
-    }
-    .map_err(|e| e.to_string())?;
+    let checkpointer = PostgresCheckpointer::with_schema(database_url, schema)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(Arc::new(checkpointer))
 }
 
 #[cfg(not(feature = "postgres"))]
 async fn postgres_checkpointer(
     _database_url: &str,
-    _schema: Option<&str>,
+    _schema: &str,
 ) -> Result<Arc<dyn CheckpointSaver>, String> {
     Err(
         "decision graph Postgres checkpointer requested, but sentinel-infrastructure was built without the postgres feature"
@@ -872,7 +881,7 @@ mod tests {
                     config,
                     DecisionGraphCheckpointerConfig::Postgres {
                         database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-                        schema: Some("sentinel_decisions".to_string()),
+                        schema: "sentinel_decisions".to_string(),
                     }
                 );
                 assert_eq!(config.backend_name(), "postgres");
@@ -882,17 +891,21 @@ mod tests {
     }
 
     #[test]
-    fn decision_graph_checkpointer_config_uses_public_postgres_scope_without_schema() {
+    fn decision_graph_checkpointer_config_requires_postgres_schema() {
         with_decision_graph_checkpointer_env(
             Some("postgres"),
             Some("postgres://sentinel:sentinel@localhost/sentinel"),
             None,
             Some("legatus_ai"),
             || {
-                let config =
-                    DecisionGraphCheckpointerConfig::from_env("ignored").expect("postgres config");
-                assert_eq!(config.backend_name(), "postgres");
-                assert_eq!(config.scope_name(), "schema:public");
+                let err = DecisionGraphCheckpointerConfig::from_env("ignored")
+                    .expect_err("postgres schema must be required");
+                assert!(err.contains(DecisionGraphCheckpointerConfig::BACKEND_ENV));
+                assert!(err.contains(DecisionGraphCheckpointerConfig::POSTGRES_SCHEMA_ENV));
+                assert!(
+                    !err.contains("implicit Postgres schema"),
+                    "postgres selection must not use an implicit Postgres schema: {err}"
+                );
             },
         );
     }
@@ -995,7 +1008,7 @@ mod tests {
         with_decision_graph_checkpointer_env(
             Some("postgres"),
             Some("postgres://sentinel:sentinel@localhost/sentinel"),
-            None,
+            Some("sentinel_decisions"),
             None,
             || {
                 let err = DecisionGraphCheckpointerConfig::from_env("severity")
@@ -1062,7 +1075,7 @@ mod tests {
             let postgres_err =
                 tenant_scope_for_checkpointer_config(&DecisionGraphCheckpointerConfig::Postgres {
                     database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-                    schema: Some("sentinel_decisions".to_string()),
+                    schema: "sentinel_decisions".to_string(),
                 })
                 .expect_err("explicit postgres config must require tenant scope");
             assert!(postgres_err.contains(LANGGRAPH_TENANT_ENV));
@@ -1353,7 +1366,7 @@ mod tests {
     async fn postgres_decision_checkpointer_request_fails_without_postgres_feature() {
         let result = checkpointer_for_config(DecisionGraphCheckpointerConfig::Postgres {
             database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-            schema: Some("sentinel_decisions".to_string()),
+            schema: "sentinel_decisions".to_string(),
         })
         .await;
         let err = match result {

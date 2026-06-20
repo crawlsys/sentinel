@@ -197,6 +197,37 @@ fn langgraph_runtime_backend_selectors_use_canonical_names_only() {
 }
 
 #[test]
+fn langgraph_postgres_checkpointers_require_explicit_schema() {
+    for (label, source) in [
+        (
+            "phase graph",
+            include_str!("../../sentinel-graph/src/lib.rs"),
+        ),
+        (
+            "decision graph",
+            include_str!("../../sentinel-infrastructure/src/decision_graph_store.rs"),
+        ),
+    ] {
+        assert!(
+            source.contains("required_non_empty_env(Self::POSTGRES_SCHEMA_ENV"),
+            "{label} Postgres config must require an explicit schema env var"
+        );
+        assert!(
+            source.contains("PostgresCheckpointer::with_schema"),
+            "{label} must create Postgres checkpointers with an explicit schema"
+        );
+        assert!(
+            !source.contains("PostgresCheckpointer::new"),
+            "{label} must not use schema-less Postgres checkpointers"
+        );
+        assert!(
+            !source.contains("unwrap_or(\"public\")"),
+            "{label} must not synthesize an implicit public Postgres schema"
+        );
+    }
+}
+
+#[test]
 fn proof_engine_requires_current_langgraph_write_value_json_shape() {
     let proof_engine = include_str!("../../sentinel-application/src/proof_engine.rs");
     assert!(

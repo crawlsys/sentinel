@@ -50,7 +50,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
         &self,
         skill: &str,
         session_id: &str,
-        _workflow: &SkillWorkflow,
+        workflow: &SkillWorkflow,
         phase_id: &str,
         step_id: &str,
         status: StepStatus,
@@ -75,6 +75,11 @@ impl StepGraphAuthority for TestStepGraphAuthority {
         let workflow_state = workflow_state.clone();
         let graph_state = serde_json::to_value(&workflow_state)?;
         let checkpoint_id = format!("test-{session_id}-{phase_id}-{step_id}");
+        let phase_order: Vec<&str> = workflow
+            .phases
+            .iter()
+            .map(|phase| phase.id.as_str())
+            .collect();
         let graph_run = test_graph_run_with_authority(serde_json::json!({
             "state": graph_state.clone(),
             "latest_checkpoint": {
@@ -101,7 +106,7 @@ impl StepGraphAuthority for TestStepGraphAuthority {
                 "channel": "state",
                 "value_json": graph_state,
             }],
-            "graph_topology": test_graph_topology(skill, session_id, &[phase_id]),
+            "graph_topology": test_graph_topology(skill, session_id, &phase_order),
         }));
         Ok(StepGraphApplyResult {
             workflow_state,
@@ -675,7 +680,13 @@ impl ProofEngine {
         let graph_result = authority
             .apply_verdict(skill, &session_id, workflow, phase_id, passed)
             .await?;
-        Self::validate_phase_graph_apply_result(skill, &session_id, phase_id, &graph_result)?;
+        Self::validate_phase_graph_apply_result(
+            skill,
+            &session_id,
+            phase_id,
+            workflow,
+            &graph_result,
+        )?;
 
         {
             let mut state = self.state.write().await;
@@ -763,6 +774,7 @@ impl ProofEngine {
         skill: &str,
         session_id: &str,
         phase_id: &str,
+        workflow: &SkillWorkflow,
         result: &PhaseGraphApplyResult,
     ) -> Result<()> {
         let graph = result.graph_run.as_object().ok_or_else(|| {
@@ -811,6 +823,13 @@ impl ProofEngine {
                 "LangGraph phase evidence session mismatch for '{skill}/{phase_id}': got '{graph_session}'"
             );
         }
+        Self::validate_projected_workflow_state(
+            state,
+            &result.workflow_state,
+            skill,
+            session_id,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
         let completed = state
             .get("completed_phases")
             .and_then(serde_json::Value::as_array)
@@ -893,6 +912,12 @@ impl ProofEngine {
             skill,
             session_id,
             phase_id,
+            workflow,
+            &format!("phase evidence for '{skill}/{phase_id}'"),
+        )?;
+        Self::validate_graph_state_phase_order(
+            state,
+            workflow,
             &format!("phase evidence for '{skill}/{phase_id}'"),
         )?;
         Self::validate_checkpoint_history_evidence(
@@ -1119,8 +1144,15 @@ impl ProofEngine {
         skill: &str,
         session_id: &str,
         phase_id: &str,
+        workflow: &SkillWorkflow,
         evidence_label: &str,
     ) -> Result<String> {
+        if workflow.skill != skill {
+            bail!(
+                "LangGraph {evidence_label} workflow definition skill mismatch: got '{}', expected '{skill}'",
+                workflow.skill
+            );
+        }
         let topology = graph
             .get("graph_topology")
             .and_then(serde_json::Value::as_object)
@@ -1173,6 +1205,18 @@ impl ProofEngine {
             .iter()
             .filter_map(serde_json::Value::as_str)
             .collect();
+        let workflow_phase_ids: Vec<&str> = workflow
+            .phases
+            .iter()
+            .map(|phase| phase.id.as_str())
+            .collect();
+        if phase_ids != workflow_phase_ids {
+            bail!(
+                "LangGraph {evidence_label} topology phase_order mismatch: got {:?}, expected {:?}",
+                phase_ids,
+                workflow_phase_ids
+            );
+        }
         let max_iterations = topology
             .get("max_iterations")
             .and_then(serde_json::Value::as_u64)
@@ -1277,6 +1321,21 @@ impl ProofEngine {
             .ok_or_else(|| anyhow::anyhow!("LangGraph {evidence_label} topology omitted nodes"))?;
         if nodes.is_empty() {
             bail!("LangGraph {evidence_label} topology had no nodes");
+        }
+        let mut seen_node_ids = std::collections::BTreeSet::new();
+        for node in nodes {
+            let node_id = node
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("LangGraph {evidence_label} topology node omitted id")
+                })?;
+            if !phase_ids.contains(&node_id) {
+                bail!("LangGraph {evidence_label} topology had unexpected node '{node_id}'");
+            }
+            if !seen_node_ids.insert(node_id) {
+                bail!("LangGraph {evidence_label} topology duplicated node '{node_id}'");
+            }
         }
         for phase in &phase_ids {
             let node = nodes
@@ -1423,6 +1482,141 @@ impl ProofEngine {
             }
         }
         Ok(expected_thread_id)
+    }
+
+    fn validate_graph_state_phase_order(
+        state: &serde_json::Map<String, serde_json::Value>,
+        workflow: &SkillWorkflow,
+        evidence_label: &str,
+    ) -> Result<()> {
+        let Some(phase_order) = state.get("phase_order") else {
+            return Ok(());
+        };
+        let phase_order = phase_order.as_array().ok_or_else(|| {
+            anyhow::anyhow!("LangGraph {evidence_label} state.phase_order was not an array")
+        })?;
+        let phase_order: Vec<&str> = phase_order
+            .iter()
+            .map(|phase| {
+                phase.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} state.phase_order contained a non-string phase"
+                    )
+                })
+            })
+            .collect::<Result<_>>()?;
+        let workflow_phase_ids: Vec<&str> = workflow
+            .phases
+            .iter()
+            .map(|phase| phase.id.as_str())
+            .collect();
+        if phase_order != workflow_phase_ids {
+            bail!(
+                "LangGraph {evidence_label} state.phase_order mismatch: got {:?}, expected {:?}",
+                phase_order,
+                workflow_phase_ids
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_projected_workflow_state(
+        state: &serde_json::Map<String, serde_json::Value>,
+        workflow_state: &WorkflowState,
+        skill: &str,
+        session_id: &str,
+        evidence_label: &str,
+    ) -> Result<()> {
+        if workflow_state.skill != skill {
+            bail!(
+                "LangGraph {evidence_label} workflow projection skill mismatch: got '{}', expected '{skill}'",
+                workflow_state.skill
+            );
+        }
+        if workflow_state.session_id != session_id {
+            bail!(
+                "LangGraph {evidence_label} workflow projection session mismatch: got '{}', expected '{session_id}'",
+                workflow_state.session_id
+            );
+        }
+
+        let projected_current_phase = match state.get("current_phase") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => {
+                let phase = value.as_u64().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} state.current_phase was not a non-negative integer"
+                    )
+                })?;
+                Some(usize::try_from(phase).map_err(|_| {
+                    anyhow::anyhow!(
+                        "LangGraph {evidence_label} state.current_phase exceeded platform usize"
+                    )
+                })?)
+            }
+        };
+        if projected_current_phase != workflow_state.current_phase {
+            bail!("LangGraph {evidence_label} workflow projection current_phase mismatch");
+        }
+
+        let state_completed = state
+            .get("completed_phases")
+            .and_then(serde_json::Value::as_array)
+            .map(|completed| {
+                completed
+                    .iter()
+                    .map(|phase| {
+                        phase.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "LangGraph {evidence_label} state.completed_phases contained a non-string phase"
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if state_completed != workflow_state.completed_phases {
+            bail!("LangGraph {evidence_label} workflow projection completed_phases mismatch");
+        }
+
+        let state_complete = state
+            .get("complete")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if state_complete != workflow_state.complete {
+            bail!("LangGraph {evidence_label} workflow projection complete flag mismatch");
+        }
+
+        let expected_step_states = serde_json::to_value(&workflow_state.step_states)?;
+        match state.get("step_states") {
+            Some(step_states) if step_states == &expected_step_states => {}
+            Some(_) => bail!("LangGraph {evidence_label} workflow projection step_states mismatch"),
+            None if workflow_state.step_states.is_empty() => {}
+            None => bail!("LangGraph {evidence_label} state omitted projected step_states"),
+        }
+
+        let expected_current_step = serde_json::to_value(&workflow_state.current_step)?;
+        match state.get("current_step") {
+            Some(current_step) if current_step == &expected_current_step => {}
+            Some(_) => {
+                bail!("LangGraph {evidence_label} workflow projection current_step mismatch")
+            }
+            None if workflow_state.current_step.is_none() => {}
+            None => bail!("LangGraph {evidence_label} state omitted projected current_step"),
+        }
+
+        let expected_dyad_verdicts = serde_json::to_value(&workflow_state.dyad_verdicts)?;
+        match state.get("dyad_verdicts") {
+            Some(dyad_verdicts) if dyad_verdicts == &expected_dyad_verdicts => {}
+            Some(_) => {
+                bail!("LangGraph {evidence_label} workflow projection dyad_verdicts mismatch");
+            }
+            None if workflow_state.dyad_verdicts.is_empty() => {}
+            None => bail!("LangGraph {evidence_label} state omitted projected dyad_verdicts"),
+        }
+
+        Ok(())
     }
 
     /// Obtain the completion verdict for a phase. When `dual` is set, run the
@@ -1659,6 +1853,7 @@ impl ProofEngine {
                 &session_id,
                 phase_id,
                 step_id,
+                workflow,
                 &step_graph,
             )?;
 
@@ -1687,6 +1882,7 @@ impl ProofEngine {
         session_id: &str,
         phase_id: &str,
         step_id: &str,
+        workflow: &SkillWorkflow,
         result: &StepGraphApplyResult,
     ) -> Result<()> {
         let graph = result.graph_run.as_object().ok_or_else(|| {
@@ -1735,6 +1931,13 @@ impl ProofEngine {
                 "LangGraph step evidence session mismatch for '{skill}/{phase_id}.{step_id}': got '{graph_session}'"
             );
         }
+        Self::validate_projected_workflow_state(
+            state,
+            &result.workflow_state,
+            skill,
+            session_id,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
         let step_states = state
             .get("step_states")
             .and_then(serde_json::Value::as_array)
@@ -1809,6 +2012,12 @@ impl ProofEngine {
             skill,
             session_id,
             phase_id,
+            workflow,
+            &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
+        )?;
+        Self::validate_graph_state_phase_order(
+            state,
+            workflow,
             &format!("step evidence for '{skill}/{phase_id}.{step_id}'"),
         )?;
         Self::validate_checkpoint_history_evidence(
@@ -2288,6 +2497,7 @@ mod step_evidence_tests {
                 "linear",
                 "session-123",
                 "claim",
+                &test_step_workflow("linear", "claim"),
                 "test evidence",
             )
             .expect("hosted topology should validate from serialized tenant scope");
@@ -2313,6 +2523,7 @@ mod step_evidence_tests {
             "linear",
             "session-123",
             "claim",
+            &test_step_workflow("linear", "claim"),
             "test evidence",
         )
         .expect_err("hosted topology without tenant scope must fail");
@@ -2334,6 +2545,7 @@ mod step_evidence_tests {
             "linear",
             "session-123",
             "claim",
+            &test_step_workflow("linear", "claim"),
             "test evidence",
         )
         .expect_err("mismatched tenant metadata must fail");
@@ -2354,6 +2566,7 @@ mod step_evidence_tests {
             "linear",
             "session-123",
             "claim",
+            &test_step_workflow("linear", "claim"),
             "test evidence",
         )
         .expect_err("sqlite topology with tenant scope must fail");
@@ -2361,6 +2574,24 @@ mod step_evidence_tests {
         assert!(err
             .to_string()
             .contains("must not carry hosted tenant metadata"));
+    }
+
+    #[test]
+    fn topology_validation_rejects_phase_order_outside_workflow() {
+        let topology = test_graph_topology("linear", "session-123", &["claim", "review"]);
+        let graph = serde_json::json!({ "graph_topology": topology });
+
+        let err = ProofEngine::validate_graph_topology(
+            graph.as_object().expect("graph object"),
+            "linear",
+            "session-123",
+            "claim",
+            &test_step_workflow("linear", "claim"),
+            "test evidence",
+        )
+        .expect_err("topology phase order must match configured workflow");
+
+        assert!(err.to_string().contains("topology phase_order mismatch"));
     }
 
     struct StepGraphWithForgedWrite;
@@ -2853,6 +3084,31 @@ mod step_evidence_tests {
         }
     }
 
+    struct StepGraphWithMismatchedProjection;
+
+    #[async_trait::async_trait]
+    impl StepGraphAuthority for StepGraphWithMismatchedProjection {
+        async fn apply_step_status(
+            &self,
+            skill: &str,
+            session_id: &str,
+            workflow: &SkillWorkflow,
+            phase_id: &str,
+            step_id: &str,
+            status: StepStatus,
+            summary: Option<String>,
+        ) -> Result<StepGraphApplyResult> {
+            let authority = TestStepGraphAuthority::default();
+            let mut result = authority
+                .apply_step_status(
+                    skill, session_id, workflow, phase_id, step_id, status, summary,
+                )
+                .await?;
+            result.workflow_state.session_id = "other-session".to_string();
+            Ok(result)
+        }
+    }
+
     /// A judge whose `evaluate_multi` returns a fixed two-judge verdict (Opus +
     /// Codex), so the dual fold in `judge_verdict_for` can be exercised without
     /// the network. `evaluate` (single path) is unreachable here.
@@ -3044,6 +3300,45 @@ mod step_evidence_tests {
         assert!(
             !state.has_graph_workflow("linear"),
             "unauthorized graph evidence must not project workflow progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_submission_rejects_workflow_projection_session_mismatch() {
+        let state = Arc::new(RwLock::new(SessionState::new("projection-step-session")));
+        let eng = ProofEngine::new(state.clone(), Arc::new(TestJudge))
+            .with_signing(None, false)
+            .with_step_graph_authority(Arc::new(StepGraphWithMismatchedProjection));
+
+        let err = eng
+            .submit_step_evidence(
+                "linear",
+                "claim",
+                "1",
+                "fetch ticket",
+                Evidence::default(),
+                JudgeVerdict::pass(0.93, "evidence sufficient"),
+                JudgeModel::Sonnet,
+                serde_json::Value::Null,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect_err("workflow projection identity mismatch must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("workflow projection session mismatch"),
+            "error must identify forged projection session: {err:#}"
+        );
+        let state = state.read().await;
+        assert!(
+            state.proof_chain("linear").is_none(),
+            "forged workflow projection must not seal a StepProof"
+        );
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "forged workflow projection must not mutate workflow progress"
         );
     }
 
@@ -3960,6 +4255,9 @@ mod phase_evidence_tests {
                         "current_phase": state.current_phase,
                         "completed_phases": state.completed_phases.clone(),
                         "complete": state.complete,
+                        "dyad_verdicts": state.dyad_verdicts.clone(),
+                        "step_states": state.step_states.clone(),
+                        "current_step": state.current_step.clone(),
                         "last_verdict": if passed { "pass" } else { "fail" },
                     });
                     let checkpoint_id = format!("checkpoint-{phase_id}");
@@ -4120,6 +4418,56 @@ mod phase_evidence_tests {
                 .expect("proof chain")
                 .phase_count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_submission_rejects_workflow_projection_session_mismatch() {
+        let state = Arc::new(RwLock::new(SessionState::new("phase-session")));
+        let authority = Arc::new(RecordingPhaseGraph::default());
+        *authority.seed_state.lock().unwrap() = Some(WorkflowState::new("linear", "other-session"));
+        let engine = ProofEngine::new(
+            state.clone(),
+            Arc::new(PhaseTestJudge {
+                verdict: JudgeVerdict::pass(0.95, "done"),
+            }),
+        )
+        .with_signing(None, false)
+        .with_phase_graph_authority(authority.clone());
+        let wf = workflow();
+
+        let err = engine
+            .submit_evidence(
+                "linear",
+                "claim",
+                "claim phase",
+                Evidence::default(),
+                JudgeModel::Sonnet,
+                Utc::now(),
+                Some(&wf),
+                false,
+            )
+            .await
+            .expect_err("workflow projection identity mismatch must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("workflow projection session mismatch"),
+            "error must identify forged projection session: {err:#}"
+        );
+        assert_eq!(
+            authority.calls.lock().unwrap().as_slice(),
+            &[("claim".to_string(), true)],
+            "graph authority should be called, then projection validation should fail"
+        );
+        let state = state.read().await;
+        assert!(
+            !state.has_graph_workflow("linear"),
+            "forged workflow projection must not project workflow state"
+        );
+        assert!(
+            !state.has_proof_chain("linear"),
+            "forged workflow projection must not seal a phase proof"
         );
     }
 

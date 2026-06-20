@@ -191,7 +191,7 @@ fn phase_checkpointer_config_accepts_postgres_schema() {
                 config,
                 PhaseCheckpointerConfig::Postgres {
                     database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-                    schema: Some("phase_graph".to_string()),
+                    schema: "phase_graph".to_string(),
                 }
             );
             assert_eq!(config.backend_name(), "postgres");
@@ -201,17 +201,22 @@ fn phase_checkpointer_config_accepts_postgres_schema() {
 }
 
 #[test]
-fn phase_checkpointer_config_uses_public_postgres_scope_without_schema() {
+fn phase_checkpointer_config_requires_postgres_schema() {
     with_phase_checkpointer_env(
         Some("postgres"),
         Some("postgres://sentinel:sentinel@localhost/sentinel"),
         None,
         Some("legatus_ai"),
         || {
-            let config =
-                PhaseCheckpointerConfig::from_env("/tmp/ignored.db").expect("postgres config");
-            assert_eq!(config.backend_name(), "postgres");
-            assert_eq!(config.scope_name(), "schema:public");
+            let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
+                .expect_err("postgres schema must be required");
+            let message = err.to_string();
+            assert!(message.contains(PhaseCheckpointerConfig::BACKEND_ENV));
+            assert!(message.contains(PhaseCheckpointerConfig::POSTGRES_SCHEMA_ENV));
+            assert!(
+                !message.contains("implicit Postgres schema"),
+                "postgres selection must not use an implicit Postgres schema: {message}"
+            );
         },
     );
 }
@@ -315,7 +320,7 @@ fn phase_checkpointer_config_requires_tenant_scope_for_postgres() {
     with_phase_checkpointer_env(
         Some("postgres"),
         Some("postgres://sentinel:sentinel@localhost/sentinel"),
-        None,
+        Some("phase_graph"),
         None,
         || {
             let err = PhaseCheckpointerConfig::from_env("/tmp/ignored.db")
@@ -353,7 +358,7 @@ fn explicit_hosted_phase_checkpointer_config_requires_tenant_scope() {
         let postgres_err =
             crate::tenant_scope_for_phase_checkpointer_config(&PhaseCheckpointerConfig::Postgres {
                 database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-                schema: Some("phase_graph".to_string()),
+                schema: "phase_graph".to_string(),
             })
             .expect_err("explicit postgres config must require tenant scope");
         assert!(postgres_err
@@ -486,7 +491,7 @@ fn phase_thread_id_rejects_malformed_tenant_scope() {
 async fn postgres_phase_saver_request_fails_without_postgres_feature() {
     let result = crate::phase_checkpointer_for_config(PhaseCheckpointerConfig::Postgres {
         database_url: "postgres://sentinel:sentinel@localhost/sentinel".to_string(),
-        schema: Some("phase_graph".to_string()),
+        schema: "phase_graph".to_string(),
     })
     .await;
     let err = match result {
@@ -578,7 +583,7 @@ async fn compiled_phase_graph_rejects_missing_hosted_tenant_scope() {
         &fixture(),
         saver.into_saver(),
         "postgres".to_string(),
-        "schema:public".to_string(),
+        "schema:phase_graph".to_string(),
         None,
     );
     let err = match result {
@@ -791,7 +796,7 @@ fn phase_node_metadata_validator_fails_on_missing_or_mismatched_values() {
     let mismatched = vec![node(
         "claim",
         "sentinel.checkpointer_scope",
-        Some("schema:public"),
+        Some("schema:phase_graph"),
     )];
     let err = required_phase_node_metadata(
         "linear",
@@ -801,7 +806,7 @@ fn phase_node_metadata_validator_fails_on_missing_or_mismatched_values() {
         "database_path::memory:",
     )
     .expect_err("mismatched metadata fails");
-    assert!(err.to_string().contains("schema:public"));
+    assert!(err.to_string().contains("schema:phase_graph"));
     assert!(err.to_string().contains("database_path::memory:"));
 }
 
