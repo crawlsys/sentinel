@@ -102,8 +102,9 @@ impl PhaseGraphAuthority for CliPhaseGraphAuthority {
             .apply_verdict_report(skill, session_id, phase_id, passed)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let authority_state = report.authority_state.as_ref().unwrap_or(&report.state);
         let mut graph_run =
-            phase_graph_mutation_evidence(&graph, session_id, &report.state).await?;
+            phase_graph_mutation_evidence(&graph, session_id, authority_state, phase_id).await?;
         graph_run
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("phase graph evidence must be an object"))?
@@ -146,7 +147,8 @@ impl StepGraphAuthority for CliPhaseGraphAuthority {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let graph_run = phase_graph_mutation_evidence(&graph, session_id, &graph_state).await?;
+        let graph_run =
+            phase_graph_mutation_evidence(&graph, session_id, &graph_state, phase_id).await?;
         Ok(StepGraphApplyResult {
             workflow_state: graph_state.to_workflow_state(),
             graph_run,
@@ -591,6 +593,7 @@ async fn phase_graph_mutation_evidence(
     graph: &sentinel_graph::CompiledPhaseGraph,
     session_id: &str,
     state: &sentinel_graph::PhaseGraphState,
+    expected_node_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let checkpoints = graph
         .phase_snapshots(session_id)
@@ -613,6 +616,7 @@ async fn phase_graph_mutation_evidence(
         checkpoints,
         writes,
         &expected_thread_id,
+        expected_node_id,
     )?;
     evidence
         .as_object_mut()
@@ -627,15 +631,10 @@ fn build_phase_graph_mutation_evidence(
     checkpoints: Vec<sentinel_graph::PhaseGraphCheckpointSnapshot>,
     writes: Vec<sentinel_graph::PhaseGraphWriteHistoryEntry>,
     expected_thread_id: &str,
+    expected_node_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let latest_checkpoint = checkpoints
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("phase graph mutation did not persist a checkpoint"))?;
-    if latest_checkpoint.thread_id != expected_thread_id {
-        anyhow::bail!(
-            "phase graph latest checkpoint thread mismatch for session '{session_id}': expected '{expected_thread_id}', got '{}'",
-            latest_checkpoint.thread_id
-        );
+    if checkpoints.is_empty() {
+        anyhow::bail!("phase graph mutation did not persist a checkpoint");
     }
     if let Some(mismatched) = checkpoints
         .iter()
@@ -657,6 +656,35 @@ fn build_phase_graph_mutation_evidence(
             );
         }
     }
+    let state_json = serde_json::to_value(state)?;
+    let selected_checkpoint_idx = checkpoints
+        .iter()
+        .rposition(|checkpoint| {
+            checkpoint.state == *state
+                && checkpoint
+                    .writes
+                    .iter()
+                    .any(|write| write.channel == "state" && write.node_id == expected_node_id)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "phase graph checkpoint history for session '{session_id}' omitted state-channel checkpoint metadata from phase node '{expected_node_id}' for the accepted graph state"
+            )
+        })?;
+    let selected_checkpoint = checkpoints
+        .get(selected_checkpoint_idx)
+        .expect("selected checkpoint index is in bounds")
+        .clone();
+    let selected_step = selected_checkpoint.step_number;
+    let selected_checkpoint_id = selected_checkpoint.checkpoint_id.clone();
+    let checkpoints: Vec<_> = checkpoints
+        .into_iter()
+        .take(selected_checkpoint_idx + 1)
+        .collect();
+    let writes: Vec<_> = writes
+        .into_iter()
+        .filter(|write| write.step_number <= selected_step)
+        .collect();
     if let Some(mismatched) = writes
         .iter()
         .find(|write| write.thread_id != expected_thread_id)
@@ -677,35 +705,48 @@ fn build_phase_graph_mutation_evidence(
             );
         }
     }
-    if latest_checkpoint.state != *state {
+    if selected_checkpoint.state != *state {
         anyhow::bail!("phase graph latest checkpoint state mismatch for session '{session_id}'");
     }
-    if latest_checkpoint
+    let state_checkpoint_writes: Vec<_> = selected_checkpoint
         .writes
         .iter()
-        .all(|write| write.channel != "state")
-    {
+        .filter(|write| write.channel == "state")
+        .collect();
+    if state_checkpoint_writes.is_empty() {
         anyhow::bail!(
             "phase graph latest checkpoint for session '{session_id}' omitted state-channel checkpoint metadata"
         );
     }
-    let state_json = serde_json::to_value(state)?;
+    if !state_checkpoint_writes
+        .iter()
+        .any(|write| write.node_id == expected_node_id)
+    {
+        let observed = state_checkpoint_writes
+            .iter()
+            .map(|write| write.node_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "phase graph latest checkpoint for session '{session_id}' state write was attributed to [{observed}], expected phase node '{expected_node_id}'"
+        );
+    }
     let latest_state_write = writes.iter().any(|write| {
-        write.checkpoint_id == latest_checkpoint.checkpoint_id
+        write.checkpoint_id == selected_checkpoint_id
             && write.channel == "state"
+            && write.node_id == expected_node_id
             && write.value_json == state_json
     });
     if !latest_state_write {
         anyhow::bail!(
-            "phase graph write history for session '{session_id}' omitted latest checkpoint state-channel write"
+            "phase graph write history for session '{session_id}' omitted latest checkpoint state-channel write from phase node '{expected_node_id}'"
         );
     }
-    let latest_checkpoint = latest_checkpoint.clone();
     Ok(serde_json::json!({
         "workflow_authority": "langgraph",
         "graph_state": state,
         "state": state,
-        "latest_checkpoint": latest_checkpoint,
+        "latest_checkpoint": selected_checkpoint,
         "checkpoints": checkpoints,
         "writes": writes,
     }))
@@ -3046,7 +3087,8 @@ async fn handle_record_dyad_verdict(
             .update_dyad_verdicts(skill, &session_id, phase_id, verdicts)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let phase_graph = phase_graph_mutation_evidence(&graph, &session_id, &graph_state).await?;
+        let phase_graph =
+            phase_graph_mutation_evidence(&graph, &session_id, &graph_state, phase_id).await?;
         Ok::<_, anyhow::Error>((graph_state, phase_graph))
     }
     .await;
@@ -3268,7 +3310,8 @@ async fn handle_update_step(
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let phase_graph = phase_graph_mutation_evidence(&graph, &session_id, &graph_state).await?;
+        let phase_graph =
+            phase_graph_mutation_evidence(&graph, &session_id, &graph_state, &phase_id).await?;
         let workflow_state = graph_state.to_workflow_state();
         {
             let mut s = state.write().await;
@@ -3811,7 +3854,8 @@ async fn handle_replay_phase(
             .replay_phase(skill, &session_id, phase_id, reason)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let phase_graph = phase_graph_mutation_evidence(&graph, &session_id, &forked).await?;
+        let phase_graph =
+            phase_graph_mutation_evidence(&graph, &session_id, &forked, phase_id).await?;
         Ok::<_, anyhow::Error>((forked, phase_graph))
     }
     .await;
@@ -4189,7 +4233,7 @@ blocker = true
     }
 
     #[test]
-    fn mutation_evidence_requires_latest_checkpoint_state_match() {
+    fn mutation_evidence_requires_authority_checkpoint_for_accepted_state() {
         let mut projected =
             sentinel_graph::PhaseGraphState::new("linear", "test-session", vec!["claim".into()]);
         projected.current_phase = Some(1);
@@ -4205,12 +4249,76 @@ blocker = true
             vec![checkpoint_snapshot(stale, "checkpoint-1")],
             vec![write_history_entry(&projected, "checkpoint-1")],
             "sentinel.phase.linear.test-session",
+            "claim",
         )
-        .expect_err("stale latest checkpoint must fail closed");
+        .expect_err("missing accepted-state authority checkpoint must fail closed");
 
         assert!(
-            err.to_string().contains("latest checkpoint state mismatch"),
-            "error must identify stale checkpoint state: {err:#}"
+            err.to_string()
+                .contains("omitted state-channel checkpoint metadata from phase node 'claim'"),
+            "error must identify missing accepted-state authority checkpoint: {err:#}"
+        );
+    }
+
+    #[test]
+    fn mutation_evidence_selects_phase_authority_checkpoint_before_reentry_gate() {
+        let mut authority = sentinel_graph::PhaseGraphState::new(
+            "linear",
+            "test-session",
+            vec!["claim".into(), "fetch".into()],
+        );
+        authority.current_phase = Some(1);
+        authority.completed_phases = vec!["claim".into()];
+        authority.last_verdict = sentinel_graph::Verdict::Pass;
+        let mut reentry_gate = authority.clone();
+        reentry_gate.last_verdict = sentinel_graph::Verdict::Pending;
+
+        let mut authority_checkpoint = checkpoint_snapshot(authority.clone(), "checkpoint-2");
+        authority_checkpoint.step_number = 2;
+        authority_checkpoint.writes[0].node_id = "claim".to_string();
+        let mut reentry_checkpoint = checkpoint_snapshot(reentry_gate.clone(), "checkpoint-3");
+        reentry_checkpoint.step_number = 3;
+        reentry_checkpoint.writes[0].node_id = "fetch".to_string();
+        let mut authority_write = write_history_entry(&authority, "checkpoint-2");
+        authority_write.step_number = 2;
+        authority_write.node_id = "claim".to_string();
+        let mut reentry_write = write_history_entry(&reentry_gate, "checkpoint-3");
+        reentry_write.step_number = 3;
+        reentry_write.node_id = "fetch".to_string();
+
+        let evidence = build_phase_graph_mutation_evidence(
+            "test-session",
+            &authority,
+            vec![authority_checkpoint, reentry_checkpoint],
+            vec![authority_write, reentry_write],
+            "sentinel.phase.linear.test-session",
+            "claim",
+        )
+        .expect("phase authority checkpoint should be selected before re-entry gate");
+
+        assert_eq!(
+            evidence["latest_checkpoint"]["checkpoint_id"],
+            "checkpoint-2"
+        );
+        assert_eq!(
+            evidence["latest_checkpoint"]["writes"][0]["node_id"],
+            "claim"
+        );
+        assert_eq!(
+            evidence["checkpoints"]
+                .as_array()
+                .expect("checkpoint history")
+                .len(),
+            1,
+            "proof evidence should trim history to the phase authority checkpoint"
+        );
+        assert!(
+            evidence["writes"]
+                .as_array()
+                .expect("write history")
+                .iter()
+                .all(|write| write["node_id"] == "claim"),
+            "proof evidence must not include later re-entry gate writes"
         );
     }
 
@@ -4227,6 +4335,7 @@ blocker = true
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-2")],
             vec![write_history_entry(&projected, "checkpoint-1")],
             "sentinel.phase.linear.test-session",
+            "claim",
         )
         .expect_err("missing latest checkpoint write must fail closed");
 
@@ -4252,12 +4361,67 @@ blocker = true
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-2")],
             writes,
             "sentinel.phase.linear.test-session",
+            "claim",
         )
         .expect_err("mismatched write thread must fail closed");
 
         assert!(
             err.to_string().contains("write history") && err.to_string().contains("other-session"),
             "error must identify mismatched write thread: {err:#}"
+        );
+    }
+
+    #[test]
+    fn mutation_evidence_rejects_boundary_attributed_state_write() {
+        let mut projected =
+            sentinel_graph::PhaseGraphState::new("linear", "test-session", vec!["claim".into()]);
+        projected.current_phase = Some(1);
+        projected.completed_phases = vec!["claim".into()];
+        let mut checkpoint = checkpoint_snapshot(projected.clone(), "checkpoint-2");
+        checkpoint.writes[0].node_id = "START".to_string();
+        let mut writes = vec![write_history_entry(&projected, "checkpoint-2")];
+        writes[0].node_id = "START".to_string();
+
+        let err = build_phase_graph_mutation_evidence(
+            "test-session",
+            &projected,
+            vec![checkpoint],
+            writes,
+            "sentinel.phase.linear.test-session",
+            "claim",
+        )
+        .expect_err("boundary-attributed state writes must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("omitted state-channel checkpoint metadata from phase node 'claim'"),
+            "error must identify boundary-attributed state write: {err:#}"
+        );
+    }
+
+    #[test]
+    fn mutation_evidence_requires_expected_phase_write_history_node() {
+        let mut projected =
+            sentinel_graph::PhaseGraphState::new("linear", "test-session", vec!["claim".into()]);
+        projected.current_phase = Some(1);
+        projected.completed_phases = vec!["claim".into()];
+        let mut writes = vec![write_history_entry(&projected, "checkpoint-2")];
+        writes[0].node_id = "START".to_string();
+
+        let err = build_phase_graph_mutation_evidence(
+            "test-session",
+            &projected,
+            vec![checkpoint_snapshot(projected.clone(), "checkpoint-2")],
+            writes,
+            "sentinel.phase.linear.test-session",
+            "claim",
+        )
+        .expect_err("write history must be attributed to the expected phase node");
+
+        assert!(
+            err.to_string()
+                .contains("latest checkpoint state-channel write from phase node 'claim'"),
+            "error must identify write-history node mismatch: {err:#}"
         );
     }
 
@@ -4286,6 +4450,7 @@ blocker = true
             vec![older_checkpoint, latest_checkpoint],
             vec![latest_write, older_write],
             "sentinel.phase.linear.test-session",
+            "claim",
         )
         .expect_err("out-of-order write history must fail closed");
 
@@ -4320,6 +4485,7 @@ blocker = true
                 write_history_entry(&older, "checkpoint-1"),
             ],
             "sentinel.phase.linear.test-session",
+            "claim",
         )
         .expect_err("out-of-order checkpoint history must fail closed");
 
@@ -4342,6 +4508,7 @@ blocker = true
             vec![checkpoint_snapshot(projected.clone(), "checkpoint-3")],
             vec![write_history_entry(&projected, "checkpoint-3")],
             "sentinel.phase.linear.test-session",
+            "claim",
         )
         .expect("matching checkpoint evidence is accepted");
 

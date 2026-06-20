@@ -327,7 +327,14 @@ pub struct PhaseGraphStreamPart {
 /// State plus the exact LangGraph stream parts observed during a gate run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseGraphRunReport {
+    /// Latest projected graph state after the run completes. For phase verdicts
+    /// that re-enter the next gate, this is the post-reentry gate state.
     pub state: PhaseGraphState,
+    /// Phase-owned authority state written by the verdict/update that caused
+    /// this report. This differs from `state` when a successful non-terminal
+    /// verdict immediately re-enters the next phase gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_state: Option<PhaseGraphState>,
     pub stream: Vec<PhaseGraphStreamPart>,
 }
 
@@ -2264,7 +2271,11 @@ impl CompiledPhaseGraph {
             )));
         }
 
-        Ok(PhaseGraphRunReport { state, stream })
+        Ok(PhaseGraphRunReport {
+            state,
+            authority_state: None,
+            stream,
+        })
     }
 
     fn require_phase_stream_payload_kind(
@@ -3119,16 +3130,22 @@ impl CompiledPhaseGraph {
         }
 
         self.complete_active_interrupts()?;
-        self.update_state_as_node(session_id, state.clone(), phase_id)
+        let authority_state = self
+            .update_state_as_node(session_id, state.clone(), phase_id)
             .await?;
 
-        if state.complete {
+        if authority_state.complete {
             Ok(PhaseGraphRunReport {
-                state,
+                state: authority_state.clone(),
+                authority_state: Some(authority_state),
                 stream: Vec::new(),
             })
         } else {
-            self.execute_until_gate_report(session_id, state).await
+            let mut report = self
+                .execute_until_gate_report(session_id, authority_state.clone())
+                .await?;
+            report.authority_state = Some(authority_state);
+            Ok(report)
         }
     }
 
@@ -3696,6 +3713,10 @@ impl CompiledPhaseGraph {
             superseded_step_states,
         });
 
-        self.update_state_as_node(session_id, fork, START).await
+        // Persist the replay fork as an authority mutation owned by the target
+        // phase. The next run still enters routing from START using this
+        // checkpointed phase position, but the durable write must not be
+        // boundary-attributed.
+        self.update_state_as_node(session_id, fork, phase_id).await
     }
 }

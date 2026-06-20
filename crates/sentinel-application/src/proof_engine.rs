@@ -1035,11 +1035,11 @@ impl ProofEngine {
             })?;
         Self::validate_phase_stream_checkpoint_evidence(
             stream,
-            latest_checkpoint,
-            checkpoint_id,
             &expected_thread_id,
             expected_gate_phase,
-            state_value,
+            &result.workflow_state,
+            skill,
+            session_id,
             &format!("phase evidence for '{skill}/{phase_id}'"),
         )?;
         let has_custom_gate = stream.iter().any(|part| {
@@ -1076,35 +1076,25 @@ impl ProofEngine {
 
     fn validate_phase_stream_checkpoint_evidence(
         stream: &[serde_json::Value],
-        latest_checkpoint: &serde_json::Map<String, serde_json::Value>,
-        checkpoint_id: &str,
         expected_thread_id: &str,
         expected_gate_phase: &str,
-        state_value: &serde_json::Value,
+        workflow_state: &WorkflowState,
+        skill: &str,
+        session_id: &str,
         evidence_label: &str,
     ) -> Result<()> {
-        let latest_step = latest_checkpoint
-            .get("step_number")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "LangGraph {evidence_label} latest checkpoint omitted numeric step_number"
-                )
-            })?;
         let part = stream
             .iter()
+            .rev()
             .find(|part| {
                 part.get("payload_kind").and_then(serde_json::Value::as_str)
                     == Some("checkpoints")
-                    && part
-                        .get("payload_json")
-                        .and_then(|payload| payload.get("checkpoint_id"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some(checkpoint_id)
+                    && part.get("node_id").and_then(serde_json::Value::as_str)
+                        == Some(expected_gate_phase)
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "LangGraph {evidence_label} stream omitted latest checkpoint payload for checkpoint '{checkpoint_id}'"
+                    "LangGraph {evidence_label} stream omitted checkpoint payload for gate '{expected_gate_phase}'"
                 )
             })?;
         let stream_node = part
@@ -1128,6 +1118,19 @@ impl ProofEngine {
                     "LangGraph {evidence_label} stream checkpoint payload was not an object"
                 )
             })?;
+        let checkpoint_id = payload
+            .get("checkpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LangGraph {evidence_label} stream checkpoint for gate '{expected_gate_phase}' omitted checkpoint_id"
+                )
+            })?;
+        if checkpoint_id.is_empty() {
+            bail!(
+                "LangGraph {evidence_label} stream checkpoint for gate '{expected_gate_phase}' had empty checkpoint_id"
+            );
+        }
         let stream_thread = payload
             .get("thread_id")
             .and_then(serde_json::Value::as_str)
@@ -1141,7 +1144,7 @@ impl ProofEngine {
                 "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' thread mismatch: got '{stream_thread}', expected '{expected_thread_id}'"
             );
         }
-        let stream_step = payload
+        payload
             .get("step_number")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| {
@@ -1149,11 +1152,6 @@ impl ProofEngine {
                     "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted numeric step_number"
                 )
             })?;
-        if stream_step != latest_step {
-            bail!(
-                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' step mismatch: latest_checkpoint={latest_step}, stream={stream_step}"
-            );
-        }
         let source_type = payload
             .get("source")
             .and_then(serde_json::Value::as_object)
@@ -1189,9 +1187,18 @@ impl ProofEngine {
                 "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' omitted state"
             )
         })?;
-        if stream_state != state_value {
-            bail!("LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' state mismatch");
-        }
+        let stream_state = stream_state.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LangGraph {evidence_label} stream checkpoint '{checkpoint_id}' state was not an object"
+            )
+        })?;
+        Self::validate_projected_workflow_state(
+            stream_state,
+            workflow_state,
+            skill,
+            session_id,
+            evidence_label,
+        )?;
 
         Ok(())
     }
@@ -5341,7 +5348,7 @@ mod phase_evidence_tests {
                         },
                         {
                             "event_type": "Checkpoint",
-                            "node_id": "claim",
+                            "node_id": "other_gate",
                             "timestamp": "2026-06-17T00:00:00Z",
                             "superstep": 1,
                             "payload_kind": "checkpoints",
@@ -5351,7 +5358,7 @@ mod phase_evidence_tests {
                                 "step_number": 1,
                                 "source": {
                                     "type": "stream_update",
-                                    "node": "claim"
+                                    "node": "other_gate"
                                 },
                                 "state": graph_state.clone()
                             }
@@ -5402,8 +5409,8 @@ mod phase_evidence_tests {
 
         assert!(
             err.to_string()
-                .contains("stream omitted latest checkpoint payload"),
-            "error must identify missing latest stream checkpoint: {err:#}"
+                .contains("stream omitted checkpoint payload for gate 'claim'"),
+            "error must identify missing gate stream checkpoint: {err:#}"
         );
         assert_eq!(
             authority.calls.lock().unwrap().as_slice(),
@@ -5547,8 +5554,8 @@ mod phase_evidence_tests {
             .expect_err("forged stream checkpoint state must fail closed");
 
         assert!(
-            err.to_string().contains("stream checkpoint")
-                && err.to_string().contains("state mismatch"),
+            err.to_string()
+                .contains("workflow projection completed_phases mismatch"),
             "error must identify forged stream checkpoint state: {err:#}"
         );
         assert_eq!(

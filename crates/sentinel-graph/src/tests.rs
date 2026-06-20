@@ -2824,6 +2824,23 @@ async fn replay_phase_forks_before_target() {
     assert_eq!(latest.completed_phases, vec!["claim".to_string()]);
     assert_eq!(latest.step_states.len(), 1);
     assert_eq!(latest.step_states[0].phase_id, "claim");
+    let writes = graph
+        .phase_writes_history("r", Some("state"))
+        .await
+        .expect("state write history");
+    let latest_replay_write = writes
+        .iter()
+        .rev()
+        .find(|write| write.value_json == serde_json::to_value(&latest).expect("latest json"))
+        .expect("latest replay state write");
+    assert_eq!(
+        latest_replay_write.node_id, "fetch",
+        "replay forks must be attributed to the target phase node"
+    );
+    assert_ne!(
+        latest_replay_write.node_id, START,
+        "replay forks must not be boundary-attributed START writes"
+    );
 
     graph
         .apply_verdict("linear", "r", "fetch", true)
