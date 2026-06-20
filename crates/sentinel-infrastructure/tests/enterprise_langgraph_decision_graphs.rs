@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
     let graph_sources = langgraph_decision_graph_sources();
     assert!(
-        graph_sources.len() >= 50,
+        graph_sources.len() >= 54,
         "expected broad infrastructure LangGraph decision-graph coverage, found {} files",
         graph_sources.len()
     );
@@ -20,9 +20,6 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
     for path in graph_sources {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        if !source.contains("StateGraphBuilder") {
-            continue;
-        }
 
         let label = path
             .file_name()
@@ -100,17 +97,12 @@ fn langgraph_decision_graph_sources() -> Vec<PathBuf> {
     let mut files = std::fs::read_dir(&src)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", src.display()))
         .map(|entry| entry.expect("source entry should be readable").path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with("_graph.rs"))
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            (source.contains("StateGraphBuilder") && source.contains("build_")).then_some(path)
         })
         .collect::<Vec<_>>();
-
-    let remediation = src.join("remediation.rs");
-    if remediation.exists() {
-        files.push(remediation);
-    }
 
     files.sort();
     files
