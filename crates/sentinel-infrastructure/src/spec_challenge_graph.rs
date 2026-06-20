@@ -393,7 +393,8 @@ async fn build_spec_challenge_graph_with_checkpointer(
     let schema = spec_challenge_state_schema();
     let builder = StateGraphBuilder::<SpecChallengeState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: SpecChallengeState| async move {

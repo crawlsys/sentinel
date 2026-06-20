@@ -1038,7 +1038,8 @@ async fn build_remediation_graph_with_checkpointer(
     let schema = remediation_state_schema();
     let builder = StateGraphBuilder::<RemediationState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: RemediationState| async move {

@@ -230,7 +230,13 @@ where
         .collect();
     required_decision_edge_contract(graph_name, &nodes, &edges)?;
     let schemas = graph.schemas_json();
-    required_decision_schema_contract(graph_name, &schemas.state, &schemas.input, &schemas.output)?;
+    required_decision_schema_contract(
+        graph_name,
+        &schemas.state,
+        &schemas.input,
+        &schemas.output,
+        &schemas.context,
+    )?;
     let durable_checkpointer = compiled.checkpointer.is_some();
     let auto_checkpoint = graph.auto_checkpoint();
     let max_iterations = graph.max_iterations();
@@ -451,6 +457,7 @@ fn required_decision_schema_contract(
     state: &Option<serde_json::Value>,
     input: &Option<serde_json::Value>,
     output: &Option<serde_json::Value>,
+    context: &Option<serde_json::Value>,
 ) -> Result<(), String> {
     let state_schema = state
         .as_ref()
@@ -463,6 +470,11 @@ fn required_decision_schema_contract(
     if output.is_none() {
         return Err(format!(
             "{graph_name} decision graph is missing an output schema"
+        ));
+    }
+    if context.is_none() {
+        return Err(format!(
+            "{graph_name} decision graph is missing a context schema"
         ));
     }
     required_schema_x_sentinel_value(graph_name, state_schema, "graph", graph_name)?;
@@ -2704,12 +2716,16 @@ mod tests {
             }
         }));
         let schema = Some(serde_json::json!({ "type": "object" }));
-        required_decision_schema_contract("severity", &state, &schema, &schema)
+        required_decision_schema_contract("severity", &state, &schema, &schema, &schema)
             .expect("complete LangGraph schema contract passes");
 
-        let err = required_decision_schema_contract("severity", &state, &None, &schema)
+        let err = required_decision_schema_contract("severity", &state, &None, &schema, &schema)
             .expect_err("missing input schema must fail");
         assert!(err.contains("input schema"));
+
+        let err = required_decision_schema_contract("severity", &state, &schema, &schema, &None)
+            .expect_err("missing context schema must fail");
+        assert!(err.contains("context schema"));
 
         let wrong_graph = Some(serde_json::json!({
             "type": "object",
@@ -2718,8 +2734,9 @@ mod tests {
                 "authority": "langgraph"
             }
         }));
-        let err = required_decision_schema_contract("severity", &wrong_graph, &schema, &schema)
-            .expect_err("wrong graph marker must fail");
+        let err =
+            required_decision_schema_contract("severity", &wrong_graph, &schema, &schema, &schema)
+                .expect_err("wrong graph marker must fail");
         assert!(err.contains("x-sentinel.graph 'phase'"));
 
         let missing_authority = Some(serde_json::json!({
@@ -2728,9 +2745,14 @@ mod tests {
                 "graph": "severity"
             }
         }));
-        let err =
-            required_decision_schema_contract("severity", &missing_authority, &schema, &schema)
-                .expect_err("missing authority marker must fail");
+        let err = required_decision_schema_contract(
+            "severity",
+            &missing_authority,
+            &schema,
+            &schema,
+            &schema,
+        )
+        .expect_err("missing authority marker must fail");
         assert!(err.contains("x-sentinel.authority"));
     }
 

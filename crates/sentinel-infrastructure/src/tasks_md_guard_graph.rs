@@ -465,7 +465,8 @@ async fn build_tasks_md_guard_graph_with_checkpointer(
     let schema = tasks_md_guard_state_schema();
     let builder = StateGraphBuilder::<TasksMdGuardState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: TasksMdGuardState| async move {

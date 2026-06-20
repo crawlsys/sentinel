@@ -652,7 +652,8 @@ async fn build_tool_usage_graph_with_checkpointer(
     let schema = tool_usage_state_schema();
     let builder = StateGraphBuilder::<ToolUsageState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: ToolUsageState| async move {

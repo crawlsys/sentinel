@@ -297,7 +297,8 @@ async fn build_batch_audit_graph_with_checkpointer(
 
     let builder = StateGraphBuilder::<DynamicState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .set_channel_reducer("planned_items", FunctionReducer::new(append_json_arrays))
         .set_channel_reducer("items_dispatched", FunctionReducer::new(sum_json_u64))
         .set_channel_reducer("item_identifier", FunctionReducer::new(keep_left_json))

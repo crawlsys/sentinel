@@ -303,7 +303,8 @@ async fn build_ba_draft_graph_with_checkpointer(
     let schema = ba_draft_state_schema();
     let builder = StateGraphBuilder::<BaDraftState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: BaDraftState| async move {

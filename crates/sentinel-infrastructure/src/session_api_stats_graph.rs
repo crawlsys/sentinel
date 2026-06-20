@@ -393,7 +393,8 @@ async fn build_session_api_stats_graph_with_checkpointer(
     let schema = session_api_stats_state_schema();
     let builder = StateGraphBuilder::<SessionApiStatsState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: SessionApiStatsState| async move {

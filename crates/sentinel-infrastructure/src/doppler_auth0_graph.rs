@@ -430,7 +430,8 @@ async fn build_doppler_auth0_graph_with_checkpointer(
     let schema = doppler_auth0_state_schema();
     let builder = StateGraphBuilder::<DopplerAuth0State>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: DopplerAuth0State| async move {

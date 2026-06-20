@@ -1463,7 +1463,8 @@ fn compile_skill_graph_with_backend(
     let checkpointer_tenant_scope = tenant_scope.as_deref().unwrap_or("").to_string();
     let mut builder = StateGraphBuilder::<PhaseGraphState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema);
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema);
 
     // One async node per phase. The node marks the phase active (records its index)
     // and is the interrupt point — actual phase *work* happens in the agent,
@@ -1789,6 +1790,7 @@ fn required_phase_schema_contract(
     state: &Option<serde_json::Value>,
     input: &Option<serde_json::Value>,
     output: &Option<serde_json::Value>,
+    context: &Option<serde_json::Value>,
 ) -> Result<()> {
     let state_schema = state.as_ref().ok_or_else(|| {
         GraphEngineError::Topology(format!(
@@ -1803,6 +1805,11 @@ fn required_phase_schema_contract(
     if output.is_none() {
         return Err(GraphEngineError::Topology(format!(
             "phase graph for skill '{skill}' is missing an output schema"
+        )));
+    }
+    if context.is_none() {
+        return Err(GraphEngineError::Topology(format!(
+            "phase graph for skill '{skill}' is missing a context schema"
         )));
     }
     require_phase_schema_x_sentinel_value(skill, state_schema, "graph", PHASE_GRAPH_NAME)?;
@@ -2016,6 +2023,7 @@ impl CompiledPhaseGraph {
             &schemas.state,
             &schemas.input,
             &schemas.output,
+            &schemas.context,
         )?;
         let durable_checkpointer = self.inner.checkpointer.is_some();
         let auto_checkpoint = graph.auto_checkpoint();

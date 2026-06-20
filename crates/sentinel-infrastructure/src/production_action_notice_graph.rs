@@ -368,7 +368,8 @@ async fn build_production_action_notice_graph_with_checkpointer(
     let schema = production_action_notice_state_schema();
     let builder = StateGraphBuilder::<ProductionActionNoticeState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: ProductionActionNoticeState| async move {

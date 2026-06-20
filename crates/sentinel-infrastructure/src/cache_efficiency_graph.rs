@@ -516,7 +516,8 @@ async fn build_cache_efficiency_graph_with_checkpointer(
     let schema = cache_efficiency_state_schema();
     let builder = StateGraphBuilder::<CacheEfficiencyState>::with_schema(schema.clone())
         .with_input_schema(schema.clone())
-        .with_output_schema(schema)
+        .with_output_schema(schema.clone())
+        .with_context_schema(schema)
         .add_async_node_with_config_and_error_handler(
             CLASSIFY,
             |s: CacheEfficiencyState| async move {

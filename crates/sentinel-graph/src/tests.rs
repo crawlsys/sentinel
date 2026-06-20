@@ -683,7 +683,7 @@ async fn graph_introspection_exposes_langgraph_runtime_contract() {
     );
     assert!(topology.schemas.input.is_some());
     assert!(topology.schemas.output.is_some());
-    assert!(topology.schemas.context.is_none());
+    assert!(topology.schemas.context.is_some());
 
     let claim = topology
         .nodes
@@ -1010,12 +1010,16 @@ fn phase_schema_contract_requires_langgraph_authority_schemas() {
         }
     }));
     let schema = Some(serde_json::json!({ "type": "object" }));
-    required_phase_schema_contract("linear", &state, &schema, &schema)
+    required_phase_schema_contract("linear", &state, &schema, &schema, &schema)
         .expect("complete phase schema contract passes");
 
-    let err = required_phase_schema_contract("linear", &state, &None, &schema)
+    let err = required_phase_schema_contract("linear", &state, &None, &schema, &schema)
         .expect_err("missing input schema must fail");
     assert!(err.to_string().contains("input schema"));
+
+    let err = required_phase_schema_contract("linear", &state, &schema, &schema, &None)
+        .expect_err("missing context schema must fail");
+    assert!(err.to_string().contains("context schema"));
 
     let wrong_graph = Some(serde_json::json!({
         "type": "object",
@@ -1025,7 +1029,7 @@ fn phase_schema_contract_requires_langgraph_authority_schemas() {
             "authority": "langgraph"
         }
     }));
-    let err = required_phase_schema_contract("linear", &wrong_graph, &schema, &schema)
+    let err = required_phase_schema_contract("linear", &wrong_graph, &schema, &schema, &schema)
         .expect_err("wrong graph marker must fail");
     assert!(err.to_string().contains("x-sentinel.graph 'decision'"));
 
@@ -1036,8 +1040,9 @@ fn phase_schema_contract_requires_langgraph_authority_schemas() {
             "workflow_skill": "linear"
         }
     }));
-    let err = required_phase_schema_contract("linear", &missing_authority, &schema, &schema)
-        .expect_err("missing authority marker must fail");
+    let err =
+        required_phase_schema_contract("linear", &missing_authority, &schema, &schema, &schema)
+            .expect_err("missing authority marker must fail");
     assert!(err.to_string().contains("x-sentinel.authority"));
 }
 

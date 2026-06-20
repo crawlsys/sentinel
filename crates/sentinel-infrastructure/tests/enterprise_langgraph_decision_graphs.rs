@@ -78,6 +78,10 @@ fn all_langgraph_decision_graphs_use_v3_streaming_authority() {
             "{label} must preserve LangGraph runtime configuration during compilation"
         );
         assert!(
+            source.contains(".with_context_schema("),
+            "{label} must preserve LangGraph execution context schema during compilation"
+        );
+        assert!(
             !source.contains("get_stream_writer("),
             "{label} must use emit_decision_node_event instead of direct stream-writer calls"
         );
