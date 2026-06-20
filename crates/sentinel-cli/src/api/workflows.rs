@@ -403,12 +403,14 @@ async fn attach_workflow_api_read_graph_audit_with_graph(
     mut response: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let graph_audit = run_workflow_api_read_graph_audit(graph, surface, &response).await?;
-    response
-        .as_object_mut()
-        .ok_or_else(|| {
-            "workflow API read graph audit can only attach to object responses".to_string()
-        })?
-        .insert("graph_audit".to_string(), graph_audit);
+    let obj = response.as_object_mut().ok_or_else(|| {
+        "workflow API read graph audit can only attach to object responses".to_string()
+    })?;
+    obj.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_audit".to_string(), graph_audit);
     Ok(response)
 }
 
@@ -425,7 +427,6 @@ async fn run_workflow_api_read_graph_audit(
 
 fn workflow_error_json(error: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
-        "workflow_authority": "langgraph",
         "error": error.into(),
     })
 }
@@ -791,6 +792,43 @@ description = "Claim"
         assert_eq!(json["graph_topology"]["skill"], "linear");
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn get_status_error_declares_authority_only_after_read_graph_audit() {
+        let _guard = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _env = EnvGuard::set_sentinel_home(tmp.path());
+        let _checkpointer_env = CheckpointerEnvGuard::force_sqlite();
+        write_workflow_config();
+        let state = AppState {
+            session: Arc::new(RwLock::new(SessionState::new(
+                "workflow-status-error-session",
+            ))),
+        };
+
+        let Json(json) = get_status(
+            axum::extract::State(state),
+            axum::extract::Path("missing".to_string()),
+        )
+        .await
+        .expect("workflow API error read graph audit");
+
+        assert_eq!(json["workflow_authority"], "langgraph");
+        assert_eq!(json["graph_audit"]["workflow_authority"], "langgraph");
+        assert_eq!(json["graph_audit"]["graph"], "workflow_api_read");
+        assert_eq!(json["graph_audit"]["surface"], "error");
+        assert!(json["graph_audit"]["authorization_checkpoint"]
+            .as_str()
+            .is_some_and(|checkpoint| checkpoint.contains('#')));
+        assert_eq!(json["skill"], "missing");
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|err| err.contains("No configured LangGraph workflow")),
+            "missing-skill error should be graph audited: {json}"
+        );
+    }
+
     #[test]
     fn workflow_summary_includes_graph_projected_step_state() {
         let mut wf = WorkflowState::new("linear", "sess");
@@ -813,18 +851,18 @@ description = "Claim"
     }
 
     #[test]
-    fn workflow_error_responses_preserve_langgraph_authority() {
+    fn workflow_error_responses_do_not_claim_raw_langgraph_authority() {
         let json = workflow_error_json("phase graph checkpoint load failed");
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["error"], "phase graph checkpoint load failed");
     }
 
     #[test]
-    fn workflow_skill_error_responses_preserve_langgraph_authority_and_skill() {
+    fn workflow_skill_error_responses_do_not_claim_raw_langgraph_authority() {
         let json = workflow_skill_error_json("linear", "phase graph introspection failed");
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["skill"], "linear");
         assert_eq!(json["error"], "phase graph introspection failed");
     }

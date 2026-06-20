@@ -293,9 +293,10 @@ fn proof_api_read_state_schema() -> StateSchema<ProofApiReadState> {
                     "proof API response digest must identify a serialized response".to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph {
+            if !state.workflow_authority_langgraph && !state.error_present {
                 return Err(StateError::ValidationFailed(
-                    "proof API response must declare LangGraph workflow authority".to_string(),
+                    "non-error proof API response must declare LangGraph workflow authority"
+                        .to_string(),
                 ));
             }
             match state.surface {

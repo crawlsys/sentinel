@@ -423,7 +423,6 @@ fn authoritative_config_json() -> std::result::Result<serde_json::Value, String>
 fn config_error_json(error: String) -> serde_json::Value {
     let config = sentinel_infrastructure::config::config_dir();
     serde_json::json!({
-        "graph_authority": "langgraph",
         "error": error,
         "hooksTomlExists": config.join("hooks.toml").exists(),
         "workflowsTomlExists": config.join("workflows.toml").exists(),
@@ -910,6 +909,18 @@ skill = "linear"
             .as_str()
             .is_some_and(|error| error.contains("authoritative workflows.toml load failed")));
         assert_eq!(config["graph_audit"]["graph"], "operational_api_read");
+    }
+
+    #[test]
+    fn config_error_json_does_not_claim_raw_graph_authority() {
+        let _guard = crate::test_env::lock();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let _env = EnvGuard::set_sentinel_home(tmp.path());
+
+        let config = config_error_json("authoritative workflows.toml load failed".to_string());
+
+        assert!(config.get("graph_authority").is_none());
+        assert_eq!(config["error"], "authoritative workflows.toml load failed");
     }
 
     #[tokio::test]

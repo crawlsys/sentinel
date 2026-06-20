@@ -335,9 +335,10 @@ fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
                     "workflow API response digest must identify a serialized response".to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph {
+            if !state.workflow_authority_langgraph && !state.error_present {
                 return Err(StateError::ValidationFailed(
-                    "workflow API response must declare LangGraph workflow authority".to_string(),
+                    "non-error workflow API response must declare LangGraph workflow authority"
+                        .to_string(),
                 ));
             }
             match state.surface {

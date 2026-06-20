@@ -217,12 +217,14 @@ async fn attach_proof_api_read_graph_audit_with_graph(
     mut response: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let graph_audit = run_proof_api_read_graph_audit(graph, surface, &response).await?;
-    response
-        .as_object_mut()
-        .ok_or_else(|| {
-            "proof API read graph audit can only attach to object responses".to_string()
-        })?
-        .insert("graph_audit".to_string(), graph_audit);
+    let obj = response.as_object_mut().ok_or_else(|| {
+        "proof API read graph audit can only attach to object responses".to_string()
+    })?;
+    obj.insert(
+        "workflow_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_audit".to_string(), graph_audit);
     Ok(response)
 }
 
@@ -324,7 +326,6 @@ fn proof_api_read_identifier(
 
 fn proof_error_json(error: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
-        "workflow_authority": "langgraph",
         "error": error.into(),
     })
 }
@@ -603,6 +604,28 @@ mod tests {
                     .is_some_and(|text| text.contains("SENTINEL_VERIFY_KEY"))),
             "verification error should identify missing verify key: {json}"
         );
+    }
+
+    #[test]
+    fn proof_error_responses_do_not_claim_raw_langgraph_authority() {
+        let json = proof_error_json("Chain not found");
+
+        assert!(json.get("workflow_authority").is_none());
+        assert_eq!(json["error"], "Chain not found");
+    }
+
+    #[test]
+    fn proof_skill_error_responses_do_not_claim_raw_langgraph_authority() {
+        let json = proof_skill_error_json(
+            "linear",
+            "proof chain is unavailable without LangGraph-projected workflow state",
+        );
+
+        assert!(json.get("workflow_authority").is_none());
+        assert_eq!(json["skill"], "linear");
+        assert!(json["error"]
+            .as_str()
+            .is_some_and(|err| err.contains("LangGraph-projected workflow state")));
     }
 
     #[tokio::test]

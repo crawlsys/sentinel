@@ -21,12 +21,14 @@ async fn attach_operational_api_read_graph_audit_with_graph(
     mut response: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let graph_audit = run_operational_api_read_graph_audit(graph, surface, &response).await?;
-    response
-        .as_object_mut()
-        .ok_or_else(|| {
-            "operational API read graph audit can only attach to object responses".to_string()
-        })?
-        .insert("graph_audit".to_string(), graph_audit);
+    let obj = response.as_object_mut().ok_or_else(|| {
+        "operational API read graph audit can only attach to object responses".to_string()
+    })?;
+    obj.insert(
+        "graph_authority".to_string(),
+        serde_json::json!("langgraph"),
+    );
+    obj.insert("graph_audit".to_string(), graph_audit);
     Ok(response)
 }
 
