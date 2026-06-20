@@ -931,6 +931,7 @@ description = "Claim"
                 kind: "conditional".into(),
                 to: None,
             }],
+            subgraphs: Vec::new(),
         };
 
         let json = workflow_summary_json("linear", &wf, Some(&topology), None, None, None);
@@ -957,6 +958,13 @@ description = "Claim"
             true
         );
         assert_eq!(json["graph_topology"]["nodes"][0]["interrupt_after"], true);
+        assert_eq!(
+            json["graph_topology"]["subgraphs"]
+                .as_array()
+                .expect("serialized subgraphs")
+                .len(),
+            0
+        );
         assert_eq!(
             json["graph_topology"]["schemas"]["state"]["properties"]["skill"]["const"],
             "linear"

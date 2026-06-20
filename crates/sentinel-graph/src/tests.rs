@@ -653,6 +653,10 @@ async fn graph_introspection_exposes_langgraph_runtime_contract() {
         topology.max_iterations > topology.phase_order.len(),
         "LangGraph max_iterations should leave room for interrupt re-entry"
     );
+    assert!(
+        topology.subgraphs.is_empty(),
+        "phase topology must expose the compiled LangGraph subgraph inventory"
+    );
     assert_eq!(
         topology.phase_order,
         vec![

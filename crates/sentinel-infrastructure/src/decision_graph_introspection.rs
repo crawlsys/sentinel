@@ -193,6 +193,7 @@ pub struct DecisionGraphTopology {
     pub schemas: DecisionGraphSchemas,
     pub nodes: Vec<DecisionGraphNodeInfo>,
     pub edges: Vec<DecisionGraphEdgeInfo>,
+    pub subgraphs: Vec<String>,
 }
 
 /// Reflect a compiled LangGraph decision topology for logs, APIs, and tests.
@@ -240,6 +241,10 @@ where
         })
         .collect();
     required_decision_edge_contract(graph_name, &nodes, &edges)?;
+    let subgraphs = graph
+        .subgraph_ids()
+        .map(|node_id| node_id.to_string())
+        .collect();
     let schemas = graph.schemas_json();
     required_decision_schema_contract(
         graph_name,
@@ -275,6 +280,7 @@ where
         },
         nodes,
         edges,
+        subgraphs,
     })
 }
 

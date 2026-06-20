@@ -2330,6 +2330,7 @@ mod tests {
             },
             nodes: Vec::new(),
             edges: Vec::new(),
+            subgraphs: Vec::new(),
         }
     }
 

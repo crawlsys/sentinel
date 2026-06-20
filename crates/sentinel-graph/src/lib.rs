@@ -309,6 +309,7 @@ pub struct PhaseGraphIntrospection {
     pub schemas: PhaseGraphSchemas,
     pub nodes: Vec<PhaseGraphNodeInfo>,
     pub edges: Vec<PhaseGraphEdgeInfo>,
+    pub subgraphs: Vec<String>,
 }
 
 /// Serializable view of one LangGraph stream part emitted during phase execution.
@@ -2021,6 +2022,10 @@ impl CompiledPhaseGraph {
             })
             .collect();
         required_phase_edge_contract(&self.workflow.skill, &self.phase_ids, &edges)?;
+        let subgraphs = graph
+            .subgraph_ids()
+            .map(|node_id| node_id.to_string())
+            .collect();
         let schemas = graph.schemas_json();
         required_phase_schema_contract(
             &self.workflow.skill,
@@ -2058,6 +2063,7 @@ impl CompiledPhaseGraph {
             },
             nodes,
             edges,
+            subgraphs,
         })
     }
 

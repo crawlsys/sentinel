@@ -644,9 +644,20 @@ mod tests {
                 .any(|edge| edge.kind == "conditional"),
             "topology must expose set/skip conditional routing"
         );
+        assert!(
+            run.topology.subgraphs.is_empty(),
+            "topology must expose the compiled LangGraph subgraph inventory"
+        );
         let serialized = serde_json::to_value(&run).expect("severity graph run serializes");
         assert_eq!(serialized["topology"]["graph"], "severity");
         assert_eq!(serialized["topology"]["checkpointer_backend"], "sqlite");
+        assert_eq!(
+            serialized["topology"]["subgraphs"]
+                .as_array()
+                .expect("serialized subgraphs")
+                .len(),
+            0
+        );
         assert!(serialized["topology"]["checkpointer_scope"]
             .as_str()
             .expect("serialized scope")
