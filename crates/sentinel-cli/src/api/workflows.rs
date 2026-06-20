@@ -124,7 +124,6 @@ async fn list_workflows(
     }
 
     workflow_list_json(serde_json::json!({
-        "workflow_authority": "langgraph",
         "workflows": workflows,
     }))
     .await
@@ -461,7 +460,6 @@ fn workflow_no_checkpoint_json(
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
         "skill": skill,
-        "workflow_authority": "langgraph",
         "checkpoint": null,
         "graph_state": null,
         "status": "no_checkpoint",
@@ -480,7 +478,6 @@ fn workflow_summary_json(
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
         "skill": skill,
-        "workflow_authority": "langgraph",
         "current_phase": wf.current_phase,
         "completed_phases": wf.completed_phases,
         "complete": wf.complete,
@@ -501,10 +498,6 @@ fn attach_graph_evidence(
     let Some(obj) = value.as_object_mut() else {
         return;
     };
-    obj.insert(
-        "workflow_authority".to_string(),
-        serde_json::json!("langgraph"),
-    );
     if let Some(topology) = topology {
         obj.insert("graph_topology".to_string(), serde_json::json!(topology));
     }
@@ -711,6 +704,18 @@ description = "Claim"
         assert_eq!(json["graph_audit"]["graph"], "workflow_api_read");
         assert_eq!(json["graph_audit"]["surface"], "list");
         assert_eq!(json["graph_audit"]["decision"], "verified");
+        assert_eq!(
+            json["graph_audit"]["run"]["state"]["workflow_authority_present"],
+            false
+        );
+        assert_eq!(
+            json["graph_audit"]["run"]["state"]["child_authority_count"],
+            1
+        );
+        assert_eq!(
+            json["graph_audit"]["run"]["state"]["child_graph_audit_count"],
+            1
+        );
         assert!(json["graph_audit"]["authorization_checkpoint"]
             .as_str()
             .is_some_and(|checkpoint| checkpoint.contains('#')));
@@ -721,6 +726,10 @@ description = "Claim"
             "workflow_api_read"
         );
         assert_eq!(json["workflows"][0]["graph_audit"]["surface"], "item");
+        assert_eq!(
+            json["workflows"][0]["graph_audit"]["run"]["state"]["workflow_authority_present"],
+            false
+        );
         assert!(
             json["workflows"][0]["graph_audit"]["authorization_checkpoint"]
                 .as_str()
@@ -785,6 +794,10 @@ description = "Claim"
         assert_eq!(json["graph_audit"]["graph"], "workflow_api_read");
         assert_eq!(json["graph_audit"]["surface"], "status");
         assert_eq!(json["graph_audit"]["decision"], "verified");
+        assert_eq!(
+            json["graph_audit"]["run"]["state"]["workflow_authority_present"],
+            false
+        );
         assert!(json["graph_audit"]["authorization_checkpoint"]
             .as_str()
             .is_some_and(|checkpoint| checkpoint.contains('#')));
@@ -817,6 +830,10 @@ description = "Claim"
         assert_eq!(json["graph_audit"]["workflow_authority"], "langgraph");
         assert_eq!(json["graph_audit"]["graph"], "workflow_api_read");
         assert_eq!(json["graph_audit"]["surface"], "error");
+        assert_eq!(
+            json["graph_audit"]["run"]["state"]["workflow_authority_present"],
+            false
+        );
         assert!(json["graph_audit"]["authorization_checkpoint"]
             .as_str()
             .is_some_and(|checkpoint| checkpoint.contains('#')));
@@ -843,7 +860,7 @@ description = "Claim"
         let json = workflow_summary_json("linear", &wf, None, None, None, None);
 
         assert_eq!(json["skill"], "linear");
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["current_phase"], 1);
         assert_eq!(json["completed_phases"], serde_json::json!(["claim"]));
         assert_eq!(json["step_states"].as_array().unwrap().len(), 1);
@@ -951,7 +968,7 @@ description = "Claim"
         let json = workflow_no_checkpoint_json("linear", None, None, None, None);
 
         assert_eq!(json["skill"], "linear");
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["status"], "no_checkpoint");
         assert!(json.get("current_phase").is_none());
         assert!(json.get("completed_phases").is_none());
@@ -1028,7 +1045,7 @@ description = "Claim"
             None,
         );
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["graph_checkpoints"].as_array().unwrap().len(), 1);
         assert_eq!(json["graph_checkpoints"][0]["skill"], "linear");
         assert_eq!(
@@ -1083,7 +1100,7 @@ description = "Claim"
 
         let json = workflow_summary_json("linear", &stale, None, Some(&checkpoints), None, None);
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(
             json["graph_state"]["completed_phases"],
             serde_json::json!(["claim"])
@@ -1114,14 +1131,14 @@ description = "Claim"
 
         let json = workflow_summary_json("linear", &wf, None, None, None, Some(&writes));
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["graph_writes"].as_array().unwrap().len(), 1);
         assert_eq!(json["graph_writes"][0]["channel"], "state");
         assert_eq!(json["graph_writes"][0]["value_json"]["skill"], "linear");
     }
 
     #[test]
-    fn workflow_state_includes_graph_authority_latest_checkpoint_and_state() {
+    fn workflow_state_includes_latest_checkpoint_and_state_without_raw_authority() {
         let mut wf = WorkflowState::new("linear", "sess");
         wf.current_phase = Some(0);
         let checkpoints = serde_json::json!([
@@ -1143,7 +1160,7 @@ description = "Claim"
 
         let json = workflow_state_json(&wf, None, Some(&checkpoints), None, None);
 
-        assert_eq!(json["workflow_authority"], "langgraph");
+        assert!(json.get("workflow_authority").is_none());
         assert_eq!(json["latest_checkpoint"]["checkpoint_id"], "checkpoint-1");
         assert_eq!(json["latest_checkpoint"]["source"]["node"], "claim");
         assert_eq!(json["graph_state"]["completed_phases"][0], "claim");

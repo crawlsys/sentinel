@@ -340,9 +340,9 @@ fn workflow_api_read_state_schema() -> StateSchema<WorkflowApiReadState> {
                     "workflow API response digest must identify a serialized response".to_string(),
                 ));
             }
-            if state.workflow_authority_present && !state.workflow_authority_langgraph {
+            if state.workflow_authority_present {
                 return Err(StateError::ValidationFailed(
-                    "workflow API response must not declare non-LangGraph workflow authority"
+                    "workflow API response must not declare workflow authority before read graph audit"
                         .to_string(),
                 ));
             }
@@ -885,14 +885,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graph_rejects_explicit_non_langgraph_workflow_authority() {
+    async fn graph_rejects_explicit_workflow_authority_before_read_audit() {
         let graph = build_workflow_api_read_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
         let mut response = phase_steps_response();
         response.as_object_mut().unwrap().insert(
             "workflow_authority".to_string(),
-            serde_json::json!("legacy"),
+            serde_json::json!("langgraph"),
         );
         let state = WorkflowApiReadState::from_response(
             WorkflowApiReadSurface::PhaseSteps,
@@ -903,7 +903,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.contains("non-LangGraph workflow authority"),
+            err.contains("before read graph audit"),
             "unexpected error: {err}"
         );
     }
