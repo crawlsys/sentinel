@@ -8,6 +8,37 @@
 /// Optional env var used by runtime crates to supply hosted tenant scope.
 pub const LANGGRAPH_TENANT_ENV: &str = "SENTINEL_LANGGRAPH_TENANT";
 
+/// Validate one component embedded in a Sentinel-owned LangGraph `thread_id`.
+///
+/// These components deliberately use the same conservative character class as
+/// session ids. The phase graph joins components with `.` and hosted
+/// deployments prepend `tenant:<scope>:`, so accepting separators inside a
+/// component would make durable checkpoint identity ambiguous.
+pub fn validate_thread_id_component(component: &str, label: &str) -> Result<(), String> {
+    if component.is_empty() {
+        return Err(format!("LangGraph thread id {label} is empty"));
+    }
+    if component.len() > 128 {
+        return Err(format!(
+            "LangGraph thread id {label} exceeds 128 characters: {component}"
+        ));
+    }
+    if component.contains("..") {
+        return Err(format!(
+            "LangGraph thread id {label} contains path traversal: '..'"
+        ));
+    }
+    if !component
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(format!(
+            "LangGraph thread id {label} contains invalid characters; use ASCII letters, digits, '-' or '_'"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate an operator-supplied tenant namespace.
 ///
 /// Tenant ids deliberately exclude `:` because Sentinel uses `tenant:<id>:` as
@@ -49,6 +80,8 @@ pub fn phase_thread_id(
     session_id: &str,
     tenant: Option<&str>,
 ) -> Result<String, String> {
+    validate_thread_id_component(skill, "skill")?;
+    validate_thread_id_component(session_id, "session_id")?;
     let base = format!("sentinel.phase.{skill}.{session_id}");
     tenant_scoped_thread_id(base, tenant)
 }
@@ -78,6 +111,22 @@ mod tests {
         let err = phase_thread_id("linear", "session-123", Some("tenant:escape"))
             .expect_err("tenant delimiter injection must fail");
         assert!(err.contains(LANGGRAPH_TENANT_ENV));
+        assert!(err.contains("invalid characters"));
+    }
+
+    #[test]
+    fn phase_thread_id_rejects_delimiter_injected_skill() {
+        let err = phase_thread_id("linear:escape", "session-123", None)
+            .expect_err("skill delimiter injection must fail");
+        assert!(err.contains("skill"));
+        assert!(err.contains("invalid characters"));
+    }
+
+    #[test]
+    fn phase_thread_id_rejects_unsafe_session_component() {
+        let err = phase_thread_id("linear", "session.123", None)
+            .expect_err("session delimiter injection must fail");
+        assert!(err.contains("session_id"));
         assert!(err.contains("invalid characters"));
     }
 }

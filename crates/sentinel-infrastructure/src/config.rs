@@ -11,6 +11,7 @@ use serde::Deserialize;
 use sentinel_domain::events::HookEvent;
 use sentinel_domain::hooks::{HookId, HookSpec};
 use sentinel_domain::judge::JudgeModel;
+use sentinel_domain::langgraph_thread::validate_thread_id_component;
 use sentinel_domain::workflow::{
     PhaseSteps, SkillSteps, SkillWorkflow, WorkflowPhase, WorkflowStep,
 };
@@ -187,6 +188,12 @@ pub fn load_workflows(config_path: &Path) -> Result<Vec<SkillWorkflow>> {
         // and could match unintended skill routing results.
         if w.skill.is_empty() {
             anyhow::bail!("Workflow skill name cannot be empty");
+        }
+        if let Err(err) = validate_thread_id_component(&w.skill, "workflow skill") {
+            anyhow::bail!(
+                "Workflow skill name '{}' cannot be used as a LangGraph thread id component: {err}",
+                w.skill
+            );
         }
 
         // **Attack #158 fix**: Reject workflows with zero required phases.
@@ -735,6 +742,31 @@ description = "A phase"
         let result = load_workflows(dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_load_workflows_rejects_langgraph_unsafe_skill_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows_toml = r#"
+[[workflows]]
+skill = "linear:escape"
+
+[[workflows.phases]]
+id = "phase1"
+file = "phase1.md"
+required = true
+judge = "sonnet"
+description = "A phase"
+"#;
+        let path = dir.path().join("workflows.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(workflows_toml.as_bytes()).unwrap();
+
+        let err = load_workflows(dir.path()).unwrap_err().to_string();
+
+        assert!(err.contains("linear:escape"));
+        assert!(err.contains("LangGraph thread id component"));
+        assert!(err.contains("invalid characters"));
     }
 
     #[test]
