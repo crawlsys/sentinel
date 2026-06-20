@@ -1983,7 +1983,6 @@ async fn handle_request(
                     "total_invocations": total_invocations,
                     "total_blocked": total_blocked,
                     "per_hook": per_hook,
-                    "workflow_authority": "langgraph",
                     "langgraph_workflows": langgraph_workflows,
                     "langgraph_workflow_count": projected.len(),
                     "proof_chains": proof_chains,
@@ -2003,6 +2002,10 @@ async fn handle_request(
                     }
                 };
                 if let Some(object) = stats.as_object_mut() {
+                    object.insert(
+                        "workflow_authority".to_string(),
+                        serde_json::json!("langgraph"),
+                    );
                     object.insert("graph_audit".to_string(), graph_audit);
                 }
                 return JsonRpcResponse::success(request.id.clone(), mcp_tool_result(true, stats));

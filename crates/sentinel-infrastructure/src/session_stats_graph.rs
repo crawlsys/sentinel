@@ -36,6 +36,7 @@ pub struct SessionStatsState {
     pub session_id: Option<String>,
     pub stats_sha256: String,
     pub stats_len: u64,
+    pub workflow_authority_present: bool,
     pub workflow_authority_langgraph: bool,
     pub active_skill: Option<String>,
     pub total_invocations: u64,
@@ -65,6 +66,7 @@ impl SessionStatsState {
                 .map(ToString::to_string),
             stats_sha256: hex::encode(Sha256::digest(&stats_bytes)),
             stats_len: stats_bytes.len() as u64,
+            workflow_authority_present: response.get("workflow_authority").is_some(),
             workflow_authority_langgraph: response
                 .get("workflow_authority")
                 .and_then(Value::as_str)
@@ -218,6 +220,7 @@ fn session_stats_state_schema() -> StateSchema<SessionStatsState> {
                 "session_id",
                 "stats_sha256",
                 "stats_len",
+                "workflow_authority_present",
                 "workflow_authority_langgraph",
                 "active_skill",
                 "total_invocations",
@@ -239,6 +242,7 @@ fn session_stats_state_schema() -> StateSchema<SessionStatsState> {
                 },
                 "stats_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
                 "stats_len": { "type": "integer", "minimum": 1 },
+                "workflow_authority_present": { "type": "boolean" },
                 "workflow_authority_langgraph": { "type": "boolean" },
                 "active_skill": {
                     "anyOf": [
@@ -286,9 +290,10 @@ fn session_stats_state_schema() -> StateSchema<SessionStatsState> {
                     "session stats response digest must identify a serialized response".to_string(),
                 ));
             }
-            if !state.workflow_authority_langgraph {
+            if state.workflow_authority_present && !state.workflow_authority_langgraph {
                 return Err(StateError::ValidationFailed(
-                    "session stats response must declare LangGraph workflow authority".to_string(),
+                    "session stats response must not declare non-LangGraph workflow authority"
+                        .to_string(),
                 ));
             }
             if state.total_blocked > state.total_invocations {
@@ -464,7 +469,6 @@ mod tests {
                 "PreToolUse": 3,
                 "Stop": 1
             },
-            "workflow_authority": "langgraph",
             "langgraph_workflows": ["linear"],
             "langgraph_workflow_count": 1,
             "proof_chains": ["linear"]
