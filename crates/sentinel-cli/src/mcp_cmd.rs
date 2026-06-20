@@ -1927,23 +1927,21 @@ async fn handle_request(
                     )
                 };
                 proof_chains.sort();
-                let projected = match graph_projected_workflows(&session_id, &workflow_configs)
-                    .await
-                {
-                    Ok(projected) => projected,
-                    Err(e) => {
-                        return JsonRpcResponse::success(
-                            request.id.clone(),
-                            mcp_tool_result(
-                                false,
-                                serde_json::json!({
-                                    "workflow_authority": "langgraph",
-                                    "error": format!("phase graph checkpoint projection failed: {e}"),
-                                }),
-                            ),
-                        );
-                    }
-                };
+                let projected =
+                    match graph_projected_workflows(&session_id, &workflow_configs).await {
+                        Ok(projected) => projected,
+                        Err(e) => {
+                            return JsonRpcResponse::success(
+                                request.id.clone(),
+                                mcp_tool_result(
+                                    false,
+                                    langgraph_tool_error(format!(
+                                        "phase graph checkpoint projection failed: {e}"
+                                    )),
+                                ),
+                            );
+                        }
+                    };
                 let mut langgraph_workflows = projected.keys().cloned().collect::<Vec<_>>();
                 langgraph_workflows.sort();
                 let mut stats = serde_json::json!({
@@ -3883,7 +3881,6 @@ fn mcp_tool_result(success: bool, data: serde_json::Value) -> serde_json::Value 
 
 fn langgraph_tool_error(error: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
-        "workflow_authority": "langgraph",
         "error": error.into(),
     })
 }
@@ -4845,7 +4842,7 @@ description = "Fetch"
         let resp = handle_submit_phase(&req, &args, &state, &proof_engine).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "missing phase summary must fail");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -4875,7 +4872,7 @@ description = "Fetch"
         let resp = handle_submit_phase(&req, &args, &state, &proof_engine).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "missing phase started_at must fail");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -5021,7 +5018,7 @@ description = "Fetch"
     }
 
     #[tokio::test]
-    async fn generic_handler_errors_keep_langgraph_authority_envelope() {
+    async fn generic_handler_errors_do_not_claim_workflow_authority() {
         let session_id = "authority-error-session";
         let state = Arc::new(RwLock::new(SessionState::new(session_id)));
         {
@@ -5050,7 +5047,7 @@ description = "Fetch"
         let (data, is_error) = extract_data_and_is_error(&resp);
 
         assert!(is_error, "graphless proof read must fail: {data}");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -5565,7 +5562,7 @@ description = "Fetch"
         let resp = handle_submit_phase(&req, &args, &state, &proof_engine).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "phase submit without graph gate must fail");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -6156,7 +6153,7 @@ description = "Claim"
         let resp = handle_update_step(&req, &args, &state).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "step update without graph gate must fail");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -6479,7 +6476,7 @@ description = "Claim"
             second_is_error,
             "duplicate step submit must fail closed: {second_data}"
         );
-        assert_eq!(second_data["workflow_authority"], "langgraph");
+        assert!(second_data.get("workflow_authority").is_none());
         assert!(
             second_data
                 .get("error")
@@ -6595,7 +6592,7 @@ description = "Claim"
         let resp = handle_submit_step_complete(&req, &args, &state, &handler).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "graph preflight failure must return an MCP error");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -6918,6 +6915,70 @@ description = "Claim"
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn get_session_stats_projection_failure_does_not_claim_workflow_authority() {
+        let env_guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_sentinel_home = std::env::var_os("SENTINEL_HOME");
+        std::env::set_var("SENTINEL_HOME", tmp.path());
+
+        let config_dir = tmp.path().join(".claude").join("sentinel").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("workflows.toml"),
+            r#"
+[[workflows]]
+skill = "linear"
+
+[[workflows.phases]]
+id = "claim"
+file = "claim.md"
+required = true
+judge = "sonnet"
+description = "Claim"
+"#,
+        )
+        .unwrap();
+
+        let state = Arc::new(RwLock::new(SessionState::new("../invalid-session")));
+        let proof_engine = Arc::new(
+            ProofEngine::new(state.clone(), Arc::new(UnusedJudge)).with_signing(None, false),
+        );
+        let handler = McpHandler::new(state.clone(), proof_engine.clone());
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: serde_json::json!({
+                "name": "sentinel__get_session_stats",
+                "arguments": {},
+            }),
+        };
+
+        let resp = handle_request(&req, &handler, &state, &proof_engine).await;
+        let (data, is_error) = extract_data_and_is_error(&resp);
+
+        assert!(
+            is_error,
+            "projection failure should be an MCP tool error: {data}"
+        );
+        assert!(
+            data["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("phase graph checkpoint projection failed")),
+            "unexpected error payload: {data}"
+        );
+        assert!(data.get("workflow_authority").is_none());
+        assert!(data.get("graph_audit").is_none());
+
+        match prev_sentinel_home {
+            Some(v) => std::env::set_var("SENTINEL_HOME", v),
+            None => std::env::remove_var("SENTINEL_HOME"),
+        }
+        drop(env_guard);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn record_dyad_verdict_persists_graph_checkpoint_and_unlocks_phase_submit() {
         let env_guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -7157,7 +7218,7 @@ required_dyad = { reviewer = true, tester = false }
         let resp = handle_record_dyad_verdict(&req, &args, &state).await;
         let (data, is_error) = extract_data_and_is_error(&resp);
         assert!(is_error, "dyad update without graph gate must fail");
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         assert!(
             data.get("error")
                 .and_then(serde_json::Value::as_str)
@@ -7331,7 +7392,7 @@ description = "Fetch"
         let text = result["content"][0]["text"].as_str().expect("text result");
         let data: serde_json::Value = serde_json::from_str(text).expect("json text");
 
-        assert_eq!(data["workflow_authority"], "langgraph");
+        assert!(data.get("workflow_authority").is_none());
         let error = data["error"].as_str().expect("error");
         assert!(error.contains("configured LangGraph workflow 'linear'"));
         assert!(error.contains("missing required step config"));
