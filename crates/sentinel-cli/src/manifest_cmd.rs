@@ -184,10 +184,9 @@ pub fn run_write(opts: WriteOptions) -> Result<()> {
     std::fs::write(&out_path, &serialized)
         .with_context(|| format!("write {}", out_path.display()))?;
     println!(
-        "wrote {} ({} entries, {})",
+        "wrote {} ({} entries, signed)",
         out_path.display(),
-        manifest.entries.len(),
-        "signed"
+        manifest.entries.len()
     );
     Ok(())
 }

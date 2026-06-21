@@ -1197,7 +1197,7 @@ fn check_protected_path_write(
         // phase files (skills/*/phases/*.md) are always protected.
         if reason == "skill definition file" {
             if let Some(target_skill) = extract_skill_name_from_path(&normalized) {
-                if !state.has_graph_workflow(&target_skill) {
+                if !state.has_graph_workflow(target_skill) {
                     return None;
                 }
             }

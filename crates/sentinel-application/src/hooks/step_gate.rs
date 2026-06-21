@@ -338,7 +338,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
     let tool = if requires_identity {
         match required_output_context(input, "tool identity", evaluation.tool.as_deref()) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -346,7 +346,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
     let skill = if requires_identity {
         match required_output_context(input, "skill identity", evaluation.skill.as_deref()) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -357,7 +357,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
     ) {
         match required_output_context(input, "step identity", evaluation.step_id.as_deref()) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -368,7 +368,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
     ) {
         match required_output_context(input, "phase identity", evaluation.phase_id.as_deref()) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -386,7 +386,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
             evaluation.prerequisite_step_id.as_deref(),
         ) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -398,7 +398,7 @@ pub fn output_from_evaluation(input: &HookInput, evaluation: &StepGateEvaluation
             evaluation.prerequisite_description.as_deref(),
         ) {
             Ok(value) => value,
-            Err(output) => return output,
+            Err(output) => return *output,
         }
     } else {
         ""
@@ -467,17 +467,17 @@ fn required_output_context<'a>(
     input: &HookInput,
     field: &str,
     value: Option<&'a str>,
-) -> Result<&'a str, HookOutput> {
+) -> Result<&'a str, Box<HookOutput>> {
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            deny_with_context(
+            Box::new(deny_with_context(
                 input,
                 format!(
                     "[Sentinel-Authority] step_gate: refusing unaudited step decision — \
                      missing concrete {field}."
                 ),
-            )
+            ))
         })
 }
 

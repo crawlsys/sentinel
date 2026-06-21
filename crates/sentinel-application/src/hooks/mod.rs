@@ -183,6 +183,7 @@ pub fn tasks_root(home: &std::path::Path) -> std::path::PathBuf {
 /// UUID, e.g. `e2ea5630-3c79-409c-9ca4-423975a5a5fb`) is stored under EITHER
 ///   - `<tasks>/<session_id>/`                  (literal id), OR
 ///   - `<tasks>/session-<first-uuid-group>/`    (e.g. `session-e2ea5630/`).
+///
 /// Both forms are emitted concurrently (observed live on the same day), so this
 /// is not a migration that settled on one name — a hook must resolve whichever
 /// the harness actually wrote for this session.

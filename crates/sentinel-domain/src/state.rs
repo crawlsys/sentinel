@@ -25,7 +25,7 @@ pub struct SessionState {
     /// Active skill (detected by router)
     pub active_skill: Option<String>,
 
-    /// Workflow states projected from durable LangGraph checkpoints.
+    /// Workflow states projected from durable `LangGraph` checkpoints.
     ///
     /// This is intentionally in-memory only. Session JSON never stores workflow
     /// progress; every runtime surface must re-project from the checkpoint
@@ -368,7 +368,7 @@ impl SessionState {
     /// Set the active skill marker (from skill router).
     ///
     /// This intentionally does not allocate [`WorkflowState`] or [`ProofChain`]
-    /// entries. Configured workflow state is owned by the durable LangGraph
+    /// entries. Configured workflow state is owned by the durable `LangGraph`
     /// authority and must be inserted only from a graph checkpoint projection.
     pub fn set_active_skill(&mut self, skill: impl Into<String>) {
         self.set_active_skill_marker(skill);
@@ -376,14 +376,14 @@ impl SessionState {
 
     /// Set only the active skill marker without allocating workflow/proof state.
     ///
-    /// Graph-owned callers use this when LangGraph is the workflow authority:
+    /// Graph-owned callers use this when `LangGraph` is the workflow authority:
     /// the projected workflow/proof entries are written only after the graph
     /// accepts the transition.
     pub fn set_active_skill_marker(&mut self, skill: impl Into<String>) {
         self.active_skill = Some(skill.into());
     }
 
-    /// Store a workflow state that came from the durable LangGraph authority.
+    /// Store a workflow state that came from the durable `LangGraph` authority.
     pub fn set_graph_projected_workflow(
         &mut self,
         skill: impl Into<String>,
@@ -414,13 +414,13 @@ impl SessionState {
         self.langgraph_workflows.len()
     }
 
-    /// Get a workflow state projected from LangGraph.
+    /// Get a workflow state projected from `LangGraph`.
     #[must_use]
     pub fn graph_workflow(&self, skill: &str) -> Option<&WorkflowState> {
         self.langgraph_workflows.get(skill)
     }
 
-    /// Get mutable workflow state projected from LangGraph.
+    /// Get mutable workflow state projected from `LangGraph`.
     #[cfg(test)]
     pub fn graph_workflow_mut(&mut self, skill: &str) -> Option<&mut WorkflowState> {
         self.langgraph_workflows.get_mut(skill)

@@ -1,6 +1,6 @@
-//! LangGraph checkpoint thread identity helpers.
+//! `LangGraph` checkpoint thread identity helpers.
 //!
-//! These helpers are storage-agnostic: they do not know about SQLite,
+//! These helpers are storage-agnostic: they do not know about `SQLite`,
 //! Postgres, or `langgraph-core`. They only define Sentinel's durable thread-id
 //! namespace so CLI, MCP, proof validation, and graph execution use the same
 //! tenant-aware identity contract.
@@ -8,7 +8,7 @@
 /// Optional env var used by runtime crates to supply hosted tenant scope.
 pub const LANGGRAPH_TENANT_ENV: &str = "SENTINEL_LANGGRAPH_TENANT";
 
-/// Validate one component embedded in a Sentinel-owned LangGraph `thread_id`.
+/// Validate one component embedded in a Sentinel-owned `LangGraph` `thread_id`.
 ///
 /// These components deliberately use the same conservative character class as
 /// session ids. The phase graph joins components with `.` and hosted
@@ -42,7 +42,7 @@ pub fn validate_thread_id_component(component: &str, label: &str) -> Result<(), 
 /// Validate an operator-supplied tenant namespace.
 ///
 /// Tenant ids deliberately exclude `:` because Sentinel uses `tenant:<id>:` as
-/// a structural prefix in LangGraph `thread_id` values.
+/// a structural prefix in `LangGraph` `thread_id` values.
 pub fn validate_tenant_scope(tenant: &str) -> Result<(), String> {
     if tenant.is_empty() {
         return Err(format!("{LANGGRAPH_TENANT_ENV} is set but empty"));
@@ -63,7 +63,7 @@ pub fn validate_tenant_scope(tenant: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Prefix a base LangGraph thread id with `tenant:<scope>:` when configured.
+/// Prefix a base `LangGraph` thread id with `tenant:<scope>:` when configured.
 pub fn tenant_scoped_thread_id(base: String, tenant: Option<&str>) -> Result<String, String> {
     match tenant {
         Some(tenant) => {

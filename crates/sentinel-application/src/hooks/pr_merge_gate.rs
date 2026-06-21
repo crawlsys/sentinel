@@ -66,7 +66,7 @@ pub fn process(input: &HookInput, env: &dyn EnvPort) -> HookOutput {
 
 pub fn evaluate(input: &HookInput, env: &dyn EnvPort) -> PrMergeEvaluation {
     let tool = input.tool_name.clone();
-    let bash_tool = tool.as_deref().map_or(true, |tool| tool == "Bash");
+    let bash_tool = tool.as_deref().is_none_or(|tool| tool == "Bash");
     let command = extract_bash_command(input).map(str::to_string);
     let autopilot = is_autopilot(env);
     let Some(cmd) = command.as_deref() else {

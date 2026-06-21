@@ -70,7 +70,7 @@ pub fn process(input: &HookInput) -> HookOutput {
 
 pub fn evaluate(input: &HookInput) -> DbOpsEvaluation {
     let tool = input.tool_name.clone();
-    let bash_tool = tool.as_deref().map_or(true, |tool| tool == "Bash");
+    let bash_tool = tool.as_deref().is_none_or(|tool| tool == "Bash");
     let command = extract_bash_command(input).map(str::to_string);
     let Some(cmd) = command.as_deref() else {
         return DbOpsEvaluation {

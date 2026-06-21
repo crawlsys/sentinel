@@ -33,6 +33,7 @@
 //!    success rate wins.
 //! 4. Cost — cheapest `cost_per_input_token` wins.
 //! 5. Latency — fastest `typical_latency_ms` wins.
+//!
 //! If preferred capability, appraisal, cost, and latency do not produce a
 //! single winner, routing fails closed as ambiguous instead of choosing by an
 //! arbitrary stable-id fallback.

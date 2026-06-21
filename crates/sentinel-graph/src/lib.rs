@@ -19,7 +19,7 @@
 //!   ms-cold-start processes; the graph advances *one phase per async MCP
 //!   call* and checkpoints to a sqlite [`CheckpointSaver`] keyed by a
 //!   skill-scoped thread id (`sentinel.phase.<skill>.<session_id>` for local
-//!   SQLite, prefixed by `tenant:<id>:` in hosted distributed-checkpointer mode). Process
+//!   `SQLite`, prefixed by `tenant:<id>:` in hosted distributed-checkpointer mode). Process
 //!   death between calls is fine: `load_latest` restores. This is `LangGraph`'s
 //!   durable-execution model and it is a near-exact match for sentinel's
 //!   invocation model.
@@ -150,7 +150,7 @@ pub struct PhaseGraphState {
     /// Whether all phases have passed.
     pub complete: bool,
     /// Role-dyad verifier state mirrored from [`WorkflowState`]. Persisting it
-    /// in graph checkpoints lets the LangGraph authority enforce reviewer/tester
+    /// in graph checkpoints lets the `LangGraph` authority enforce reviewer/tester
     /// requirements instead of relying on direct `WorkflowState` mutation.
     #[serde(default)]
     pub dyad_verdicts: std::collections::BTreeMap<String, DyadVerdicts>,
@@ -170,7 +170,7 @@ pub struct PhaseGraphState {
     /// was superseded by the fork.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replay_events: Vec<PhaseReplayEvent>,
-    /// Node-level compensation events emitted by LangGraph error handlers.
+    /// Node-level compensation events emitted by `LangGraph` error handlers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_error_events: Vec<PhaseGraphErrorEvent>,
     /// The verdict for the phase at `current_phase`. Set before durable
@@ -184,9 +184,9 @@ pub struct PhaseGraphState {
 pub struct PhaseGraphErrorEvent {
     /// Phase that owned the failing node.
     pub phase_id: String,
-    /// LangGraph node id reported by [`NodeErrorContext`].
+    /// `LangGraph` node id reported by [`NodeErrorContext`].
     pub node_id: String,
-    /// Display form of the underlying LangGraph error.
+    /// Display form of the underlying `LangGraph` error.
     pub error: String,
 }
 
@@ -262,8 +262,9 @@ impl From<&StepState> for PhaseReplayStepState {
     }
 }
 
-/// Serializable view of one compiled LangGraph node used by Sentinel's phase
+/// Serializable view of one compiled `LangGraph` node used by Sentinel's phase
 /// engine. This is runtime graph metadata, not the TOML workflow definition.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphNodeInfo {
     pub id: String,
@@ -276,7 +277,7 @@ pub struct PhaseGraphNodeInfo {
     pub interrupt_after: bool,
 }
 
-/// Serializable view of one compiled LangGraph edge.
+/// Serializable view of one compiled `LangGraph` edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphEdgeInfo {
     pub from: String,
@@ -284,7 +285,7 @@ pub struct PhaseGraphEdgeInfo {
     pub to: Option<String>,
 }
 
-/// JSON schema contracts preserved by the compiled LangGraph runtime.
+/// JSON schema contracts preserved by the compiled `LangGraph` runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphSchemas {
     pub state: Option<serde_json::Value>,
@@ -312,8 +313,8 @@ pub struct PhaseGraphIntrospection {
     pub subgraphs: Vec<String>,
 }
 
-/// Serializable view of one LangGraph stream part emitted during phase execution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Serializable view of one `LangGraph` stream part emitted during phase execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphStreamPart {
     pub stream_protocol: String,
     pub event_type: String,
@@ -325,8 +326,8 @@ pub struct PhaseGraphStreamPart {
     pub subgraph_namespace: Vec<String>,
 }
 
-/// State plus the exact LangGraph stream parts observed during a gate run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// State plus the exact `LangGraph` stream parts observed during a gate run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphRunReport {
     /// Latest projected graph state after the run completes. For phase verdicts
     /// that re-enter the next gate, this is the post-reentry gate state.
@@ -382,8 +383,10 @@ fn phase_task_error_message(part: &PhaseGraphStreamPart) -> String {
         .get("error")
         .and_then(serde_json::Value::as_str)
         .filter(|error| !error.trim().is_empty())
-        .map(|error| format!("phase stream failed at node {}: {error}", part.node_id))
-        .unwrap_or_else(|| format!("phase stream failed at node {}", part.node_id))
+        .map_or_else(
+            || format!("phase stream failed at node {}", part.node_id),
+            |error| format!("phase stream failed at node {}: {error}", part.node_id),
+        )
 }
 
 fn phase_lifecycle_error_message(part: &PhaseGraphStreamPart) -> String {
@@ -391,16 +394,18 @@ fn phase_lifecycle_error_message(part: &PhaseGraphStreamPart) -> String {
         .get("error")
         .and_then(serde_json::Value::as_str)
         .filter(|error| !error.trim().is_empty())
-        .map(|error| {
-            format!(
-                "phase stream lifecycle failed at node {}: {error}",
-                part.node_id
-            )
-        })
-        .unwrap_or_else(|| format!("phase stream lifecycle failed at node {}", part.node_id))
+        .map_or_else(
+            || format!("phase stream lifecycle failed at node {}", part.node_id),
+            |error| {
+                format!(
+                    "phase stream lifecycle failed at node {}: {error}",
+                    part.node_id
+                )
+            },
+        )
 }
 
-/// Serializable checkpoint source metadata from the LangGraph runtime.
+/// Serializable checkpoint source metadata from the `LangGraph` runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphCheckpointSource {
     pub step: i32,
@@ -408,7 +413,7 @@ pub struct PhaseGraphCheckpointSource {
     pub node: Option<String>,
 }
 
-/// Serializable checkpoint write metadata from the LangGraph runtime.
+/// Serializable checkpoint write metadata from the `LangGraph` runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphCheckpointWrite {
     pub node_id: String,
@@ -416,7 +421,7 @@ pub struct PhaseGraphCheckpointWrite {
     pub ts: String,
 }
 
-/// Durable LangGraph checkpoint snapshot plus the reconstructed phase state.
+/// Durable `LangGraph` checkpoint snapshot plus the reconstructed phase state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphCheckpointSnapshot {
     pub checkpoint_id: String,
@@ -430,7 +435,7 @@ pub struct PhaseGraphCheckpointSnapshot {
     pub state: PhaseGraphState,
 }
 
-/// Per-write history entry from LangGraph's checkpoint write stream.
+/// Per-write history entry from `LangGraph`'s checkpoint write stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGraphWriteHistoryEntry {
     pub thread_id: String,
@@ -509,7 +514,7 @@ impl PhaseGraphState {
 /// Runtime backend selector for durable phase-graph checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseCheckpointerConfig {
-    /// Durable local SQLite database path.
+    /// Durable local `SQLite` database path.
     Sqlite { database_path: String },
     /// Durable Postgres database URL plus explicit schema.
     Postgres {
@@ -523,7 +528,7 @@ pub enum PhaseCheckpointerConfig {
     },
 }
 
-/// A LangGraph checkpointer plus the backend identity used to build it.
+/// A `LangGraph` checkpointer plus the backend identity used to build it.
 #[derive(Clone)]
 pub struct PhaseCheckpointer {
     saver: Arc<dyn CheckpointSaver>,
@@ -578,9 +583,9 @@ impl PhaseCheckpointerConfig {
 
     /// Build config from process environment.
     ///
-    /// No backend variable means the caller-provided SQLite path is the explicit
+    /// No backend variable means the caller-provided `SQLite` path is the explicit
     /// local default. If `postgres` or `redis` is selected, the backend URL and tenant
-    /// scope are mandatory; Sentinel refuses to switch to SQLite after an
+    /// scope are mandatory; Sentinel refuses to switch to `SQLite` after an
     /// enterprise backend is requested.
     pub fn from_env(sqlite_database_path: impl Into<String>) -> Result<Self> {
         let backend = phase_checkpointer_backend_from_env()?;
@@ -872,7 +877,7 @@ async fn phase_saver_sqlite(_database_path: &str) -> Result<Arc<dyn CheckpointSa
     ))
 }
 
-/// Build a durable SQLite phase-graph checkpointer with backend identity.
+/// Build a durable `SQLite` phase-graph checkpointer with backend identity.
 pub async fn phase_checkpointer(database_path: &str) -> Result<PhaseCheckpointer> {
     Ok(PhaseCheckpointer {
         saver: phase_saver(database_path).await?,
@@ -885,7 +890,7 @@ pub async fn phase_checkpointer(database_path: &str) -> Result<PhaseCheckpointer
 /// Build a durable phase-graph checkpointer from an explicit config.
 ///
 /// If a selected backend is missing from the build features, this errors. It
-/// never silently switches to SQLite.
+/// never silently switches to `SQLite`.
 pub async fn phase_checkpointer_for_config(
     config: PhaseCheckpointerConfig,
 ) -> Result<PhaseCheckpointer> {
@@ -1717,7 +1722,7 @@ fn required_phase_node_runtime_contract(
 
     let expected_nodes: BTreeSet<&str> = phase_ids.iter().map(String::as_str).collect();
     let actual_nodes: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-    for expected in expected_nodes.difference(&actual_nodes) {
+    if let Some(expected) = expected_nodes.difference(&actual_nodes).next() {
         return Err(GraphEngineError::Topology(format!(
             "phase graph for skill '{skill}' is missing phase node '{expected}'"
         )));
@@ -1979,8 +1984,7 @@ impl CompiledPhaseGraph {
         &self.phase_ids
     }
 
-    /// Reflect the compiled LangGraph topology for operator/API visibility.
-    #[must_use]
+    /// Reflect the compiled `LangGraph` topology for operator/API visibility.
     pub fn introspect(&self, session_id: &str) -> Result<PhaseGraphIntrospection> {
         let graph = &self.inner.graph;
         let nodes: Vec<_> = graph
@@ -1999,8 +2003,8 @@ impl CompiledPhaseGraph {
                         .collect(),
                     has_error_handler: node.has_error_handler,
                     has_timeout_policy: node.has_timeout_policy,
-                    interrupt_before: interrupt.is_some_and(|cfg| cfg.interrupt_before()),
-                    interrupt_after: interrupt.is_some_and(|cfg| cfg.interrupt_after()),
+                    interrupt_before: interrupt.is_some_and(InterruptConfig::interrupt_before),
+                    interrupt_after: interrupt.is_some_and(InterruptConfig::interrupt_after),
                 })
             })
             .collect();
@@ -2022,10 +2026,7 @@ impl CompiledPhaseGraph {
             })
             .collect();
         required_phase_edge_contract(&self.workflow.skill, &self.phase_ids, &edges)?;
-        let subgraphs = graph
-            .subgraph_ids()
-            .map(|node_id| node_id.to_string())
-            .collect();
+        let subgraphs = graph.subgraph_ids().map(ToString::to_string).collect();
         let schemas = graph.schemas_json();
         required_phase_schema_contract(
             &self.workflow.skill,
@@ -2102,7 +2103,7 @@ impl CompiledPhaseGraph {
 
     /// Execute the compiled graph until it reaches the next judge interrupt.
     ///
-    /// This is Sentinel's normal "phase gate" execution boundary: LangGraph
+    /// This is Sentinel's normal "phase gate" execution boundary: `LangGraph`
     /// runs the current phase bookkeeping node, persists a checkpoint under the
     /// caller's `thread_id`, then raises an interrupt. The interrupt is expected
     /// control flow, so this method loads and returns the checkpointed state.
@@ -2115,7 +2116,7 @@ impl CompiledPhaseGraph {
     }
 
     /// Execute the compiled graph until the next judge interrupt and return
-    /// both the checkpointed phase state and the LangGraph stream parts emitted
+    /// both the checkpointed phase state and the `LangGraph` stream parts emitted
     /// by that run.
     ///
     /// # Errors
@@ -3046,7 +3047,7 @@ impl CompiledPhaseGraph {
     /// Returns the new state. The semantics of the out-of-process judge gate
     /// are realised here with a durable interrupt checkpoint: the phase node
     /// pauses, this call checkpoints the external verdict, then the graph is
-    /// re-invoked on the same thread so LangGraph routing supplies the next
+    /// re-invoked on the same thread so `LangGraph` routing supplies the next
     /// state.
     ///
     /// # Errors
@@ -3066,7 +3067,7 @@ impl CompiledPhaseGraph {
     }
 
     /// Apply a judge verdict and return the graph-owned state plus any
-    /// LangGraph stream parts emitted while re-entering the next gate.
+    /// `LangGraph` stream parts emitted while re-entering the next gate.
     ///
     /// Terminal-complete verdicts do not have a next gate to stream; in that
     /// case the returned stream is empty and the state is the terminal
@@ -3169,7 +3170,7 @@ impl CompiledPhaseGraph {
         }
     }
 
-    /// Persist a step-status transition through the durable LangGraph timeline.
+    /// Persist a step-status transition through the durable `LangGraph` timeline.
     ///
     /// Step updates do not advance phase routing, so this stores the edited
     /// state as a checkpoint attributed to the owning phase node. A prior
@@ -3234,7 +3235,7 @@ impl CompiledPhaseGraph {
         self.update_state_as_node(session_id, state, phase_id).await
     }
 
-    /// Persist role-dyad authorization context through the durable LangGraph
+    /// Persist role-dyad authorization context through the durable `LangGraph`
     /// timeline.
     ///
     /// Dyad verdicts authorize phase completion for phases that declare
@@ -3320,7 +3321,7 @@ impl CompiledPhaseGraph {
             .collect())
     }
 
-    /// The full checkpoint history with LangGraph checkpoint metadata preserved.
+    /// The full checkpoint history with `LangGraph` checkpoint metadata preserved.
     ///
     /// This is the enterprise audit surface for graph execution: callers can see
     /// checkpoint ids, parent lineage, runtime source node/type, and per-checkpoint
@@ -3394,7 +3395,7 @@ impl CompiledPhaseGraph {
         }
     }
 
-    /// Stream LangGraph checkpoint writes for this session, oldest first.
+    /// Stream `LangGraph` checkpoint writes for this session, oldest first.
     ///
     /// This surfaces the upstream `CheckpointSaver::get_writes_history` audit
     /// channel: callers can inspect which node wrote which checkpoint channel,
@@ -3584,7 +3585,7 @@ impl CompiledPhaseGraph {
                     latest.checkpoint_id
                 ))
             })?;
-        if &latest_write.value_json != &expected_json {
+        if latest_write.value_json != expected_json {
             return Err(GraphEngineError::Graph(format!(
                 "phase graph latest state-channel write mismatch for checkpoint '{}' skill '{skill}' thread {expected_thread_id}",
                 latest.checkpoint_id

@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 const RETIRED_CONTROL_PLANE_TERMS: &[&str] = &[
     concat!("con", "sul"),
@@ -15,7 +18,13 @@ fn retired_control_plane_surfaces_stay_removed() {
         .expect("crate must live under repo/crates/sentinel-infrastructure");
 
     let mut violations = Vec::new();
-    scan_path(repo_root, repo_root, &mut violations);
+    if let Some(files) = tracked_sentinel_files(repo_root) {
+        for file in files {
+            scan_file(repo_root, &file, &mut violations);
+        }
+    } else {
+        scan_path(repo_root, repo_root, &mut violations);
+    }
 
     assert!(
         violations.is_empty(),
@@ -35,6 +44,14 @@ fn scan_path(repo_root: &Path, path: &Path, violations: &mut Vec<String>) {
             let entry = entry.expect("failed to read directory entry");
             scan_path(repo_root, &entry.path(), violations);
         }
+        return;
+    }
+
+    scan_file(repo_root, path, violations);
+}
+
+fn scan_file(repo_root: &Path, path: &Path, violations: &mut Vec<String>) {
+    if should_skip(path) {
         return;
     }
 
@@ -59,6 +76,30 @@ fn scan_path(repo_root: &Path, path: &Path, violations: &mut Vec<String>) {
             }
         }
     }
+}
+
+fn tracked_sentinel_files(repo_root: &Path) -> Option<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("ls-files")
+        .arg("-z")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .filter_map(|bytes| {
+            let rel_path = std::str::from_utf8(bytes).ok()?;
+            Some(repo_root.join(rel_path))
+        })
+        .collect::<Vec<_>>();
+    (!files.is_empty()).then_some(files)
 }
 
 fn should_skip(path: &Path) -> bool {

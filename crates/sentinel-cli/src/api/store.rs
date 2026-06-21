@@ -156,9 +156,12 @@ fn walk_for_skills(
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("failed to read entry in {}: {e}", dir.display()))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("failed to read file type for {:?}: {e}", entry.path()))?;
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "failed to read file type for {}: {e}",
+                entry.path().display()
+            )
+        })?;
         if !file_type.is_dir() {
             continue;
         }

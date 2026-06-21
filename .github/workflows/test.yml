@@ -4,11 +4,11 @@ name: test
 # currently sits on a Free plan and GitHub Actions refuses to start jobs on
 # private repos when Actions billing is in a failed / over-limit state.
 # Every push then posts a red "FAIL" check whose only annotation is the
-# billing message — not useful signal. Local `cargo clippy --workspace` +
-# `cargo test --workspace` is the source of truth until Actions is restored.
+# billing message — not useful signal. Local fmt/build/clippy/test runs are
+# the source of truth until Actions is restored.
 #
 # To re-enable: set `CI_ENABLED=true` at
-#   https://github.com/garysomerhalder/sentinel/settings/variables/actions
+#   https://github.com/legatus-ai/sentinel/settings/variables/actions
 # (or run `gh variable set CI_ENABLED --body true`). Unset / any other value
 # leaves CI dormant.
 #
@@ -26,8 +26,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Full workspace gate — build (incl. test targets), clippy at the
-  # pedantic+nursery bar with -D warnings, and the whole test suite.
+  # Full workspace gate — build (incl. test targets), clippy with the workspace
+  # lint policy, and the whole test suite.
   # Catches the failure modes a `-p <crate> --lib`-only run misses:
   #   - a test target that does not COMPILE (we --all-targets build first)
   #   - clippy regressions anywhere in the workspace
@@ -39,6 +39,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout LangGraph Rust path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: legatus-ai/langgraph-python-to-rust
+          path: langgraph-python-to-rust
+          token: ${{ secrets.LEGATUS_CI_GITHUB_TOKEN }}
+
+      - name: Link LangGraph Rust sibling path
+        run: ln -sfn "$GITHUB_WORKSPACE/langgraph-python-to-rust" "$GITHUB_WORKSPACE/../langgraph-python-to-rust"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,6 +56,9 @@ jobs:
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
 
       # Build every target (lib, bins, tests, examples) so a test module
       # that fails to compile is a hard failure here — the exact gap that
@@ -55,16 +68,31 @@ jobs:
         run: cargo build --workspace --all-targets
 
       # Clippy at the repo's maintained bar: `--workspace` (NOT --all-targets).
-      # The workspace lints config tolerates some pedantic lints in test
-      # modules that only surface under --all-targets; gating on those would
-      # red-flag main for long-standing, accepted test-code style. The build
-      # step above already guarantees test targets COMPILE; this guarantees
-      # the shipped lib/bin code stays clippy-clean.
+      # The workspace lint policy carries the project-specific style allowances;
+      # the build step above already guarantees test targets COMPILE.
       - name: cargo clippy --workspace -D warnings
         run: cargo clippy --workspace -- -D warnings
 
       - name: cargo test --workspace
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo test --workspace -- --test-threads=1 | tee target/workspace-test.log
+
+      - name: enterprise LangGraph decision graph guard
+        run: cargo test -p sentinel-infrastructure --test enterprise_langgraph_decision_graphs
+
+      - name: enterprise LangGraph runtime feature guard
+        run: cargo test -p sentinel --test enterprise_langgraph_features
+
+      - name: enterprise LangGraph MCP checkpoint evidence guard
+        run: |
+          set -euo pipefail
+          test_name="mcp_cmd::tests::severity_graph_auditor_emits_langgraph_checkpoint_evidence"
+          if ! grep -Fq "${test_name} ... ok" target/workspace-test.log; then
+            echo "workspace test log did not show ${test_name} passing" >&2
+            exit 1
+          fi
 
   # NOTE: there are currently NO detached-workspace crates on main (the only
   # [workspace] table is the repo root). If a `tools/*` crate with its own
@@ -72,7 +100,3 @@ jobs:
   # sentinel-viz-api did exactly that on an unmerged branch, shipping a
   # non-compiling test suite + 161 clippy warnings), add a matrix job here
   # that builds/clippies/tests each such crate from its own directory.
-
-      - name: test (${{ matrix.crate }})
-        working-directory: ${{ matrix.crate }}
-        run: cargo test

@@ -289,7 +289,7 @@ impl StepProof {
 /// Errors from [`StepProof::verify_signature`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureError {
-    /// Signature field is absent. Enterprise StepProof verification requires
+    /// Signature field is absent. Enterprise `StepProof` verification requires
     /// a signed proof entry.
     Missing,
     /// Signature field is not valid hex.

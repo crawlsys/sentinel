@@ -126,7 +126,7 @@ fn emit_phase_file_authority_warnings(
         .home_dir()
         .expect("[sentinel] FATAL: Cannot determine home directory")
         .join(".claude/skills")
-        .join(&effective_skill)
+        .join(effective_skill)
         .join("phases");
 
     let phase_file_path = phases_dir.join(next_phase_file);

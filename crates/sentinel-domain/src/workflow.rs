@@ -465,7 +465,7 @@ pub struct WorkflowState {
     pub current_step: Option<String>,
 
     /// Recorded role-dyad sub-verdicts, keyed by phase id. The durable
-    /// LangGraph phase authority imports and enforces these verdicts when a
+    /// `LangGraph` phase authority imports and enforces these verdicts when a
     /// phase declares `required_dyad`.
     #[serde(default)]
     pub dyad_verdicts: BTreeMap<String, DyadVerdicts>,
@@ -601,7 +601,7 @@ impl WorkflowState {
 
     /// Test-only direct phase transition helper.
     ///
-    /// Production phase progression is owned by the durable LangGraph authority
+    /// Production phase progression is owned by the durable `LangGraph` authority
     /// in `sentinel-graph`; exposing this helper outside tests would recreate a
     /// direct `WorkflowState` bypass around graph checkpoints.
     #[cfg(test)]

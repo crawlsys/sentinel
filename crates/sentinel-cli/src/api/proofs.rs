@@ -27,7 +27,7 @@ pub fn router() -> Router<AppState> {
 
 async fn list_proofs(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
     // Collect while holding the read-guard, then drop it before returning.
-    let chains = match {
+    let chains_result = {
         let session = state.session.read().await;
         let mut chains = Vec::new();
         let mut error = None;
@@ -45,7 +45,8 @@ async fn list_proofs(State(state): State<AppState>) -> Result<Json<serde_json::V
             Some(error) => Err(error),
             None => Ok(chains),
         }
-    } {
+    };
+    let chains = match chains_result {
         Ok(chains) => chains,
         Err(error) => return proof_json(ProofApiReadSurface::Error, error).await,
     };

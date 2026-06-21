@@ -430,13 +430,9 @@ fn find_marketplace_repo() -> Option<PathBuf> {
 }
 
 fn find_marketplace_repo_from_home(home: &Path, claude_dir: &Path) -> Option<PathBuf> {
-    for dir in marketplace_repo_candidates(home, claude_dir) {
-        if is_marketplace_repo(&dir) {
-            return Some(dir);
-        }
-    }
-
-    None
+    marketplace_repo_candidates(home, claude_dir)
+        .into_iter()
+        .find(|dir| is_marketplace_repo(dir))
 }
 
 fn marketplace_repo_candidates(home: &Path, claude_dir: &Path) -> Vec<PathBuf> {

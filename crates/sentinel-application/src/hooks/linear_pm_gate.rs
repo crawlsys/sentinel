@@ -370,6 +370,7 @@ fn needs_milestone(issue: &Value) -> bool {
 ///      Canceled),
 ///   2. a `Blocked` workflow state (by name or type), and
 ///   3. a `blocked` / `blocker` label.
+///
 /// Any absent signal simply doesn't fire; positive blocked signals are enough
 /// to stop the transition.
 fn blocked_reason(issue: &Value) -> Option<String> {

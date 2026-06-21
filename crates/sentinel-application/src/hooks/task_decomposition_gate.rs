@@ -175,6 +175,7 @@ fn is_mutating_bash(command: &str) -> bool {
 ///   - `2>&1`, `2>&-`        (fd dup / close)
 ///   - `2>/dev/null`, `2>file`, `2>>file`  (stderr to a sink — not tracked state)
 ///   - any `N>&M` fd-dup where the source fd is a digit
+///
 /// Deliberately conservative: only the recognized `\d>` / `\d>>` / `\d>&` forms
 /// are stripped; a bare `>` or `>>` (stdout/file write) is left intact.
 fn strip_stderr_redirections(command: &str) -> String {

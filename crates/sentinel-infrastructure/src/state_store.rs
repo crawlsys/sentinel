@@ -17,7 +17,7 @@
 //! the encryption key is independent of the HMAC signing key.
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chacha20poly1305::aead::Aead;
@@ -61,7 +61,11 @@ pub fn sanitize_session_id(session_id: &str) -> Result<()> {
 /// directory, letting an attacker plant forged state files that sentinel will
 /// load as real session state.
 pub fn state_dir() -> PathBuf {
-    crate::paths::sentinel_root().join("state")
+    state_dir_for_root(&crate::paths::sentinel_root())
+}
+
+fn state_dir_for_root(sentinel_root: &Path) -> PathBuf {
+    sentinel_root.join("state")
 }
 
 /// Encode bytes as hexadecimal string (avoids `hex` crate dependency)
@@ -91,15 +95,14 @@ fn hmac_secret_dir() -> PathBuf {
     crate::paths::sentinel_root()
 }
 
-/// Path to a versioned secret file.
-fn hmac_secret_path_versioned(version: u32) -> PathBuf {
-    hmac_secret_dir().join(format!(".hmac-secret-v{version}"))
+fn hmac_secret_path_versioned_in(sentinel_root: &Path, version: u32) -> PathBuf {
+    sentinel_root.join(format!(".hmac-secret-v{version}"))
 }
 
 /// Discover all key versions available on disk.
 /// Returns sorted list of (version, path) pairs, highest version last.
-fn discover_key_versions() -> Vec<(u32, PathBuf)> {
-    let dir = hmac_secret_dir();
+fn discover_key_versions_in(sentinel_root: &Path) -> Vec<(u32, PathBuf)> {
+    let dir = sentinel_root;
     let mut versions = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -117,16 +120,18 @@ fn discover_key_versions() -> Vec<(u32, PathBuf)> {
     versions
 }
 
-/// Get the current (latest) key version number.
-fn current_key_version() -> u32 {
-    discover_key_versions().last().map_or(1, |(v, _)| *v)
+fn current_key_version_in(sentinel_root: &Path) -> u32 {
+    discover_key_versions_in(sentinel_root)
+        .last()
+        .map_or(1, |(v, _)| *v)
 }
 
 /// Create a new key version. Returns the new version number.
 /// The old key versions are preserved for verification of existing signatures.
 pub fn rotate_hmac_key() -> Result<u32> {
-    let new_version = current_key_version() + 1;
-    let path = hmac_secret_path_versioned(new_version);
+    let sentinel_root = hmac_secret_dir();
+    let new_version = current_key_version_in(&sentinel_root) + 1;
+    let path = hmac_secret_path_versioned_in(&sentinel_root, new_version);
 
     let mut secret = vec![0u8; 32];
     getrandom::getrandom(&mut secret)
@@ -154,7 +159,11 @@ pub fn rotate_hmac_key() -> Result<u32> {
 /// secret file makes the key non-derivable from system observations.
 /// The secret is readable only by the owning user (mode 0600 on Unix).
 fn current_hmac_key() -> (u32, Vec<u8>) {
-    let versions = discover_key_versions();
+    current_hmac_key_in(&hmac_secret_dir())
+}
+
+fn current_hmac_key_in(sentinel_root: &Path) -> (u32, Vec<u8>) {
+    let versions = discover_key_versions_in(sentinel_root);
     if let Some((version, ref path)) = versions.last() {
         if let Ok(bytes) = std::fs::read(path) {
             if bytes.len() >= 32 {
@@ -172,7 +181,7 @@ fn current_hmac_key() -> (u32, Vec<u8>) {
         panic!("failed to read OS randomness for Sentinel HMAC secret: {error}")
     });
 
-    let path = hmac_secret_path_versioned(1);
+    let path = hmac_secret_path_versioned_in(sentinel_root, 1);
 
     // Write atomically — create parent dirs if needed
     if let Some(parent) = path.parent() {
@@ -427,8 +436,13 @@ fn derive_encryption_key_from_hmac_key(hmac_key: &[u8]) -> [u8; 32] {
 /// `version_byte (0x02) || hmac_key_version_be_u32 || nonce (12 bytes) || ciphertext+tag`.
 /// The AEAD tag provides both integrity AND confidentiality, replacing the
 /// separate HMAC `.sig` file for encrypted state files.
+#[cfg(test)]
 fn encrypt_state(serialized_state: &[u8]) -> Result<Vec<u8>> {
-    let (key_version, hmac_key) = current_hmac_key();
+    encrypt_state_in(&hmac_secret_dir(), serialized_state)
+}
+
+fn encrypt_state_in(sentinel_root: &Path, serialized_state: &[u8]) -> Result<Vec<u8>> {
+    let (key_version, hmac_key) = current_hmac_key_in(sentinel_root);
     let key_bytes = derive_encryption_key_from_hmac_key(&hmac_key);
     let key = chacha20poly1305::Key::from_slice(&key_bytes);
     let cipher = ChaCha20Poly1305::new(key);
@@ -452,7 +466,7 @@ fn encrypt_state(serialized_state: &[u8]) -> Result<Vec<u8>> {
 /// Validates the version byte, extracts the nonce, and uses ChaCha20-Poly1305
 /// to decrypt + authenticate. Any tampering (bit flip, truncation, nonce reuse
 /// with different ciphertext) causes the AEAD tag check to fail.
-fn decrypt_state(data: &[u8]) -> Result<Vec<u8>> {
+fn decrypt_state_in(sentinel_root: &Path, data: &[u8]) -> Result<Vec<u8>> {
     // Minimum size:
     // 1 (format version) + 4 (key version) + 12 (nonce) + 16 (AEAD tag)
     if data.len() < 1 + 4 + 12 + 16 {
@@ -469,7 +483,7 @@ fn decrypt_state(data: &[u8]) -> Result<Vec<u8>> {
             .try_into()
             .expect("key version slice length is fixed"),
     );
-    let hmac_key = derive_hmac_key_for_version(key_version)
+    let hmac_key = derive_hmac_key_for_version_in(sentinel_root, key_version)
         .ok_or_else(|| anyhow::anyhow!("unknown state encryption key version {key_version}"))?;
 
     let nonce = chacha20poly1305::Nonce::from_slice(&data[5..17]);
@@ -487,7 +501,11 @@ fn decrypt_state(data: &[u8]) -> Result<Vec<u8>> {
 /// Compute HMAC-SHA256 of the given data using the current (latest) key.
 /// Returns a versioned signature string: `v{N}:{hex}`.
 fn compute_hmac(data: &[u8]) -> String {
-    let (version, key) = current_hmac_key();
+    compute_hmac_in(&hmac_secret_dir(), data)
+}
+
+fn compute_hmac_in(sentinel_root: &Path, data: &[u8]) -> String {
+    let (version, key) = current_hmac_key_in(sentinel_root);
     let mut mac = <HmacSha256 as Mac>::new_from_slice(&key).expect("HMAC accepts any key size");
     Mac::update(&mut mac, data);
     let result = mac.finalize();
@@ -495,9 +513,8 @@ fn compute_hmac(data: &[u8]) -> String {
     format!("v{version}:{hex}")
 }
 
-/// Derive an HMAC key for a specific key version (used during verification).
-fn derive_hmac_key_for_version(version: u32) -> Option<Vec<u8>> {
-    let path = hmac_secret_path_versioned(version);
+fn derive_hmac_key_for_version_in(sentinel_root: &Path, version: u32) -> Option<Vec<u8>> {
+    let path = hmac_secret_path_versioned_in(sentinel_root, version);
     if !path.exists() {
         return None;
     }
@@ -513,6 +530,10 @@ fn derive_hmac_key_for_version(version: u32) -> Option<Vec<u8>> {
 /// Verify HMAC-SHA256 of the given data against expected signature.
 /// Supports only versioned signatures (`v{N}:{hex}`).
 fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
+    verify_hmac_in(&hmac_secret_dir(), data, sig_str)
+}
+
+fn verify_hmac_in(sentinel_root: &Path, data: &[u8], sig_str: &str) -> bool {
     let Some(rest) = sig_str.strip_prefix('v') else {
         return false;
     };
@@ -527,7 +548,7 @@ fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
         return false;
     };
 
-    let key = match derive_hmac_key_for_version(version) {
+    let key = match derive_hmac_key_for_version_in(sentinel_root, version) {
         Some(k) => k,
         None => return false,
     };
@@ -543,16 +564,26 @@ fn verify_hmac(data: &[u8], sig_str: &str) -> bool {
 /// Path to the generation tracking file for a session.
 /// Stores the highest known generation number as a plain u64 string.
 /// This file is NEVER overwritten with a lower value — it only ratchets up.
+#[cfg(test)]
 fn generation_file_path(session_id: &str) -> PathBuf {
-    state_dir().join(format!("{session_id}.gen"))
+    generation_file_path_in(&crate::paths::sentinel_root(), session_id)
+}
+
+fn generation_file_path_in(sentinel_root: &Path, session_id: &str) -> PathBuf {
+    state_dir_for_root(sentinel_root).join(format!("{session_id}.gen"))
 }
 
 /// Read the highest known generation from the `.gen` file.
 ///
 /// `Ok(None)` means the floor has never been written. Malformed or unreadable
 /// floor files are errors because treating them as `0` weakens anti-replay.
+#[cfg(test)]
 fn read_generation_floor(session_id: &str) -> Result<Option<u64>> {
-    let path = generation_file_path(session_id);
+    read_generation_floor_in(&crate::paths::sentinel_root(), session_id)
+}
+
+fn read_generation_floor_in(sentinel_root: &Path, session_id: &str) -> Result<Option<u64>> {
+    let path = generation_file_path_in(sentinel_root, session_id);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -577,16 +608,20 @@ fn read_generation_floor(session_id: &str) -> Result<Option<u64>> {
 }
 
 /// Write the generation floor to the `.gen` file (atomic via tmp+rename).
-fn write_generation_floor(session_id: &str, generation: u64) -> Result<()> {
-    let existing = read_generation_floor(session_id)?.unwrap_or(0);
+fn write_generation_floor_in(
+    sentinel_root: &Path,
+    session_id: &str,
+    generation: u64,
+) -> Result<()> {
+    let existing = read_generation_floor_in(sentinel_root, session_id)?.unwrap_or(0);
     if generation < existing {
         return Err(anyhow::anyhow!(
             "refusing to lower generation floor for session {session_id}: existing {existing}, new {generation}"
         ));
     }
 
-    let dir = state_dir();
-    let path = generation_file_path(session_id);
+    let dir = state_dir_for_root(sentinel_root);
+    let path = generation_file_path_in(sentinel_root, session_id);
     let tmp_path = dir.join(format!("{session_id}.gen.tmp"));
     std::fs::write(&tmp_path, generation.to_string())
         .context("Failed to write temp generation file")?;
@@ -605,19 +640,21 @@ fn write_generation_floor(session_id: &str, generation: u64) -> Result<()> {
 /// generation must be >= this floor, preventing file deletion/replacement attacks.
 pub fn save(state: &mut SessionState) -> Result<()> {
     sanitize_session_id(&state.session_id)?;
+    let sentinel_root = crate::paths::sentinel_root();
 
     // **Attack #81 fix**: Increment monotonic generation counter before saving.
     // This makes every save strictly newer than the previous one. If state is
     // loaded and has a lower generation than expected, the file was deleted
     // and recreated (state regression attack).
-    let generation_floor = read_generation_floor(&state.session_id)?.unwrap_or(0);
+    let generation_floor =
+        read_generation_floor_in(&sentinel_root, &state.session_id)?.unwrap_or(0);
     state.state_generation = state
         .state_generation
         .max(generation_floor)
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("state generation overflow for {}", state.session_id))?;
 
-    let dir = state_dir();
+    let dir = state_dir_for_root(&sentinel_root);
     std::fs::create_dir_all(&dir).context("Failed to create state directory")?;
 
     let path = dir.join(format!("{}.json", state.session_id));
@@ -632,7 +669,7 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     // Encrypt the JSON — ChaCha20-Poly1305 AEAD provides both confidentiality
     // and integrity, replacing the separate HMAC `.sig` file.
-    let encrypted = encrypt_state(json.as_bytes())?;
+    let encrypted = encrypt_state_in(&sentinel_root, json.as_bytes())?;
 
     // Write encrypted data (binary, not text) via atomic tmp+rename.
     // No `.sig` file needed — the AEAD tag embedded in the ciphertext
@@ -646,7 +683,7 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 
     // **Anti-replay**: Write the generation floor AFTER the state file lands.
     // The .gen file only ratchets up — it records the highest generation ever saved.
-    write_generation_floor(&state.session_id, state.state_generation)?;
+    write_generation_floor_in(&sentinel_root, &state.session_id, state.state_generation)?;
 
     Ok(())
 }
@@ -660,7 +697,8 @@ pub fn save(state: &mut SessionState) -> Result<()> {
 /// Returns the lock file handle — dropping it releases the lock.
 pub fn acquire_session_lock(session_id: &str) -> Result<std::fs::File> {
     sanitize_session_id(session_id)?;
-    let dir = state_dir();
+    let sentinel_root = crate::paths::sentinel_root();
+    let dir = state_dir_for_root(&sentinel_root);
     std::fs::create_dir_all(&dir).context("Failed to create state directory")?;
     let lock_path = dir.join(format!("{session_id}.json.lock"));
     let lock_file = std::fs::File::create(&lock_path).context("Failed to create lock file")?;
@@ -710,8 +748,10 @@ pub fn acquire_session_lock(session_id: &str) -> Result<std::fs::File> {
 /// Caller should hold the session lock (from `acquire_session_lock`).
 pub fn load(session_id: &str) -> Result<Option<SessionState>> {
     sanitize_session_id(session_id)?;
+    let sentinel_root = crate::paths::sentinel_root();
 
-    let path = state_dir().join(format!("{session_id}.json"));
+    let dir = state_dir_for_root(&sentinel_root);
+    let path = dir.join(format!("{session_id}.json"));
     if !path.exists() {
         return Ok(None);
     }
@@ -729,13 +769,13 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
             "State file was not encrypted v2",
         );
         let _ = std::fs::remove_file(&path);
-        let sig_path = state_dir().join(format!("{session_id}.json.sig"));
+        let sig_path = dir.join(format!("{session_id}.json.sig"));
         let _ = std::fs::remove_file(&sig_path);
         return Ok(None);
     }
 
     // The AEAD tag provides integrity; no separate .sig file is trusted.
-    let decrypted = decrypt_state(&raw).map_err(|e| {
+    let decrypted = decrypt_state_in(&sentinel_root, &raw).map_err(|e| {
         eprintln!(
             "[sentinel] SECURITY: State decryption failed for session '{session_id}': {e}. \
              Possible tampering. Discarding."
@@ -756,7 +796,7 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
     // generation is >= the highest generation we've ever saved for this session.
     // If it's lower, someone deleted the state file and let sentinel recreate
     // it at a lower generation (state regression / replay attack).
-    let gen_floor = match read_generation_floor(session_id) {
+    let gen_floor = match read_generation_floor_in(&sentinel_root, session_id) {
         Ok(Some(floor)) => floor,
         Ok(None) => {
             eprintln!(
@@ -803,7 +843,7 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
         );
         // Reject the downgraded state — delete the corrupted/replayed file
         let _ = std::fs::remove_file(&path);
-        let sig_path = state_dir().join(format!("{session_id}.json.sig"));
+        let sig_path = dir.join(format!("{session_id}.json.sig"));
         let _ = std::fs::remove_file(&sig_path);
         return Ok(None);
     }
@@ -815,10 +855,11 @@ pub fn load(session_id: &str) -> Result<Option<SessionState>> {
 pub fn delete(session_id: &str) -> Result<()> {
     sanitize_session_id(session_id)?;
 
-    let dir = state_dir();
+    let sentinel_root = crate::paths::sentinel_root();
+    let dir = state_dir_for_root(&sentinel_root);
     let path = dir.join(format!("{session_id}.json"));
     let sig_path = dir.join(format!("{session_id}.json.sig"));
-    let gen_path = generation_file_path(session_id);
+    let gen_path = generation_file_path_in(&sentinel_root, session_id);
     if path.exists() {
         std::fs::remove_file(&path).context("Failed to delete state file")?;
     }
@@ -835,7 +876,8 @@ pub(crate) fn encrypt_state_for_tests(serialized_state: &[u8]) -> Result<Vec<u8>
 
 /// List all session IDs with saved state
 pub fn list_sessions() -> Result<Vec<String>> {
-    let dir = state_dir();
+    let sentinel_root = crate::paths::sentinel_root();
+    let dir = state_dir_for_root(&sentinel_root);
     if !dir.exists() {
         return Ok(vec![]);
     }
