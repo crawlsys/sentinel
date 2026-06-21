@@ -44,10 +44,10 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout LangGraph Rust path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: legatus-ai/langgraph-python-to-rust
           path: langgraph-python-to-rust
