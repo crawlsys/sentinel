@@ -3,6 +3,10 @@ name = "sentinel-git-interceptor"
 version = "0.1.0"
 edition = "2021"
 description = "Git safety interceptor — blocks dangerous commands, offers safe alternatives"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "git"

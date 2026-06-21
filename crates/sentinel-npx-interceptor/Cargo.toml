@@ -3,6 +3,10 @@ name = "sentinel-npx-interceptor"
 version = "0.1.0"
 edition = "2021"
 description = "Npx interceptor — redirects Node package commands to local Rust CLI equivalents"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "npx"

@@ -13,17 +13,24 @@ name: test
 # leaves CI dormant.
 #
 # Manual runs via `workflow_dispatch` always execute regardless of the var,
-# so CI can still be kicked by hand when needed.
+# so CI can still be kicked by hand when needed. The nightly schedule follows
+# `CI_ENABLED`, giving the repo a cheap soak signal when Actions are enabled.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 9 * * *"
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # Several tests intentionally mutate process-global env such as
+  # `SENTINEL_HOME`; keep CI deterministic unless the tests are refactored
+  # behind a shared process-wide lock.
+  RUST_TEST_THREADS: "1"
 
 jobs:
   # Full workspace gate — build (incl. test targets), clippy with the workspace
@@ -57,8 +64,19 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install security tooling
+        run: |
+          cargo install --locked cargo-audit --version 0.22.0
+          cargo install --locked cargo-deny --version 0.19.8
+
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo deny check
+        run: cargo deny check --hide-inclusion-graph
 
       # Build every target (lib, bins, tests, examples) so a test module
       # that fails to compile is a hard failure here — the exact gap that
