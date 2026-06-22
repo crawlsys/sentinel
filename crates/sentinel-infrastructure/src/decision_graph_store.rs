@@ -854,7 +854,10 @@ mod tests {
                 DecisionGraphCheckpointerConfig::from_env("severity").expect("sqlite config");
             match config {
                 DecisionGraphCheckpointerConfig::Sqlite { database_path } => {
-                    assert!(database_path.ends_with("decision-graphs/severity.db"));
+                    // Platform-agnostic: `database_path` is a String built via PathBuf::join,
+                    // so the separator is `\` on Windows, `/` on Unix.
+                    assert!(database_path.contains("decision-graphs"));
+                    assert!(database_path.ends_with("severity.db"));
                     assert_eq!(
                         DecisionGraphCheckpointerConfig::Sqlite {
                             database_path: database_path.clone(),

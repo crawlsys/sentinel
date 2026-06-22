@@ -1151,8 +1151,12 @@ mod tests {
         save(&mut state).expect("save should succeed while session lock is held");
         let elapsed = start.elapsed();
 
+        // A real deadlock hangs indefinitely; a healthy save() returns quickly.
+        // Use a generous ceiling so heavy parallel-test CPU contention (the full
+        // workspace run spawns many threads) doesn't false-positive — 30s still
+        // cleanly distinguishes "completed" from "deadlocked".
         assert!(
-            elapsed.as_millis() < 1000,
+            elapsed.as_secs() < 30,
             "save() took {}ms — possible deadlock",
             elapsed.as_millis()
         );
