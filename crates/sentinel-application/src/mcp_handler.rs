@@ -4461,17 +4461,27 @@ mod step_tools_tests {
     struct HomeGuard {
         previous_home: Option<std::ffi::OsString>,
         previous_userprofile: Option<std::ffi::OsString>,
+        previous_sentinel_claude_dir: Option<std::ffi::OsString>,
     }
 
     impl HomeGuard {
         fn set(path: &Path) -> Self {
             let previous_home = std::env::var_os("HOME");
             let previous_userprofile = std::env::var_os("USERPROFILE");
+            let previous_sentinel_claude_dir = std::env::var_os("SENTINEL_CLAUDE_DIR");
             std::env::set_var("HOME", path);
             std::env::set_var("USERPROFILE", path);
+            // Pin the authoritative Claude dir explicitly. `try_claude_dir()`
+            // reads SENTINEL_CLAUDE_DIR FIRST via std::env::var (fresh, uncached),
+            // so this bypasses `dirs::home_dir()` — which on Windows reads a
+            // cached USERPROFILE (SHGetKnownFolderPath) and does NOT reliably
+            // honor a runtime-mutated USERPROFILE. Without this, the graph write
+            // and the test read could resolve to different dirs (NotFound flake).
+            std::env::set_var("SENTINEL_CLAUDE_DIR", path.join(".claude"));
             Self {
                 previous_home,
                 previous_userprofile,
+                previous_sentinel_claude_dir,
             }
         }
     }
@@ -4485,6 +4495,10 @@ mod step_tools_tests {
             match self.previous_userprofile.take() {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.previous_sentinel_claude_dir.take() {
+                Some(value) => std::env::set_var("SENTINEL_CLAUDE_DIR", value),
+                None => std::env::remove_var("SENTINEL_CLAUDE_DIR"),
             }
         }
     }
@@ -4652,7 +4666,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_pm_audit_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -4681,7 +4695,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_pm_audit_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_pm_audit_inputs(tmp.path());
@@ -4732,7 +4746,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_health_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -4761,7 +4775,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_health_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_linear_health_inputs(tmp.path());
@@ -4805,7 +4819,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn dev_scorecard_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -4834,7 +4848,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn dev_scorecard_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_dev_scorecard_inputs(tmp.path());
@@ -4879,7 +4893,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn token_cost_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -4908,7 +4922,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn token_cost_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_token_cost_inputs(tmp.path());
@@ -4951,7 +4965,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn tokens_scan_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -4980,7 +4994,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn tokens_scan_rejects_forged_langgraph_audit_without_stream_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5052,7 +5066,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn tokens_scan_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5094,7 +5108,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn eval_run_requires_langgraph_runner() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5126,7 +5140,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn eval_run_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         let runs_dir = tmp.path().join("runs");
@@ -5169,7 +5183,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn ba_draft_requires_langgraph_runner() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5202,7 +5216,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn ba_draft_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5254,7 +5268,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn severity_scan_requires_langgraph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5283,7 +5297,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn severity_scan_returns_langgraph_audit_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_linear_cache(tmp.path());
@@ -5340,7 +5354,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_code_audit_requires_reconciliation_graph_auditor() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
 
@@ -5369,7 +5383,7 @@ mod step_tools_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn linear_code_audit_returns_reconciliation_graph_evidence() {
-        let _lock = HOME_ENV_LOCK.lock().expect("home env lock");
+        let _lock = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().expect("tmpdir");
         let _home = HomeGuard::set(tmp.path());
         write_code_audit_inputs(tmp.path());

@@ -756,9 +756,12 @@ mod tests {
         tenant_scope: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
+        // Poison-resilient: env vars are restored unconditionally below, so a
+        // sibling test panicking while holding this lock must not cascade
+        // PoisonError into every other env-mutating test in this module.
         let _guard = DECISION_GRAPH_CHECKPOINTER_ENV_LOCK
             .lock()
-            .expect("decision graph checkpointer env lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let previous_backend = std::env::var_os(DecisionGraphCheckpointerConfig::BACKEND_ENV);
         let previous_url = std::env::var_os(DecisionGraphCheckpointerConfig::POSTGRES_URL_ENV);
         let previous_schema =
