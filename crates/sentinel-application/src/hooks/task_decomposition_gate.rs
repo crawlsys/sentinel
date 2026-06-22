@@ -701,7 +701,11 @@ mod tests {
         let ctx = ctx_with_fs(fs);
         // Dir PRESENT but EMPTY → Some(false) → block (genuine non-decomposition).
         let out = process(&input("Edit", Some("sess-empty")), &ctx);
-        assert_eq!(out.blocked, Some(true), "Edit with a present-but-empty task dir must block");
+        assert_eq!(
+            out.blocked,
+            Some(true),
+            "Edit with a present-but-empty task dir must block"
+        );
         assert!(out
             .reason
             .as_ref()

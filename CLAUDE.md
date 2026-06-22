@@ -25,6 +25,9 @@ sentinel scan --sync-counts            Sync counts across marketplace files
 sentinel scan --manifest               Generate manifest.json with SHA-256 hashes
 sentinel stats                         Hook execution statistics
 sentinel browser-test record/check     Manage browser test state
+sentinel telemetry collect             Spool ledger rows for the R2 lake (LEG-259)
+sentinel telemetry ship [--dry-run]    Drain the spool to R2, idempotent (LEG-260)
+sentinel telemetry report [--window]   Read the R2 lake → fleet-activity report (LEG-258)
 sentinel mcp                           Start MCP server over stdio
 ```
 
@@ -38,7 +41,7 @@ sentinel mcp                           Start MCP server over stdio
 | `sentinel-application` | — | Use cases: engine, classifier, gate, 85 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
 | `sentinel-graph` | — | Phase-progression engine: compiles `workflows.toml` into a durable, checkpointed langgraph StateGraph with judge-verdict interrupts and Pass/Fail routing |
-| `sentinel-cli` | `sentinel` | CLI (36 top-level subcommands) + local REST API (axum) + in-repo MCP host (stdio) |
+| `sentinel-cli` | `sentinel` | CLI (37 top-level subcommands) + local REST API (axum) + in-repo MCP host (stdio) |
 | `sentinel-git-interceptor` | `sentinel-git-interceptor` | Git shim that routes commits through sentinel gates |
 | `sentinel-npx-interceptor` | `sentinel-npx-interceptor` | npx shim that routes installs through sentinel gates |
 

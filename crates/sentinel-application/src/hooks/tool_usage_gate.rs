@@ -816,9 +816,7 @@ mod tests {
         let home = tmp.path();
         let fs = RealFs::new(home.to_path_buf());
         // No .claude.json seeded → MCP unregistered.
-        let transcript = write_transcript(&[
-            assistant_tool_use("ExitPlanMode"),
-        ]);
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
         seed_task(home, "sess", "1", "Active", "in_progress");
 
         let output = process(
@@ -830,10 +828,8 @@ mod tests {
         );
         // The seq-thinking requirement is skipped; with a plan + active task the
         // request is allowed. Crucially, it is NOT blocked for sequential-thinking.
-        let denied_for_seq = output
-            .blocked
-            .unwrap_or(false)
-            && deny_reason(&output).contains("sequential-thinking");
+        let denied_for_seq =
+            output.blocked.unwrap_or(false) && deny_reason(&output).contains("sequential-thinking");
         assert!(
             !denied_for_seq,
             "must NOT block on sequential-thinking when its MCP is unregistered"

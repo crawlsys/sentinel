@@ -16,7 +16,10 @@
 //! the file grows ~2.5 MB / year, which is fine for now.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use sentinel_domain::events::HookOutput;
 
@@ -48,6 +51,139 @@ pub struct HookInvocation {
     /// First 120 chars of the block/deny reason, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Which agent harness produced this row — `claude` (default), `codex`,
+    /// `opencode`, etc. Driven by the `SENTINEL_SOURCE_HARNESS` env the caller
+    /// sets, so attribution is INTRINSIC to the row, not inferred from which
+    /// ledger file it landed in. Always present so the report can group on
+    /// it without positional guessing. Defaults to `claude` when reading back
+    /// historical rows written before this field existed.
+    #[serde(default = "default_source_harness")]
+    pub source_harness: String,
+    /// Stable per-machine identity for the reporting client — the seam that
+    /// makes "how many unique clients shipped into the lake this window?"
+    /// answerable (every machine's rows otherwise merge into one harness
+    /// prefix). Resolution order: `SENTINEL_CLIENT_ID` env → the persisted
+    /// `~/.claude/sentinel/client-id` → a `machine-id`-derived id. Always
+    /// present on new rows; historical rows written before this field default
+    /// to `unknown` (the aggregator falls back to a session-count estimate for
+    /// those). Intrinsic to the row, like `source_harness`.
+    #[serde(default = "default_client_id")]
+    pub client_id: String,
+}
+
+fn default_source_harness() -> String {
+    "claude".to_string()
+}
+
+/// Sentinel value for rows with no resolved client identity — historical rows
+/// (predating the field) and any environment where neither the env override,
+/// the persisted file, nor a machine-id could be obtained. The aggregator
+/// treats this as "unattributed" and falls back to a session-based estimate.
+pub const UNKNOWN_CLIENT_ID: &str = "unknown";
+
+fn default_client_id() -> String {
+    UNKNOWN_CLIENT_ID.to_string()
+}
+
+/// Process-cached client id so the hot path resolves (and any first-use
+/// file write) exactly once.
+static CLIENT_ID: OnceLock<String> = OnceLock::new();
+
+/// Stable per-machine client id, resolved once per process.
+fn resolve_client_id() -> String {
+    CLIENT_ID.get_or_init(compute_client_id).clone()
+}
+
+/// Resolve precedence: explicit `SENTINEL_CLIENT_ID` env → persisted
+/// `<claude_dir>/sentinel/client-id` (generated + written 0600 on first use) →
+/// [`UNKNOWN_CLIENT_ID`] when the claude dir can't be resolved. The directory
+/// comes from [`crate::paths::try_claude_dir`], so `SENTINEL_CLAUDE_DIR` /
+/// `SENTINEL_HOME` isolation is honored (no writes to a real home under
+/// isolated profiles/tests). Errors are swallowed — client identity must never
+/// break a hook.
+fn compute_client_id() -> String {
+    let env = std::env::var_os("SENTINEL_CLIENT_ID")
+        .and_then(|s| s.into_string().ok())
+        .and_then(nonempty_trimmed);
+    if let Some(v) = env {
+        return v;
+    }
+    let Ok(claude_dir) = crate::paths::try_claude_dir() else {
+        return default_client_id();
+    };
+    let path = claude_dir.join("sentinel").join("client-id");
+    if let Some(v) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(nonempty_trimmed)
+    {
+        return v;
+    }
+    let id = generate_client_id();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = write_client_id_file(&path, &id);
+    id
+}
+
+/// Trim and drop-if-empty — the shared "a present, non-blank value wins"
+/// rule used by every client-id resolution step.
+fn nonempty_trimmed(s: String) -> Option<String> {
+    let t = s.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// Deterministic from the host `machine-id` (hashed, so the raw id never
+/// leaks) when available — a deleted `client-id` file regenerates the SAME
+/// id — else a random uuid. The prefix records which path produced it.
+fn generate_client_id() -> String {
+    if let Some(mid) = std::fs::read_to_string("/etc/machine-id")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let digest = hex::encode(Sha256::digest(mid.as_bytes()));
+        return format!("m-{}", &digest[..16]);
+    }
+    format!("r-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Write the client-id file with owner-only `0600` perms on unix (it is not
+/// secret, but it is per-machine identity — no reason for it to be
+/// world-readable). On non-unix targets, fall back to a plain write.
+#[cfg(unix)]
+fn write_client_id_file(path: &std::path::Path, id: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(id.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_client_id_file(path: &std::path::Path, id: &str) -> std::io::Result<()> {
+    std::fs::write(path, id)
+}
+
+/// Resolve the harness attribution from the process environment. Reads
+/// `SENTINEL_SOURCE_HARNESS` via `var_os` so a non-UTF8 (or empty) value falls
+/// back to the canonical default instead of silently dropping attribution.
+fn resolve_source_harness() -> String {
+    source_harness_from(std::env::var_os("SENTINEL_SOURCE_HARNESS"))
+}
+
+/// Pure resolver (unit-testable without touching global env): a present,
+/// valid-UTF8, non-empty value wins; anything else yields the serde-canonical
+/// [`default_source_harness`].
+fn source_harness_from(value: Option<std::ffi::OsString>) -> String {
+    value
+        .and_then(|s| s.into_string().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(default_source_harness)
 }
 
 /// Outcome classes recorded in the `outcome` column. Keep these stable —
@@ -173,6 +309,15 @@ where
         duration_us: elapsed.as_micros(),
         outcome: outcome.as_str().to_string(),
         reason,
+        // Intrinsic per-harness attribution. The caller (e.g. the OpenCode
+        // sentinel plugin) exports SENTINEL_SOURCE_HARNESS; default `claude`
+        // covers the global Claude Code hooks that don't set it. Shares the
+        // serde-canonical default + tolerates non-UTF8 env values.
+        source_harness: resolve_source_harness(),
+        // Stable per-machine identity (env → persisted file → machine-id),
+        // resolved once per process. Lets the lake report count distinct
+        // reporting clients instead of conflating every machine.
+        client_id: resolve_client_id(),
     };
     record(fs, &row);
     output
@@ -189,6 +334,89 @@ mod tests {
         let (outcome, reason) = classify(&output);
         assert!(matches!(outcome, Outcome::Allow));
         assert!(reason.is_none());
+    }
+
+    // --- source_harness attribution (intrinsic per-harness tagging) ---------
+
+    #[test]
+    fn source_harness_defaults_to_claude_when_unset() {
+        assert_eq!(source_harness_from(None), "claude");
+    }
+
+    #[test]
+    fn source_harness_uses_env_value_when_set() {
+        assert_eq!(source_harness_from(Some("opencode".into())), "opencode");
+        assert_eq!(source_harness_from(Some("codex".into())), "codex");
+    }
+
+    #[test]
+    fn source_harness_falls_back_when_empty() {
+        assert_eq!(
+            source_harness_from(Some(std::ffi::OsString::new())),
+            "claude"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_harness_falls_back_on_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        assert_eq!(source_harness_from(Some(bad)), "claude");
+    }
+
+    #[test]
+    fn historical_row_without_source_harness_deserializes_as_claude() {
+        // Rows written before the field existed must read back as `claude`.
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"phase_gate","duration_us":7,"outcome":"allow"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.source_harness, "claude");
+    }
+
+    #[test]
+    fn source_harness_round_trips_through_serde() {
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"phase_gate","duration_us":7,"outcome":"allow","source_harness":"opencode"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.source_harness, "opencode");
+    }
+
+    // --- client_id (per-machine reporting identity) -------------------------
+
+    #[test]
+    fn historical_row_without_client_id_defaults_to_unknown() {
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"phase_gate","duration_us":7,"outcome":"allow"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.client_id, UNKNOWN_CLIENT_ID);
+    }
+
+    #[test]
+    fn client_id_round_trips_through_serde() {
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"phase_gate","duration_us":7,"outcome":"allow","client_id":"m-deadbeef12345678"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.client_id, "m-deadbeef12345678");
+    }
+
+    #[test]
+    fn nonempty_trimmed_drops_blank_keeps_value() {
+        assert_eq!(nonempty_trimmed("  ".to_string()), None);
+        assert_eq!(nonempty_trimmed(String::new()), None);
+        assert_eq!(
+            nonempty_trimmed("  abc \n".to_string()),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn generate_client_id_is_prefixed_and_stable_shape() {
+        // Either a machine-id-derived `m-<16hex>` or a random `r-<uuid>`;
+        // both are non-empty and never the unknown sentinel.
+        let id = generate_client_id();
+        assert!(id.starts_with("m-") || id.starts_with("r-"), "got {id}");
+        assert_ne!(id, UNKNOWN_CLIENT_ID);
+        if let Some(hexpart) = id.strip_prefix("m-") {
+            assert_eq!(hexpart.len(), 16);
+            assert!(hexpart.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
     }
 
     #[test]

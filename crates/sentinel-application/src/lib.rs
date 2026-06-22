@@ -47,6 +47,7 @@ pub mod sandboxed_judge;
 pub mod scanner;
 pub mod severity;
 pub mod sla;
+pub mod telemetry;
 pub mod throughput;
 pub mod token_cost;
 pub mod tokens;

@@ -7711,13 +7711,8 @@ description = "Claim"
         // on a MISSING dir (unconfirmable) and only blocks on a present-but-empty
         // one (genuinely never decomposed). This test asserts a BLOCK + block
         // audit, so it must present the empty-dir case.
-        std::fs::create_dir_all(
-            home.path()
-                .join(".claude")
-                .join("tasks")
-                .join(&session_id),
-        )
-        .expect("seed empty session task dir");
+        std::fs::create_dir_all(home.path().join(".claude").join("tasks").join(&session_id))
+            .expect("seed empty session task dir");
         let input = sentinel_domain::events::HookInput {
             session_id: Some(session_id),
             tool_name: Some("Edit".into()),
