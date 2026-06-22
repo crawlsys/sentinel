@@ -7632,7 +7632,9 @@ description = "Fetch"
         let error = data["error"].as_str().expect("error");
         assert!(error.contains("configured LangGraph workflow 'linear'"));
         assert!(error.contains("missing required step config"));
-        assert!(error.contains("steps/linear.toml"));
+        // Platform-agnostic: Path::display() uses `\` on Windows, `/` on Unix.
+        assert!(error.contains("steps"));
+        assert!(error.contains("linear.toml"));
 
         match prev_sentinel_home {
             Some(value) => std::env::set_var("SENTINEL_HOME", value),

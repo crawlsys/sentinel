@@ -7170,7 +7170,9 @@ description = "Claim"
 
         assert!(message.contains("configured LangGraph workflow 'linear'"));
         assert!(message.contains("missing required step config"));
-        assert!(message.contains("steps/linear.toml"));
+        // Platform-agnostic: Path::display() uses `\` on Windows, `/` on Unix.
+        assert!(message.contains("steps"));
+        assert!(message.contains("linear.toml"));
     }
 
     #[test]
@@ -7704,8 +7706,20 @@ description = "Claim"
             env: &env,
             linear_lookup: None,
         };
+        let session_id = format!("task-decomposition-{}", uuid::Uuid::new_v4());
+        // Seed a PRESENT-BUT-EMPTY session task dir: post-fix the gate fails OPEN
+        // on a MISSING dir (unconfirmable) and only blocks on a present-but-empty
+        // one (genuinely never decomposed). This test asserts a BLOCK + block
+        // audit, so it must present the empty-dir case.
+        std::fs::create_dir_all(
+            home.path()
+                .join(".claude")
+                .join("tasks")
+                .join(&session_id),
+        )
+        .expect("seed empty session task dir");
         let input = sentinel_domain::events::HookInput {
-            session_id: Some(format!("task-decomposition-{}", uuid::Uuid::new_v4())),
+            session_id: Some(session_id),
             tool_name: Some("Edit".into()),
             ..Default::default()
         };
