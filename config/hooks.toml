@@ -17,7 +17,7 @@ id = "memory-provision"
 event = "SessionStart"
 description = "Verify memory engine binaries, provision the Qdrant credential from Doppler (fetch when missing/invalid/expired), and idempotently register the memory MCP server in ~/.claude.json (atomic + .bak). require_remote (default true): withholds registration + surfaces a console error when no working credential can be provisioned."
 depends_on = ["session-init"]
-has_api_call = false
+has_api_call = true  # Doppler network call (secret fetch via `doppler` CLI, bounded by doppler_timeout_secs)
 
 [[hooks]]
 id = "upstream-freshness"

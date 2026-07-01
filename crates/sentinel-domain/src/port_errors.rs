@@ -81,7 +81,9 @@ port_error! {
 
 port_error! {
     /// Errors from [`crate::ports::ProcessPort`] — spawn/exec failures.
-    ProcessError { Io, Backend }
+    /// `Timeout`: the child exceeded the caller's deadline and was killed
+    /// (only produced by [`crate::ports::ProcessPort::run_with_timeout`]).
+    ProcessError { Io, Backend, Timeout }
 }
 
 port_error! {

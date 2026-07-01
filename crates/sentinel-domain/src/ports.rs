@@ -194,6 +194,18 @@ pub trait FileSystemPort: Send + Sync {
     /// Write bytes to a file (creates parent dirs if needed).
     fn write(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError>;
 
+    /// Write bytes to a file with owner-only permissions (0600 on unix).
+    ///
+    /// Opt-in variant of [`FileSystemPort::write`] for credential material
+    /// (Qdrant API keys, config backups that embed them). Disk-backed
+    /// adapters MUST override this to enforce the mode; the default delegates
+    /// to `write` so in-memory test stubs — where permissions are meaningless
+    /// — keep compiling. On non-unix targets the override behaves like
+    /// `write` (no POSIX mode bits to set).
+    fn write_private(&self, path: &Path, content: &[u8]) -> Result<(), FileSystemError> {
+        self.write(path, content)
+    }
+
     /// Atomically replace a file's full contents.
     ///
     /// Adapters that support durable authority snapshots must implement this
@@ -303,6 +315,24 @@ pub trait ProcessPort: Send + Sync {
         args: &[&str],
         cwd: Option<&str>,
     ) -> Result<ProcessOutput, ProcessError>;
+
+    /// Run a command with a wall-clock deadline. Implementations kill the
+    /// child on expiry and return [`ProcessError::Timeout`] so a hung
+    /// network-bound CLI (e.g. `doppler` with an unreachable API) cannot
+    /// stall a synchronous hook indefinitely.
+    ///
+    /// The default delegates to [`ProcessPort::run`] (no timeout) so
+    /// lightweight test stubs keep compiling; the real adapter overrides it.
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Result<ProcessOutput, ProcessError> {
+        let _ = timeout;
+        self.run(command, args, cwd)
+    }
 
     /// Spawn a detached process (fire-and-forget). Returns immediately.
     fn spawn_detached(&self, command: &str, args: &[&str]) -> Result<(), ProcessError>;

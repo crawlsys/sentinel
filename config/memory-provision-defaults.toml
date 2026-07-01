@@ -27,8 +27,13 @@ org_mirror_url = ""
 #                      shown. false: a missing credential only warns.
 #   doppler_project / doppler_config — where the Qdrant secrets live.
 #   qdrant_url_secret / qdrant_key_secret — the secret names to fetch.
+#   doppler_timeout_secs — wall-clock deadline for the `doppler secrets get`
+#                      network call. On expiry the child is killed and the
+#                      fetch is treated as a failure (withhold path), so an
+#                      unreachable Doppler API cannot hang SessionStart.
 require_remote = true
 doppler_project = "legatus"
 doppler_config = "dev"
 qdrant_url_secret = "QDRANT_URL"
 qdrant_key_secret = "QDRANT_API_KEY"
+doppler_timeout_secs = 10
