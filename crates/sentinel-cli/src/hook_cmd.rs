@@ -503,6 +503,15 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
             });
             output.merge(&init_output);
 
+            // Memory provision — verify the memory engine binaries, provision the
+            // Qdrant credential from Doppler (fetch when missing/invalid/expired),
+            // and idempotently register the memory MCP server in ~/.claude.json.
+            // Depends on session-init. Never denies; never installs.
+            let provision_output = time_and_record(ctx.fs, &mk_ctx("memory_provision"), || {
+                hooks::memory_provision::process(&input, &ctx)
+            });
+            output.merge(&provision_output);
+
             // Task rehydrate — inject persistent tasks from previous sessions
             let rehydrate_output = time_and_record(ctx.fs, &mk_ctx("task_rehydrate"), || {
                 hooks::task_rehydrate::process(&input, &ctx)

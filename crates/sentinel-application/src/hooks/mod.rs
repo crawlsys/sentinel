@@ -39,6 +39,7 @@ pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;
+pub mod memory_provision;
 pub mod memory_turn_capture;
 pub mod memory_verify;
 pub mod orchestration_nudge;
@@ -280,6 +281,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_extract",
     "memory_feedback",
     "memory_inject",
+    "memory_provision",
     "memory_turn_capture",
     "memory_verify",
     "orchestration_nudge",

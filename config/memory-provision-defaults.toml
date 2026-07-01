@@ -1,0 +1,34 @@
+# Sentinel memory-provisioning hook — shipped defaults.
+#
+# Read by `sentinel_application::hooks::memory_provision` at SessionStart via
+# `include_str!`. Operators override in
+# `~/.claude/sentinel/config/memory-provision.toml`; an operator file (when
+# present) replaces these values wholesale.
+#
+# Keys:
+#   enabled        — master switch. false → the hook is a no-op (allow).
+#   register_mcp   — when true, idempotently register the `memory` MCP server
+#                    into ~/.claude.json (atomic write + .bak backup, never
+#                    clobbers existing keys/servers).
+#   org_mirror_url — optional org/remote mirror endpoint. When set (or when the
+#                    MEMORY_REMOTE_URL env var is set, which takes precedence),
+#                    the registered MCP entry gets MEMORY_REMOTE_URL +
+#                    MEMORY_MIRROR_ORG=1 in its env; absent → Qdrant-only.
+
+enabled = true
+register_mcp = true
+org_mirror_url = ""
+
+# Remote (Qdrant) credential provisioning ------------------------------------
+#   require_remote   — memory does not activate without a working Qdrant
+#                      credential. true (default): if ~/.qdrant/config.json is
+#                      missing/invalid/expired AND the Doppler fetch fails, the
+#                      memory MCP is NOT registered and a clear console error is
+#                      shown. false: a missing credential only warns.
+#   doppler_project / doppler_config — where the Qdrant secrets live.
+#   qdrant_url_secret / qdrant_key_secret — the secret names to fetch.
+require_remote = true
+doppler_project = "legatus"
+doppler_config = "dev"
+qdrant_url_secret = "QDRANT_URL"
+qdrant_key_secret = "QDRANT_API_KEY"

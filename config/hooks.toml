@@ -13,6 +13,13 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "memory-provision"
+event = "SessionStart"
+description = "Verify memory engine binaries, provision the Qdrant credential from Doppler (fetch when missing/invalid/expired), and idempotently register the memory MCP server in ~/.claude.json (atomic + .bak). require_remote (default true): withholds registration + surfaces a console error when no working credential can be provisioned."
+depends_on = ["session-init"]
+has_api_call = false
+
+[[hooks]]
 id = "upstream-freshness"
 event = "SessionStart"
 description = "Notify (never mutate) when local default branch is behind origin; names the one-click `git pull --ff-only`. Zero-network: compares against the already-fetched ref. Default branch only; fails silent otherwise. Also runs on CwdChanged."
