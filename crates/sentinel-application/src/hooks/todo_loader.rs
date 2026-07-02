@@ -216,7 +216,7 @@ mod tests {
             content: "Task A".into(),
             status: "pending".into(),
             priority: Some(0),
-            project: Some("/Users/gary/Documents/GitHub/myproject".into()),
+            project: Some("/Users/operator/Documents/GitHub/myproject".into()),
         }];
         let filtered = filter_project_todos(&todos, "/home/dev/myproject");
         assert_eq!(filtered.len(), 1);

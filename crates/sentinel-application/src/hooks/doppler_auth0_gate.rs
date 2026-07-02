@@ -211,7 +211,7 @@ pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> DopplerAuth0Evaluat
             &mut evaluation,
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Auth0 operations require explicit user permission \
              in Planned mode, or a non-prod tenant in Autopilot. Production Auth0 changes always \
-             require Gary's explicit approval — no exceptions, even in Autopilot."
+             require explicit operator approval — no exceptions, even in Autopilot."
                 .to_string(),
         );
         return evaluation;
@@ -246,9 +246,9 @@ pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> DopplerAuth0Evaluat
         // Block everything else (mutations)
         block_evaluation(&mut evaluation, format!(
             "🔴 [Doppler/Auth0 Gate] BLOCKED: Doppler mutation `{op}` requires explicit user permission. \
-             Ask Gary before making ANY changes to Doppler secrets or configuration. NO EXCEPTIONS. \
-             To unblock briefly, Gary must type an \
-             override phrase like \"override doppler\" or \"authorize doppler write\" in his next prompt."
+             Ask the user before making ANY changes to Doppler secrets or configuration. NO EXCEPTIONS. \
+             To unblock briefly, the user must type an \
+             override phrase like \"override doppler\" or \"authorize doppler write\" in their next prompt."
         ));
         return evaluation;
     }

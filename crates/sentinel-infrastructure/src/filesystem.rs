@@ -484,10 +484,10 @@ mod tests {
     #[test]
     fn is_metrics_jsonl_classifier() {
         assert!(is_metrics_jsonl(Path::new(
-            "/c/Users/garys/.claude/sentinel/metrics/sessions.jsonl"
+            "/c/Users/operator/.claude/sentinel/metrics/sessions.jsonl"
         )));
         assert!(is_metrics_jsonl(Path::new(
-            "C:\\Users\\garys\\.claude\\sentinel\\metrics\\errors.jsonl"
+            "C:\\Users\\operator\\.claude\\sentinel\\metrics\\errors.jsonl"
         )));
         // Wrong extension
         assert!(!is_metrics_jsonl(Path::new("/sentinel/metrics/state.json")));

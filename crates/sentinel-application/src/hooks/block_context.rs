@@ -104,10 +104,10 @@ mod tests {
     fn appends_session_state_and_cwd() {
         let input = HookInput {
             session_id: Some("abc-123".to_string()),
-            cwd: Some("C:\\Users\\garys\\repo".to_string()),
+            cwd: Some("C:\\Users\\operator\\repo".to_string()),
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
-                "file_path": "C:\\Users\\garys\\.claude.json"
+                "file_path": "C:\\Users\\operator\\.claude.json"
             })),
             ..Default::default()
         };
@@ -116,9 +116,9 @@ mod tests {
 
         assert!(message.contains("[sentinel] session: abc-123"));
         assert!(message.contains("[sentinel] state: ~/.claude/sentinel/state/abc-123.json"));
-        assert!(message.contains("[sentinel] cwd: C:\\Users\\garys\\repo"));
+        assert!(message.contains("[sentinel] cwd: C:\\Users\\operator\\repo"));
         assert!(message.contains("[sentinel] tool: Edit"));
-        assert!(message.contains("[sentinel] target: C:\\Users\\garys\\.claude.json"));
+        assert!(message.contains("[sentinel] target: C:\\Users\\operator\\.claude.json"));
     }
 
     #[test]

@@ -652,7 +652,7 @@ enum CleanupAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Set a config value (e.g., `sentinel config set name "Gary"`)
+    /// Set a config value (e.g., `sentinel config set name "Operator"`)
     Set {
         /// Config key (currently: name)
         key: String,

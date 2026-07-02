@@ -1612,7 +1612,9 @@ mod tests {
         assert_eq!(
             c.classify(
                 "Write",
-                &edit_path("C:\\Users\\garys\\.claude\\projects\\C--Users-garys\\memory\\foo.md")
+                &edit_path(
+                    "C:\\Users\\operator\\.claude\\projects\\C--Users-operator\\memory\\foo.md"
+                )
             ),
             ReversibilityClass::TriviallyReversible
         );
@@ -1657,7 +1659,7 @@ mod tests {
         assert_eq!(
             c.classify(
                 "Write",
-                &edit_path("C:\\Users\\garys\\.claude\\projects\\C--Users-garys\\memory\\claude_switcher_check_handler.md")
+                &edit_path("C:\\Users\\operator\\.claude\\projects\\C--Users-operator\\memory\\claude_switcher_check_handler.md")
             ),
             ReversibilityClass::TriviallyReversible
         );
@@ -1685,7 +1687,7 @@ mod tests {
         // Regression guard: the path layer must NOT loosen ordinary code edits.
         for p in [
             "/repo/src/main.rs",
-            "C:\\Users\\garys\\code\\app\\index.ts",
+            "C:\\Users\\operator\\code\\app\\index.ts",
             "/home/u/.claude/settings.json", // .claude but NOT a memory/ path
         ] {
             assert_eq!(

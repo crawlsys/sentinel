@@ -53,7 +53,7 @@ prompt_template  = """
 PR created ({pr_ref}). Arm a self-terminating monitor:
 ```
 CronCreate(cron: "*/5 * * * *", recurring: true,
-  prompt: "[auto-monitor:pr:{pr_ref}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise run `gh pr checks` for CI and `gh pr view --comments` for reviews on {pr_ref}. While pending, stay quiet. On CI failure, diagnose and report. When all checks conclude + approved, tell Gary it's ready to merge, then CronDelete this job. If this job has run >20 times without conclusion, report the stall and CronDelete.")
+  prompt: "[auto-monitor:pr:{pr_ref}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise run `gh pr checks` for CI and `gh pr view --comments` for reviews on {pr_ref}. While pending, stay quiet. On CI failure, diagnose and report. When all checks conclude + approved, report that it is ready to merge, then CronDelete this job. If this job has run >20 times without conclusion, report the stall and CronDelete.")
 ```"""
 
 # --- Migrated from linear_lifecycle.rs (state_id change cron) ---
@@ -71,7 +71,7 @@ prompt_template  = """
 Linear issue state changed (state_id {issue}). Arm a lifecycle monitor:
 ```
 CronCreate(cron: "47 * * * *", recurring: true,
-  prompt: "[auto-monitor:linear:{issue}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise check this Linear issue's status. If In Progress >24h without commits, remind Gary. If blocked, identify the blocker. If done, remind to update Linear status.")
+  prompt: "[auto-monitor:linear:{issue}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise check this Linear issue's status. If In Progress >24h without commits, remind the user. If blocked, identify the blocker. If done, remind the user to update Linear status.")
 ```"""
 
 # --- NEW gap #1: remote deploy started → poll→diagnose→report→self-delete ---
@@ -90,7 +90,7 @@ prompt_template  = """
 Remote deploy detected (from {cwd}). Before arming, run CronList and skip if any job's prompt contains the [auto-monitor:deploy:{cwd}] marker below. Arm a self-terminating watch:
 ```
 CronCreate(cron: "*/2 * * * *", recurring: true,
-  prompt: "[auto-monitor:deploy:{cwd}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise deploy watch. 1. POLL deploy + CI status (wrangler deployments list / vercel ls / gh run list --branch {branch} --limit 1 --json status,conclusion,databaseId). 2. IF in progress: wait for next tick. 3. IF failed: fetch logs (gh run view <id> --log-failed / wrangler tail), diagnose root cause in 2-3 sentences, report the failing step to Gary, then CronDelete this job. 4. IF succeeded: report 'deploy green' + URL, one-line smoke check if a health endpoint is known, then CronDelete this job. 5. SAFETY: if this job has run >20 times (~40 min) without a terminal state, report the stall and CronDelete.")
+  prompt: "[auto-monitor:deploy:{cwd}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise deploy watch. 1. POLL deploy + CI status (wrangler deployments list / vercel ls / gh run list --branch {branch} --limit 1 --json status,conclusion,databaseId). 2. IF in progress: wait for next tick. 3. IF failed: fetch logs (gh run view <id> --log-failed / wrangler tail), diagnose root cause in 2-3 sentences, report the failing step to the user, then CronDelete this job. 4. IF succeeded: report 'deploy green' + URL, one-line smoke check if a health endpoint is known, then CronDelete this job. 5. SAFETY: if this job has run >20 times (~40 min) without a terminal state, report the stall and CronDelete.")
 ```"""
 
 # --- NEW gap #3: push to a PR branch → recurring CI check (argv-tokenized) ---
@@ -110,7 +110,7 @@ prompt_template  = """
 Pushed to feature branch {branch}. If it has an open PR, monitor CI:
 ```
 CronCreate(cron: "*/3 * * * *", recurring: true,
-  prompt: "[auto-monitor:push:{branch}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise run `gh pr checks` for the PR on {branch}. While pending, stay quiet. On conclusion, summarize pass/fail to Gary (ready-to-merge or diagnose failure), then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
+  prompt: "[auto-monitor:push:{branch}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise run `gh pr checks` for the PR on {branch}. While pending, stay quiet. On conclusion, summarize pass/fail to the user (ready-to-merge or diagnose failure), then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
 ```"""
 
 # --- NEW gap #2: task moved to in_progress → staleness reminder ---
@@ -128,7 +128,7 @@ prompt_template  = """
 Task moved to in_progress. Arm a staleness reminder:
 ```
 CronCreate(cron: "*/30 * * * *", recurring: true,
-  prompt: "[auto-monitor:task] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise run TaskList. If this task is still in_progress with no activity for 60+ min, remind Gary. Once it's completed or no longer in_progress, CronDelete this job.")
+  prompt: "[auto-monitor:task] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise run TaskList. If this task is still in_progress with no activity for 60+ min, remind the user. Once it's completed or no longer in_progress, CronDelete this job.")
 ```"""
 
 # --- NEW gap #6: CI run watch (gh run watch / workflow run / tag push) ---
@@ -147,5 +147,5 @@ prompt_template  = """
 CI run started. Monitor to conclusion:
 ```
 CronCreate(cron: "*/2 * * * *", recurring: true,
-  prompt: "[auto-monitor:ci:{run_id}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, tell Gary once and CronDelete this job before doing more work. Otherwise run `gh run view {run_id} --json status,conclusion` (or `gh run list --limit 1` if no id). On conclusion, summarize to Gary; on failure run /debug on the failing job. Then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
+  prompt: "[auto-monitor:ci:{run_id}] CRON CIRCUIT BREAKER: first inspect CronList for this marker; if this job shows 3 consecutive failures, or its last error mentions session limit, usage limit, quota, or authentication, warn the user once and CronDelete this job before doing more work. Otherwise run `gh run view {run_id} --json status,conclusion` (or `gh run list --limit 1` if no id). On conclusion, summarize to the user; on failure run /debug on the failing job. Then CronDelete this job. If run >20 times without conclusion, report the stall and CronDelete.")
 ```"""

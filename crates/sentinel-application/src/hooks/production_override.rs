@@ -11,7 +11,7 @@
 //! This hook owns the ARM/REVOKE side: it watches each prompt for the two
 //! phrases and flips `SessionState.production_override` accordingly, then
 //! emits a **dual-display** confirmation through both documented channels —
-//! `systemMessage` (Gary's terminal) and `additionalContext` (the model) —
+//! `systemMessage` (the operator's terminal) and `additionalContext` (the model) —
 //! mirroring the `memory_inject` capture-notice pattern. The per-action prod
 //! notice itself is surfaced by the agent following the policy in the
 //! generated CLAUDE.md; this hook is the state machine + the visible
@@ -32,9 +32,9 @@ const LOCK_PHRASE: &str = "production lock";
 /// migration" ≈ 50 chars); the phrase buried inside a long pasted log line,
 /// fetched web snippet, or file blob is almost certainly NOT the operator
 /// intending to arm prod. Gating arm on a short phrase-line meaningfully
-/// reduces accidental/injected arming while honoring the exact phrase Gary
-/// chose. It does NOT eliminate the risk (a short pasted line could still
-/// match) — the dual-display notice is the real backstop: Gary SEES the arm
+/// reduces accidental/injected arming while honoring the exact phrase the
+/// operator chose. It does NOT eliminate the risk (a short pasted line could still
+/// match) — the dual-display notice is the real backstop: the operator sees the arm
 /// and can immediately "production lock". Lock is deliberately NOT length-
 /// gated (locking is fail-safe toward refusal, so it should trigger easily).
 const MAX_ARM_LINE_LEN: usize = 120;

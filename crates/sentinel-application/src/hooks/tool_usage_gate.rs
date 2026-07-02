@@ -482,7 +482,7 @@ pub fn output_from_evaluation(evaluation: &ToolUsageEvaluation) -> HookOutput {
         ToolUsageDecision::DenyMissingTaskList => HookOutput::deny(
             "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` before \
              making code changes. All work must be tracked as a task. \
-             Note: `TodoWrite` is NOT accepted — Gary's CLAUDE.md mandates the \
+             Note: `TodoWrite` is NOT accepted — the operator's CLAUDE.md mandates the \
              agent-harness `TaskCreate`/`TaskUpdate` (TaskList) tool.",
         ),
         ToolUsageDecision::DenyPlanInProgress => HookOutput::deny(
@@ -501,7 +501,7 @@ pub fn output_from_evaluation(evaluation: &ToolUsageEvaluation) -> HookOutput {
                 "🔴 [Tool Usage Gate] BLOCKED: Create a task with `TaskCreate` and have \
                  one in `in_progress` before making code changes. All work must be \
                  tracked as an active task. Note: `TodoWrite` is NOT accepted — \
-                 Gary's CLAUDE.md mandates the agent-harness `TaskCreate`/`TaskUpdate` \
+                 the operator's CLAUDE.md mandates the agent-harness `TaskCreate`/`TaskUpdate` \
                  (TaskList) tool."
                     .to_string()
             } else {
@@ -509,7 +509,7 @@ pub fn output_from_evaluation(evaluation: &ToolUsageEvaluation) -> HookOutput {
                     "🔴 [Tool Usage Gate] BLOCKED: Mark a task as `in_progress` before making \
                      code changes. {hint} Use `TaskUpdate(taskId: \"<id>\", \
                      status: \"in_progress\")`. Note: `TodoWrite` is NOT accepted — \
-                     Gary's CLAUDE.md mandates the agent-harness TaskList tool."
+                     the operator's CLAUDE.md mandates the agent-harness TaskList tool."
                 )
             };
             HookOutput::deny(msg)

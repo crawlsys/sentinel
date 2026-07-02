@@ -447,8 +447,8 @@ mod tests {
     #[test]
     fn test_extract_bold_text() {
         assert_eq!(
-            extract_bold_text("Switched to **gary-max** (gary@example.com, Max 20x)"),
-            Some("gary-max".to_string())
+            extract_bold_text("Switched to **operator-max** (operator@example.com, Max 20x)"),
+            Some("operator-max".to_string())
         );
         assert_eq!(extract_bold_text("no bold here"), None);
         assert_eq!(extract_bold_text("****"), None);
@@ -456,8 +456,9 @@ mod tests {
 
     #[test]
     fn test_parse_switched_account_switch() {
-        let result = parse_switched_account("Switched to **gary-max** (gary@example.com, Max 20x)");
-        assert_eq!(result, "gary-max");
+        let result =
+            parse_switched_account("Switched to **operator-max** (operator@example.com, Max 20x)");
+        assert_eq!(result, "operator-max");
     }
 
     #[test]
@@ -526,7 +527,7 @@ mod tests {
         // "error" as a substring should NOT trigger false positive
         assert!(!is_error_result(
             &input,
-            "Switched to **gary-max** — 0 errors in config"
+            "Switched to **operator-max** — 0 errors in config"
         ));
     }
 
@@ -542,14 +543,14 @@ mod tests {
     fn test_parse_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.md");
-        fs::write(&file, "---\nname: myproject\nclaude_account: gary-max\nlinear_account: gary@test.com (workspace)\n---\n# Hello").unwrap();
+        fs::write(&file, "---\nname: myproject\nclaude_account: operator-max\nlinear_account: operator@example.com (workspace)\n---\n# Hello").unwrap();
 
         let fields = parse_frontmatter(&TestFs, &file).unwrap();
         assert_eq!(fields.get("name").unwrap(), "myproject");
-        assert_eq!(fields.get("claude_account").unwrap(), "gary-max");
+        assert_eq!(fields.get("claude_account").unwrap(), "operator-max");
         assert_eq!(
             fields.get("linear_account").unwrap(),
-            "gary@test.com (workspace)"
+            "operator@example.com (workspace)"
         );
     }
 
@@ -557,9 +558,9 @@ mod tests {
     fn test_build_cascade_instructions_with_claude_account() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.md");
-        fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\ndoppler_account: gary@workplace\nblacksmith_account: myorg\n---\n").unwrap();
+        fs::write(&file, "---\nname: testproject\nclaude_account: operator-max\nlinear_account: operator@example.com (ws)\ndoppler_account: operator@workplace.example\nblacksmith_account: myorg\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "operator-max");
         assert_eq!(instructions.len(), 3);
         assert!(instructions[0].contains("linear"));
         assert!(instructions[1].contains("doppler"));
@@ -575,15 +576,15 @@ mod tests {
             "\
 ---
 name: fullproject
-claude_account: gary-max
-linear_account: gary@test.com (ws)
-doppler_account: gary@workplace
+claude_account: operator-max
+linear_account: operator@example.com (ws)
+doppler_account: operator@workplace.example
 blacksmith_account: myorg
 cerebras_account: default
 neon_account: prod
 railway_account: myapp
 vercel_account: team1
-sentry_account: gary@sentry
+sentry_account: operator@sentry.example
 onepassword_account: work
 dragonfly_account: prod-cache
 gooddata_account: analytics
@@ -591,15 +592,15 @@ hyperswitch_account: payments
 nylas_account: email
 notion_account: workspace
 cloudflare_account: cf-123
-github_account: garysomerhalder
-firebase_account: gary@gmail.com
+github_account: legatus-ai
+firebase_account: operator@example.com
 loom_workspace: ws-abc123
 ---
 ",
         )
         .unwrap();
 
-        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "operator-max");
         assert_eq!(instructions.len(), 18);
         // Verify ordering matches CASCADE_TARGETS
         assert!(instructions[0].contains("linear"));
@@ -630,9 +631,9 @@ loom_workspace: ws-abc123
         // Only linear + railway configured — should get exactly 2 instructions
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("partial.md");
-        fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\nrailway_account: myapp\n---\n").unwrap();
+        fs::write(&file, "---\nname: testproject\nclaude_account: operator-max\nlinear_account: operator@example.com (ws)\nrailway_account: myapp\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "operator-max");
         assert_eq!(instructions.len(), 2);
         assert!(instructions[0].contains("linear"));
         assert!(instructions[1].contains("railway"));
@@ -643,9 +644,9 @@ loom_workspace: ws-abc123
         // doppler_project is project-level config, not account-level — should NOT cascade
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.md");
-        fs::write(&file, "---\nname: testproject\nclaude_account: gary-max\nlinear_account: gary@test.com (ws)\ndoppler_project: myapp\n---\n").unwrap();
+        fs::write(&file, "---\nname: testproject\nclaude_account: operator-max\nlinear_account: operator@example.com (ws)\ndoppler_project: myapp\n---\n").unwrap();
 
-        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "operator-max");
         assert_eq!(instructions.len(), 1); // only linear, no doppler
         assert!(instructions[0].contains("linear"));
     }
@@ -660,7 +661,7 @@ loom_workspace: ws-abc123
         )
         .unwrap();
 
-        let instructions = build_cascade_instructions(&TestFs, dir.path(), "gary-max");
+        let instructions = build_cascade_instructions(&TestFs, dir.path(), "operator-max");
         assert!(instructions.is_empty());
     }
 
@@ -671,7 +672,7 @@ loom_workspace: ws-abc123
         let file = dir.path().join("corvus.md");
         fs::write(
             &file,
-            "---\nname: corvus\nlinear_account: gary@test.com (corvus)\n---\n",
+            "---\nname: corvus\nlinear_account: operator@example.com (corvus)\n---\n",
         )
         .unwrap();
 
@@ -684,7 +685,7 @@ loom_workspace: ws-abc123
     fn test_build_cascade_fallback_matches_by_alias() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("firefly.md");
-        fs::write(&file, "---\nname: firefly-pro\naliases: [\"firefly\", \"crm\", \"fir\"]\nlinear_account: gary@fp.com (firefly-pro)\n---\n").unwrap();
+        fs::write(&file, "---\nname: firefly-pro\naliases: [\"firefly\", \"crm\", \"fir\"]\nlinear_account: operator@firefly.example (firefly-pro)\n---\n").unwrap();
 
         let instructions = build_cascade_instructions(&TestFs, dir.path(), "firefly");
         assert_eq!(instructions.len(), 1);
@@ -693,15 +694,15 @@ loom_workspace: ws-abc123
 
     #[test]
     fn test_extract_result_text_string() {
-        let val = serde_json::json!("Switched to **gary-max**");
-        assert_eq!(extract_result_text(&val), "Switched to **gary-max**");
+        let val = serde_json::json!("Switched to **operator-max**");
+        assert_eq!(extract_result_text(&val), "Switched to **operator-max**");
     }
 
     #[test]
     fn test_extract_result_text_content_array() {
         let val = serde_json::json!({
-            "content": [{ "type": "text", "text": "Switched to **gary-max**" }]
+            "content": [{ "type": "text", "text": "Switched to **operator-max**" }]
         });
-        assert_eq!(extract_result_text(&val), "Switched to **gary-max**");
+        assert_eq!(extract_result_text(&val), "Switched to **operator-max**");
     }
 }

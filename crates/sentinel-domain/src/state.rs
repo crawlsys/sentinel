@@ -242,7 +242,7 @@ impl SessionState {
         }
     }
 
-    /// Arm the session-wide production override (operator said "production
+    /// Arm the session-wide production override (operator requested "production
     /// override"). Idempotent — re-arming refreshes `armed_at`/`note`.
     pub fn arm_production_override(&mut self, note: Option<String>) {
         self.production_override = Some(ProductionOverride {
@@ -251,7 +251,7 @@ impl SessionState {
         });
     }
 
-    /// Revoke the production override (operator said "production lock", or a
+    /// Revoke the production override (operator requested "production lock", or a
     /// fresh lock is desired). No-op if not armed.
     pub fn revoke_production_override(&mut self) {
         self.production_override = None;

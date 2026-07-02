@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.4.1"
 edition = "2021"
-authors = ["Gary Somerhalder"]
+authors = ["Kevin Crawley <kevin@legatus.io>", "Gary Somerhalder <gary@legatus.io>"]
 license = "MIT"
 repository = "https://github.com/legatus-ai/sentinel"
 rust-version = "1.87"

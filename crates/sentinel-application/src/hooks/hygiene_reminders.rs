@@ -112,7 +112,7 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // 3a. Merged worktree-* branches (local + remote) — orphaned branches that
-    //     are fully merged into main. Surfaces the cleanup commands so Gary
+    //     are fully merged into main. Surfaces the cleanup commands so the user
     //     can prune them without manually running `git branch --merged`.
     state.merged_local_worktree_branches = ctx
         .git

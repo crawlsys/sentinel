@@ -426,6 +426,29 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         let has_changes = match ctx.git.has_uncommitted_changes(cwd) {
             Ok(has_changes) => has_changes,
             Err(err) => {
+                // The Stop's cwd is not inside a git repository (the common
+                // case: the event arrived without a `cwd` field, so the `.`
+                // fallback resolved to the evaluating process's working
+                // directory — e.g. "/" under the systemd daemon). Skip
+                // silently using the same probe `git_hygiene` uses, instead
+                // of surfacing an [Sentinel-Authority] error. That error path
+                // bypasses the off-book debounce and would otherwise fire on
+                // every single Stop.
+                if ctx.git.repo_root(cwd).is_none() {
+                    return HookOutput::allow();
+                }
+                // Genuine git failure inside a real repo: surface it the same
+                // way off-book work is surfaced, but gated by the debounce
+                // counter so a persistent failure can never loop un-debounced.
+                let prev_offbook = match read_offbook_count(ctx.fs, session_id) {
+                    Ok(count) => count,
+                    Err(_) => return HookOutput::allow(),
+                };
+                let count = prev_offbook.saturating_add(1);
+                let _ = write_offbook_count(ctx.fs, session_id, count);
+                if count != 1 && count % OFFBOOK_REMINDER_INTERVAL != 0 {
+                    return HookOutput::allow();
+                }
                 return authority_context(format!(
                     "failed to inspect git worktree changes for task coverage: {err}"
                 ));
@@ -973,6 +996,110 @@ mod tests {
         let msg = injected_text(&out).expect("off-book uncommitted warning must fire");
         assert!(msg.contains("no task is"));
         assert!(msg.contains("in_progress"));
+    }
+
+    /// Git stub simulating a Stop whose `cwd` is NOT inside a git repository
+    /// (the live failure mode: a Stop arrived without `cwd`, so the `."`
+    /// fallback resolved to the daemon's working directory). Mirrors `FakeGit`
+    /// but with `has_uncommitted_changes` erroring and `repo_root` returning
+    /// `None`, exactly as the real `RealGit` does on a non-repo path.
+    struct NonRepoGit {
+        head: RefCell<Option<String>>,
+    }
+    impl GitStatusPort for NonRepoGit {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            Err(sentinel_domain::port_errors::GitError::backend(
+                "Failed to run git status: fatal: not a git repository",
+            ))
+        }
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+            Ok(vec![])
+        }
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
+            Ok("main".into())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            self.head.borrow().clone()
+        }
+    }
+
+    /// Regression: when `has_uncommitted_changes` fails because the Stop's cwd
+    /// is not a git repository, the hook must skip silently — NOT inject a
+    /// `[Sentinel-Authority]` error. The buggy code returned `authority_context`
+    /// on every Stop (the error path bypassed the off-book debounce), producing
+    /// an un-debounced loop. Non-repo cwd is the live trigger.
+    #[test]
+    fn non_repo_cwd_skips_silently_instead_of_error_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let sid = "sess-nonrepo";
+        // No in_progress task, so the no-coverage branch is the one under test.
+        seed_tasks(&home, sid, &[("1", "pending")]);
+
+        let proc_stub = StubProcess;
+        let mem = StubMemoryMcp;
+        let env = StubEnv::new();
+
+        // Every Stop in this scenario looks identical (non-repo cwd). If the
+        // fix is correct, NONE of them inject; if the bug is present, ALL do.
+        for stop in 1..=6 {
+            let fs = ScopedHomeFs { home: home.clone() };
+            let git = NonRepoGit {
+                head: RefCell::new(None),
+            };
+            let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
+            // cwd points outside any repo, mirroring the daemon's "/" case.
+            let input = input_for(sid, "/", None);
+            let out = process(&input, &ctx);
+            assert!(
+                injected_text(&out).is_none(),
+                "non-repo cwd on stop {stop} must skip silently, not inject a \
+                 [Sentinel-Authority] error (un-debounced loop)"
+            );
+            assert!(out.blocked.is_none());
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //!   "updatedFrom": { /* only present for action="update" — fields that changed */ },
 //!   "url": "https://linear.app/...",
 //!   "createdAt": "2026-04-23T...",
-//!   "actor": { "id": "...", "name": "Pedro Bordignon" } }
+//!   "actor": { "id": "...", "name": "QA reviewer" } }
 //! ```
 //!
 //! For `Issue.update` state transitions we diff `data.state` against
@@ -303,12 +303,12 @@ mod tests {
                 "stateId": "s_qa_failed",
                 "state": { "id": "s_qa_failed", "name": "QA Failed" }
             },
-            "actor": { "id": "u_pedro", "name": "Pedro Bordignon" }
+            "actor": { "id": "u_reviewer", "name": "QA reviewer" }
         });
         let d = decode("linear", None, &body);
         assert_eq!(
             d.summary,
-            "[LINEAR] FPCRM-329 moved QA Failed → QA Testing (by Pedro Bordignon)"
+            "[LINEAR] FPCRM-329 moved QA Failed → QA Testing (by QA reviewer)"
         );
     }
 
@@ -341,12 +341,12 @@ mod tests {
                     "team": { "key": "FPCRM" }
                 }
             },
-            "actor": { "name": "Pedro" }
+            "actor": { "name": "QA reviewer" }
         });
         let d = decode("linear", None, &body);
         assert_eq!(
             d.summary,
-            "[LINEAR] Pedro commented on FPCRM-330: \"Still failing — selection not persisting after save\""
+            "[LINEAR] QA reviewer commented on FPCRM-330: \"Still failing — selection not persisting after save\""
         );
     }
 
@@ -390,12 +390,12 @@ mod tests {
                     "issue": { "identifier": "FPCRM-1" }
                 }
             },
-            "actor": { "name": "Gary" }
+            "actor": { "name": "operator" }
         });
         let d = decode("linear", None, &body);
         assert_eq!(
             d.summary,
-            "[LINEAR] +1 reaction added on FPCRM-1 comment (by Gary)"
+            "[LINEAR] +1 reaction added on FPCRM-1 comment (by operator)"
         );
     }
 
@@ -418,12 +418,12 @@ mod tests {
             "data": {
                 "identifier": "FPCRM-1",
                 "title": "x",
-                "assignee": { "name": "Pedro" }
+                "assignee": { "name": "QA reviewer" }
             },
             "updatedFrom": { "assigneeId": "old_id" }
         });
         let d = decode("linear", None, &body);
-        assert_eq!(d.summary, "[LINEAR] FPCRM-1 reassigned to Pedro");
+        assert_eq!(d.summary, "[LINEAR] FPCRM-1 reassigned to QA reviewer");
     }
 
     #[test]

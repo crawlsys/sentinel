@@ -1002,7 +1002,7 @@ mod tests {
 
         let mut input = HookInput::default();
         input.session_id = Some("session-123".to_string());
-        input.cwd = Some(r"C:\Users\garys".to_string());
+        input.cwd = Some(r"C:\Users\operator".to_string());
         input
             .extra
             .insert("error".to_string(), serde_json::json!("rate_limit"));

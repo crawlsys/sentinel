@@ -136,11 +136,11 @@ mod tests {
     #[test]
     fn test_is_inside_worktree() {
         assert!(is_inside_worktree(
-            "C:\\Users\\garys\\.claude\\worktrees\\my-branch"
+            "C:\\Users\\operator\\.claude\\worktrees\\my-branch"
         ));
         assert!(is_inside_worktree("/home/user/.claude/worktrees/feat-xyz"));
         assert!(!is_inside_worktree(
-            "C:\\Users\\garys\\Documents\\GitHub\\sentinel"
+            "C:\\Users\\operator\\Documents\\GitHub\\sentinel"
         ));
     }
 

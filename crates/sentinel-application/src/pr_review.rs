@@ -886,7 +886,7 @@ mod tests {
         assert!(is_bot("CODERABBITAI"));
         assert!(is_bot("github-actions[bot]"));
         assert!(is_bot("linear"));
-        assert!(!is_bot("garysomerhalder"));
+        assert!(!is_bot("legatus-ai"));
         assert!(!is_bot("alice"));
     }
 

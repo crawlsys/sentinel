@@ -55,7 +55,7 @@ If Codex flags `severity: critical` or `high`, fix them in the same worktree bef
 
 Push the branch and open the PR. Three things to get right:
 
-1. **Branch name** matches the project's `branch_format` (firefly-pro: `gary/{prefix}-{number}-{description}` from project config).
+1. **Branch name** matches the project's `branch_format` (e.g. firefly-pro: `{username}/{prefix}-{number}-{description}` from project config).
 2. **PR body contains `Ref FPCRM-XXX`** (literal string), NOT `Fixes` / `Closes` / `Resolves`. Linear's native integration auto-transitions on the latter three, bypassing the QA-Testing handoff this skill needs.
 3. **PR is linked to Linear via `mcp__linear__link_attachment_github_pr`** so the issue's Attachments panel shows the PR.
 

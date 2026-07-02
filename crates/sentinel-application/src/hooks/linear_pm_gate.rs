@@ -410,7 +410,7 @@ fn blocked_reason(issue: &Value) -> Option<String> {
     }
 
     // 2. Blocked workflow state (by name or type). Matches a bare "Blocked"
-    // column AND the Firefly "QA Blocked" state (Pedro's QA redesign: built
+    // column AND the Firefly "QA Blocked" state (QA reviewer's QA redesign: built
     // but a dependency/data blocks the test) — any state whose name contains
     // "blocked" is a do-not-start signal.
     if let Some(state) = issue.get("state") {
@@ -749,7 +749,7 @@ mod tests {
         assert!(blocked_reason(&by_name).is_some());
         let by_type = serde_json::json!({ "state": { "name": "Waiting", "type": "blocked" } });
         assert!(blocked_reason(&by_type).is_some());
-        // Pedro's QA redesign: "QA Blocked" must count as a blocked state.
+        // QA reviewer's QA redesign: "QA Blocked" must count as a blocked state.
         let qa_blocked =
             serde_json::json!({ "state": { "name": "QA Blocked", "type": "started" } });
         assert!(blocked_reason(&qa_blocked).is_some());

@@ -935,16 +935,16 @@ mod tests {
 
     #[test]
     fn test_project_hash_deterministic() {
-        let h1 = project_hash("/Users/gary/projects/firefly");
-        let h2 = project_hash("/Users/gary/projects/firefly");
+        let h1 = project_hash("/Users/operator/projects/firefly");
+        let h2 = project_hash("/Users/operator/projects/firefly");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 8);
     }
 
     #[test]
     fn test_project_hash_different() {
-        let h1 = project_hash("/Users/gary/projects/firefly");
-        let h2 = project_hash("/Users/gary/projects/corvus");
+        let h1 = project_hash("/Users/operator/projects/firefly");
+        let h2 = project_hash("/Users/operator/projects/corvus");
         assert_ne!(h1, h2);
     }
 
@@ -1354,16 +1354,16 @@ mod tests {
     #[test]
     fn test_encode_project_key_windows_path() {
         assert_eq!(
-            encode_project_key("C:\\Users\\garys\\Documents\\GitHub\\sentinel"),
-            "C--Users-garys-Documents-GitHub-sentinel"
+            encode_project_key("C:\\Users\\operator\\Documents\\GitHub\\sentinel"),
+            "C--Users-operator-Documents-GitHub-sentinel"
         );
     }
 
     #[test]
     fn test_encode_project_key_unix_path() {
         assert_eq!(
-            encode_project_key("/Users/gary/projects/firefly"),
-            "-Users-gary-projects-firefly"
+            encode_project_key("/Users/operator/projects/firefly"),
+            "-Users-operator-projects-firefly"
         );
     }
 

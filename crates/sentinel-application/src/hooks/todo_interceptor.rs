@@ -440,16 +440,16 @@ mod tests {
 
     #[test]
     fn test_project_hash_deterministic() {
-        let h1 = project_hash("/Users/gary/projects/firefly");
-        let h2 = project_hash("/Users/gary/projects/firefly");
+        let h1 = project_hash("/Users/operator/projects/firefly");
+        let h2 = project_hash("/Users/operator/projects/firefly");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 8);
     }
 
     #[test]
     fn test_project_hash_different_projects() {
-        let h1 = project_hash("/Users/gary/projects/firefly");
-        let h2 = project_hash("/Users/gary/projects/corvus");
+        let h1 = project_hash("/Users/operator/projects/firefly");
+        let h2 = project_hash("/Users/operator/projects/corvus");
         assert_ne!(h1, h2);
     }
 

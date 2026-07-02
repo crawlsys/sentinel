@@ -437,19 +437,19 @@ mod tests {
     #[test]
     fn test_detect_project() {
         assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/claude-code-marketplace"),
+            detect_project("/home/operator/Documents/GitHub/claude-code-marketplace"),
             "marketplace"
         );
         assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/firefly-pro-crm"),
+            detect_project("/home/operator/Documents/GitHub/firefly-pro-crm"),
             "firefly-pro"
         );
         assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/sentinel"),
+            detect_project("/home/operator/Documents/GitHub/sentinel"),
             "sentinel"
         );
         assert_eq!(
-            detect_project("/home/gary/Documents/GitHub/legatus"),
+            detect_project("/home/operator/Documents/GitHub/legatus"),
             "legatus"
         );
         assert_eq!(detect_project("/"), "general");

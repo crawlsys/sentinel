@@ -10,7 +10,7 @@
 //!
 //! Autopilot authorization: if `SENTINEL_AUTOPILOT=1` is set, the ask prompt is
 //! downgraded to an `allow` with a context-only reminder, so `gh pr merge`
-//! doesn't interrupt the loop with a Yes/No dialog. Gary's CLAUDE.md still
+//! doesn't interrupt the loop with a Yes/No dialog. The operator's CLAUDE.md still
 //! requires in-conversation confirmation before hitting merge — this just
 //! prevents the harness-level dialog in autopilot mode.
 
