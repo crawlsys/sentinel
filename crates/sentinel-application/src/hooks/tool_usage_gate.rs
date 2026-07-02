@@ -19,6 +19,65 @@ use std::path::Path;
 
 use super::{EnvPort, FileSystemPort};
 
+// ── Config (shipped defaults + operator override) ────────────────────────
+//
+// Mirrors the `memory_provision` pattern: shipped TOML compiled in via
+// `include_str!`, wholesale-replaced by the operator override at
+// `~/.claude/sentinel/config/tool-usage-gate.toml` when present.
+const SHIPPED_DEFAULTS: &str = include_str!("../../../../config/tool-usage-gate-defaults.toml");
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolUsageGateConfig {
+    /// Check 1: require `mcp__sequential-thinking__sequentialthinking` in the
+    /// live transcript before mutating tools. `false` skips ONLY this check;
+    /// the task-list / plan-mode / in_progress-task checks are unaffected.
+    #[serde(default = "default_true")]
+    sequential_thinking_check: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for ToolUsageGateConfig {
+    fn default() -> Self {
+        Self {
+            sequential_thinking_check: true,
+        }
+    }
+}
+
+impl ToolUsageGateConfig {
+    /// Parse failures fall back to the enforced defaults (fail closed to
+    /// enforcement — a corrupt override must not silently relax the gate).
+    fn from_toml_or_default(s: &str) -> Self {
+        toml::from_str(s).unwrap_or_else(|e| {
+            eprintln!("[sentinel] tool_usage_gate: config TOML parse failed ({e}); using enforced defaults");
+            Self::default()
+        })
+    }
+}
+
+/// Load shipped defaults, then (if present) replace wholesale with the
+/// operator override file — same semantics as `memory_provision::load_config`.
+///
+/// The override path is rooted at `FileSystemPort::claude_dir()` (not
+/// `home_dir().join(".claude")`) so it honors adapters that override Claude's
+/// state directory, notably `SENTINEL_CLAUDE_DIR` for isolated sandbox profiles.
+fn load_config(fs: &dyn FileSystemPort) -> ToolUsageGateConfig {
+    let mut cfg = ToolUsageGateConfig::from_toml_or_default(SHIPPED_DEFAULTS);
+    let path = fs
+        .claude_dir()
+        .join("sentinel")
+        .join("config")
+        .join("tool-usage-gate.toml");
+    if let Ok(content) = fs.read_to_string(&path) {
+        cfg = ToolUsageGateConfig::from_toml_or_default(&content);
+    }
+    cfg
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlanState {
     Missing,
@@ -401,16 +460,25 @@ pub fn evaluate(
     // task_decomposition_gate had). When the server is absent we record the skip
     // and allow rather than demand a tool that cannot be called.
     if !transcript.sequential_thinking_used {
-        if sequential_thinking_mcp_registered(fs) {
+        if !load_config(fs).sequential_thinking_check {
+            // Operator opted out of Check 1 via
+            // ~/.claude/sentinel/config/tool-usage-gate.toml
+            // (sequential_thinking_check = false). Checks below still enforce.
+            eprintln!(
+                "[sentinel] tool_usage_gate: sequential-thinking check disabled by \
+                 operator config — skipping Check 1 (task/plan/active-task checks still enforced)."
+            );
+        } else if sequential_thinking_mcp_registered(fs) {
             evaluation.should_deny = true;
             evaluation.decision = ToolUsageDecision::DenyMissingSequentialThinking;
             return evaluation;
+        } else {
+            eprintln!(
+                "[sentinel] tool_usage_gate: sequential-thinking MCP not registered in \
+                 ~/.claude.json — skipping the seq-thinking requirement (cannot demand a \
+                 tool that does not exist this session)."
+            );
         }
-        eprintln!(
-            "[sentinel] tool_usage_gate: sequential-thinking MCP not registered in \
-             ~/.claude.json — skipping the seq-thinking requirement (cannot demand a \
-             tool that does not exist this session)."
-        );
     }
 
     if tasks.is_empty() {
@@ -802,6 +870,135 @@ mod tests {
             false,
         );
         assert_eq!(output.blocked, Some(true));
+        assert!(deny_reason(&output).contains("sequential-thinking"));
+    }
+
+    /// Seed the operator override config into the test home:
+    /// `~/.claude/sentinel/config/tool-usage-gate.toml`.
+    fn seed_gate_config(home: &Path, contents: &str) {
+        let dir = home.join(".claude").join("sentinel").join("config");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tool-usage-gate.toml"), contents).unwrap();
+    }
+
+    #[test]
+    fn operator_config_disables_check1_only() {
+        // Same setup as the block-template test above (seq-thinking NOT used,
+        // MCP registered so Check 1 would normally hard-block) — but with the
+        // operator override setting sequential_thinking_check = false. Check 1
+        // is skipped; the plan is approved and an in_progress task exists, so
+        // the edit is ALLOWED.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
+        seed_gate_config(home, "sequential_thinking_check = false\n");
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "operator config must skip Check 1 when other checks pass; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn operator_config_does_not_bypass_other_checks() {
+        // Check 1 disabled but NO task seeded → the task-list check must still
+        // block. Proves the config knob is Check-1-only, not a gate bypass.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
+        seed_gate_config(home, "sequential_thinking_check = false\n");
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "config knob must not bypass the task-list/active-task checks"
+        );
+        assert!(
+            !deny_reason(&output).contains("sequential-thinking"),
+            "block must come from a later check, not Check 1"
+        );
+    }
+
+    #[test]
+    fn corrupt_operator_config_fails_closed_to_enforcement() {
+        // An unparseable override must NOT relax the gate: Check 1 still blocks.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
+        seed_gate_config(home, "sequential_thinking_check = maybe???\n");
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "corrupt config must fail closed (Check 1 enforced)"
+        );
+        assert!(deny_reason(&output).contains("sequential-thinking"));
+    }
+
+    #[test]
+    fn operator_config_with_unknown_key_fails_closed_to_enforcement() {
+        // deny_unknown_fields: a typo'd key (e.g. `sequential_thinking_chekc`)
+        // must NOT be silently accepted. If it were, serde would ignore the
+        // unknown key, the intended `false` override would never apply, and the
+        // gate would stay enforced with no warning — confusing for operators.
+        // The override parse must fail, and `from_toml_or_default` must fall
+        // back to the enforced default (Check 1 on).
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
+        // Typo'd key + a *valid* `false` that should be ignored because the
+        // whole document is rejected on the unknown field.
+        seed_gate_config(
+            home,
+            "sequential_thinking_chekc = false\nsequential_thinking_check = false\n",
+        );
+        let transcript = write_transcript(&[assistant_tool_use("ExitPlanMode")]);
+        seed_task(home, "sess", "1", "Active", "in_progress");
+
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        // Unknown key => override rejected => enforced default (Check 1 on) =>
+        // seq-thinking absent from this transcript => blocked by Check 1.
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "unknown config key must fail closed (override rejected, Check 1 enforced)"
+        );
         assert!(deny_reason(&output).contains("sequential-thinking"));
     }
 
