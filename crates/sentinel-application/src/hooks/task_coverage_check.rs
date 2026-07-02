@@ -6,15 +6,22 @@
 //!
 //! 1. **Uncommitted-but-untracked**: there are uncommitted
 //!    file changes but NO `in_progress` task — work is happening off-book.
+//!    Debounced: the first off-book Stop warns immediately; while the same
+//!    condition persists it re-warns only every
+//!    [`OFFBOOK_REMINDER_INTERVAL`] stops; when the condition clears the
+//!    counter resets so the next off-book episode warns immediately again.
 //!
 //! 2. **Done-signal nudge**: there is ≥1 `in_progress` task AND this turn
 //!    produced a "looks done" signal — a new commit since the last Stop (HEAD
 //!    SHA changed), a PR reference, or a successful test/build run in the last
 //!    assistant message. Prompts the agent to mark the task ✅ via `TaskUpdate`.
+//!    (Event-driven, so it does not loop and needs no debounce.)
 //!
 //! 3. **Stale nudge**: an `in_progress` task has persisted across ≥3
 //!    consecutive Stop events without leaving the in-progress set. Prompts the
-//!    agent to update status or confirm the task is still active.
+//!    agent to update status or confirm the task is still active. Debounced:
+//!    fires at exact multiples of the threshold (stops 3, 6, 9, …), not on
+//!    every stop past it.
 //!
 //! **Fail-visible contract**: task/git/state read failures inject explicit
 //! `[Sentinel-Authority]` context. This hook still never blocks Stop, but it
@@ -30,6 +37,9 @@
 //! - `coverage-inprogress-{session_id}` — `id=stop-count` lines tracking how
 //!   many consecutive Stops each in-progress task has persisted (drives the
 //!   stale nudge).
+//! - `coverage-offbook-{session_id}` — count of consecutive Stops the
+//!   off-book condition (uncommitted changes, no in-progress task) has
+//!   persisted (drives the debounced uncommitted-but-untracked warning).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,8 +49,14 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
 /// Number of consecutive Stop events an `in_progress` task may persist
-/// (unchanged) before the stale nudge fires.
+/// (unchanged) before the stale nudge fires. The nudge repeats at exact
+/// multiples of this threshold (3, 6, 9, …) rather than on every stop past it.
 const STALE_STOP_THRESHOLD: u32 = 3;
+
+/// While the off-book condition persists, the uncommitted-but-untracked warning
+/// re-fires every configured interval after warning immediately on the first
+/// Stop. Keeps the reminder alive without repeating it verbatim on every turn.
+const OFFBOOK_REMINDER_INTERVAL: u32 = 5;
 
 /// Minimal task shape — only the fields this hook needs. Matches Claude Code's
 /// on-disk task JSON; extra fields are ignored.
@@ -121,6 +137,62 @@ fn head_sha_marker(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf>
 /// Path for the in-progress stop-count marker for this session.
 fn inprogress_marker(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     Some(state_dir(fs)?.join(format!("coverage-inprogress-{session_id}")))
+}
+
+/// Path for the consecutive off-book stop-count marker for this session.
+fn offbook_marker(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    Some(state_dir(fs)?.join(format!("coverage-offbook-{session_id}")))
+}
+
+/// Read the consecutive off-book stop count. An absent or empty file is a
+/// valid zero; unreadable or malformed content is reported.
+fn read_offbook_count(fs: &dyn FileSystemPort, session_id: &str) -> Result<u32, String> {
+    let path = offbook_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage off-book marker".to_string())?;
+    if !fs.exists(&path) {
+        return Ok(0);
+    }
+    let content = fs.read_to_string(&path).map_err(|err| {
+        format!(
+            "failed to read coverage off-book marker {}: {err}",
+            path.display()
+        )
+    })?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u32>().map_err(|err| {
+        format!(
+            "invalid stop count in coverage off-book marker {}: {err}",
+            path.display()
+        )
+    })
+}
+
+/// Persist the consecutive off-book stop count.
+fn write_offbook_count(
+    fs: &dyn FileSystemPort,
+    session_id: &str,
+    count: u32,
+) -> Result<(), String> {
+    let path = offbook_marker(fs, session_id)
+        .ok_or_else(|| "cannot determine state dir for coverage off-book marker".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs.create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create coverage state dir {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    fs.write(&path, count.to_string().as_bytes())
+        .map_err(|err| {
+            format!(
+                "failed to write coverage off-book marker {}: {err}",
+                path.display()
+            )
+        })
 }
 
 /// Read the previously-recorded HEAD SHA for this session (trimmed). Empty or
@@ -346,7 +418,10 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     // ---- Decide which reminder (if any) to inject ------------------------
 
-    // No in_progress task: uncommitted work is happening off-book.
+    // No in_progress task: uncommitted work is happening off-book. Debounced:
+    // warn on the first off-book Stop, then only every
+    // OFFBOOK_REMINDER_INTERVAL stops while the condition persists; reset the
+    // episode counter as soon as the condition clears.
     if in_progress.is_empty() {
         let has_changes = match ctx.git.has_uncommitted_changes(cwd) {
             Ok(has_changes) => has_changes,
@@ -356,13 +431,41 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
                 ));
             }
         };
+        let prev_offbook = match read_offbook_count(ctx.fs, session_id) {
+            Ok(count) => count,
+            Err(err) => return authority_context(err),
+        };
         if !has_changes {
+            if prev_offbook != 0 {
+                if let Err(err) = write_offbook_count(ctx.fs, session_id, 0) {
+                    return authority_context(err);
+                }
+            }
+            return HookOutput::allow();
+        }
+        let count = prev_offbook.saturating_add(1);
+        if let Err(err) = write_offbook_count(ctx.fs, session_id, count) {
+            return authority_context(err);
+        }
+        if count != 1 && count % OFFBOOK_REMINDER_INTERVAL != 0 {
             return HookOutput::allow();
         }
         let context = "[Task Coverage] WARNING: Uncommitted file changes detected but no task is \
              in_progress. All work should be tracked as a task. Create a task with `TaskCreate` \
              and mark it `in_progress` with `TaskUpdate` to track this work.";
         return HookOutput::inject_context(HookEvent::Stop, context);
+    }
+
+    // An in_progress task exists, so any off-book episode is over — reset the
+    // counter so the next episode warns immediately.
+    let prev_offbook = match read_offbook_count(ctx.fs, session_id) {
+        Ok(count) => count,
+        Err(err) => return authority_context(err),
+    };
+    if prev_offbook != 0 {
+        if let Err(err) = write_offbook_count(ctx.fs, session_id, 0) {
+            return authority_context(err);
+        }
     }
 
     // There IS at least one in_progress task. Done-signal first (commit, PR, or
@@ -386,9 +489,14 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     }
 
     // Stale check: any in_progress task that has persisted ≥ threshold stops.
+    // Debounced to exact multiples of the threshold (3, 6, 9, …) so the nudge
+    // repeats periodically instead of on every stop past the threshold.
     let stale: Vec<&Task> = in_progress
         .iter()
-        .filter(|t| new_counts.get(&t.id).copied().unwrap_or(0) >= STALE_STOP_THRESHOLD)
+        .filter(|t| {
+            let count = new_counts.get(&t.id).copied().unwrap_or(0);
+            count >= STALE_STOP_THRESHOLD && count % STALE_STOP_THRESHOLD == 0
+        })
         .copied()
         .collect();
     if !stale.is_empty() {
@@ -718,8 +826,10 @@ mod tests {
         let mem = StubMemoryMcp;
         let env = StubEnv::new();
 
-        // No HEAD movement, no done text → only staleness can fire.
-        for stop in 1..=3 {
+        // No HEAD movement, no done text → only staleness can fire. Debounced:
+        // nudges land on exact multiples of the threshold (stops 3 and 6) and
+        // are suppressed in between (stops 4 and 5).
+        for stop in 1..=6 {
             let fs = ScopedHomeFs { home: home.clone() };
             let git = FakeGit {
                 head: RefCell::new(Some("stable".to_string())),
@@ -728,17 +838,88 @@ mod tests {
             let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
             let input = input_for(sid, home.to_str().unwrap(), Some("still working"));
             let out = process(&input, &ctx);
-            if stop < 3 {
-                assert!(
-                    injected_text(&out).is_none(),
-                    "stop {stop} must NOT nudge yet (below threshold)"
-                );
-            } else {
-                let msg = injected_text(&out).expect("stop 3 must trigger the stale nudge");
+            if stop % 3 == 0 {
+                let msg = injected_text(&out).expect("stops 3 and 6 must trigger the stale nudge");
                 assert!(msg.contains("in_progress for a while"));
                 assert!(msg.contains("#9"));
+            } else {
+                assert!(
+                    injected_text(&out).is_none(),
+                    "stop {stop} must NOT nudge (below threshold or debounced)"
+                );
             }
         }
+    }
+
+    #[test]
+    fn off_book_warning_debounced_after_first_fire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let sid = "sess-offbook-debounce";
+        seed_tasks(&home, sid, &[("1", "pending")]);
+
+        let proc_stub = StubProcess;
+        let mem = StubMemoryMcp;
+        let env = StubEnv::new();
+
+        // Condition persists across 5 stops → warn at 1, silent 2–4, re-warn
+        // at OFFBOOK_REMINDER_INTERVAL.
+        for stop in 1..=5 {
+            let fs = ScopedHomeFs { home: home.clone() };
+            let git = FakeGit {
+                head: RefCell::new(Some("x".to_string())),
+                uncommitted: true,
+            };
+            let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
+            let input = input_for(sid, home.to_str().unwrap(), None);
+            let out = process(&input, &ctx);
+            if stop == 1 || stop == 5 {
+                let msg = injected_text(&out)
+                    .unwrap_or_else(|| panic!("stop {stop} must warn (first fire / interval)"));
+                assert!(msg.contains("Uncommitted file changes detected"));
+            } else {
+                assert!(
+                    injected_text(&out).is_none(),
+                    "stop {stop} must be debounced"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn off_book_counter_resets_when_condition_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let sid = "sess-offbook-reset";
+        seed_tasks(&home, sid, &[("1", "pending")]);
+
+        let proc_stub = StubProcess;
+        let mem = StubMemoryMcp;
+        let env = StubEnv::new();
+
+        let run = |uncommitted: bool| {
+            let fs = ScopedHomeFs { home: home.clone() };
+            let git = FakeGit {
+                head: RefCell::new(Some("x".to_string())),
+                uncommitted,
+            };
+            let ctx = ctx_with(&fs, &git, &proc_stub, &mem, &env);
+            let input = input_for(sid, home.to_str().unwrap(), None);
+            process(&input, &ctx)
+        };
+
+        // Episode 1: first off-book stop warns.
+        let out = run(true);
+        assert!(injected_text(&out).is_some(), "episode 1 must warn");
+        // Condition clears (clean tree) → counter resets, no warning.
+        let out = run(false);
+        assert!(injected_text(&out).is_none(), "clean tree must not warn");
+        // Episode 2: condition returns → warns immediately, not debounced.
+        let out = run(true);
+        assert!(
+            injected_text(&out).is_some(),
+            "a new off-book episode must warn immediately after a reset"
+        );
     }
 
     #[test]
