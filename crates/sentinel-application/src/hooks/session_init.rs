@@ -165,6 +165,62 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // 4. Cache Linear team keys for skill router
     cache_linear_team_keys(&claude_dir);
 
+    // 4.5. MCP registration guardian — detect / snapshot / heal the
+    // `mcpServers` block in ~/.claude.json. When a heal lands, the standing
+    // `/reload-plugins` initialUserMessage autoheal (step 10 below) reconnects
+    // the restored servers in the same session.
+    let guardian = crate::paths::home_root().ok().map(|home| {
+        crate::mcp_guardian::run(
+            ctx.process,
+            ctx.env,
+            &home,
+            &claude_dir,
+            find_marketplace_repo().as_deref(),
+        )
+    });
+    if let Some(report) = &guardian {
+        if report.tripwire {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                "state".to_string(),
+                serde_json::json!(format!("{:?}", report.state)),
+            );
+            meta.insert("mcp_repos".to_string(), serde_json::json!(report.mcp_repos));
+            meta.insert(
+                "healed".to_string(),
+                serde_json::json!(report.heal.is_some()),
+            );
+            if let Some(heal) = &report.heal {
+                meta.insert(
+                    "healed_entries".to_string(),
+                    serde_json::json!(heal.entries),
+                );
+                meta.insert(
+                    "heal_source".to_string(),
+                    serde_json::json!(heal.source.to_string()),
+                );
+            }
+            crate::channel_events::emit(
+                ctx.fs,
+                ctx.env,
+                "mcp_registration_missing",
+                &format!(
+                    "MCP registration compromised in ~/.claude.json (state: {:?}, {} MCP repos on disk){}",
+                    report.state,
+                    report.mcp_repos,
+                    report.heal.as_ref().map_or_else(
+                        || " — NOT healed, manual restore needed".to_string(),
+                        |h| format!(" — healed {} entries from {}", h.entries, h.source)
+                    ),
+                ),
+                meta,
+                input.session_id.as_deref(),
+                input.cwd.as_deref(),
+                Some("mcp_guardian"),
+            );
+        }
+    }
+
     // 5. Generate CLAUDE.md with dynamic counts + project data + live tasks.
     //    The Active Tasks section is kept in sync by TaskCreated / TaskCompleted
     //    hook handlers that call `regenerate_global_claude_md()`.
@@ -196,6 +252,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         &counts,
         session_label,
         &init_result,
+        &guardian,
     );
 
     // 8. Build watch paths for FileChanged monitoring
@@ -1820,6 +1877,7 @@ fn build_startup_context(
     counts: &ComponentCounts,
     session_id: &str,
     init_result: &Option<sentinel_domain::project::InitResult>,
+    guardian: &Option<crate::mcp_guardian::GuardianReport>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -1887,6 +1945,40 @@ fn build_startup_context(
                 .map(|(f, e)| format!("{}: {}", f.path(), e))
                 .collect();
             parts.push(format!("[Project Init] Errors: {}", err_names.join("; ")));
+        }
+    }
+
+    // MCP registration guardian — loud tripwire + heal report
+    if let Some(report) = guardian {
+        if report.tripwire {
+            parts.push(format!(
+                "[MCP REGISTRATION MISSING] live ~/.claude.json registry state: {:?} while {} MCP repos exist on disk",
+                report.state, report.mcp_repos
+            ));
+        }
+        if let Some(heal) = &report.heal {
+            parts.push(format!(
+                "[MCP Guardian] HEALED {} MCP registration(s) from {} into {} config file(s) — /reload-plugins queued to reconnect",
+                heal.entries,
+                heal.source,
+                heal.merged_files.len()
+            ));
+            if !heal.unresolved_env.is_empty() {
+                parts.push(format!(
+                    "[MCP Guardian] WARNING: unresolved $doppler env refs omitted (degraded entries): {}",
+                    heal.unresolved_env.join(", ")
+                ));
+            }
+        } else if report.tripwire {
+            parts.push(
+                "[MCP Guardian] heal did NOT run — restore ~/.claude.json manually from ~/.claude/sentinel/state/mcp-registry/".to_string(),
+            );
+        }
+        if !report.warnings.is_empty() {
+            parts.push(format!(
+                "[MCP Guardian] warnings: {}",
+                report.warnings.join("; ")
+            ));
         }
     }
 
@@ -2173,7 +2265,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "test-sess", &None);
+        let context = build_startup_context(&sync, &validation, &counts, "test-sess", &None, &None);
         assert!(context.contains("No local repo found"));
         assert!(context.contains("50 skills"));
         assert!(context.contains("test-sess"));
@@ -2198,7 +2290,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &None);
         assert!(context.contains("42 files synced"));
         assert!(context.contains("(pulled)"));
     }
@@ -2219,7 +2311,7 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &None);
         assert!(context.contains("Up to date"));
     }
 
@@ -2239,9 +2331,75 @@ mod tests {
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &None);
         assert!(context.contains("[Validation] FAILED"));
         assert!(context.contains("settings.json missing"));
+    }
+
+    #[test]
+    fn test_guardian_tripwire_and_heal_banner_in_context() {
+        let sync = SyncResult::UpToDate;
+        let validation = ValidationResult {
+            valid: true,
+            reasons: vec![],
+        };
+        let counts = ComponentCounts {
+            skills: 0,
+            hooks: 0,
+            commands: 0,
+            agents: 0,
+            mcp_servers: 0,
+            mcp_repos: 54,
+            cli_repos: 0,
+        };
+
+        // Tripwire without a heal: loud line + manual-restore pointer.
+        let unhealed = Some(crate::mcp_guardian::GuardianReport {
+            state: crate::scanner::McpRegistryState::Unreadable,
+            mcp_repos: 54,
+            tripwire: true,
+            snapshot_written: false,
+            heal: None,
+            warnings: vec!["~/.claude.json is unreadable".to_string()],
+        });
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &unhealed);
+        assert!(context.contains("[MCP REGISTRATION MISSING]"));
+        assert!(context.contains("Unreadable"));
+        assert!(context.contains("heal did NOT run"));
+
+        // Tripwire with a successful heal: heal line replaces the manual pointer.
+        let healed = Some(crate::mcp_guardian::GuardianReport {
+            state: crate::scanner::McpRegistryState::Missing,
+            mcp_repos: 54,
+            tripwire: true,
+            snapshot_written: false,
+            heal: Some(crate::mcp_guardian::HealOutcome {
+                source: crate::mcp_guardian::HealSource::Marketplace,
+                entries: 40,
+                merged_files: vec![std::path::PathBuf::from(".claude.json")],
+                unresolved_env: vec!["linear.LINEAR_API_KEY".to_string()],
+            }),
+            warnings: vec![],
+        });
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &healed);
+        assert!(context.contains("[MCP REGISTRATION MISSING]"));
+        assert!(context.contains("HEALED 40 MCP registration(s) from marketplace"));
+        assert!(context.contains("/reload-plugins queued"));
+        assert!(context.contains("linear.LINEAR_API_KEY"));
+        assert!(!context.contains("heal did NOT run"));
+
+        // Healthy pass: no guardian noise at all.
+        let healthy = Some(crate::mcp_guardian::GuardianReport {
+            state: crate::scanner::McpRegistryState::Count(40),
+            mcp_repos: 54,
+            tripwire: false,
+            snapshot_written: true,
+            heal: None,
+            warnings: vec![],
+        });
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &healthy);
+        assert!(!context.contains("[MCP REGISTRATION MISSING]"));
+        assert!(!context.contains("[MCP Guardian]"));
     }
 
     #[test]
@@ -2600,7 +2758,7 @@ issue_prefix: TEAMA
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1", &init_result);
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &init_result, &None);
         assert!(context.contains("[Project Init] Auto-generated 3 standard file(s)"));
         assert!(context.contains("LICENSE"));
         assert!(context.contains("SECURITY.md"));
@@ -2623,7 +2781,7 @@ issue_prefix: TEAMA
             mcp_repos: 0,
             cli_repos: 0,
         };
-        let context = build_startup_context(&sync, &validation, &counts, "s1", &None);
+        let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &None);
         assert!(!context.contains("[Project Init]"));
     }
 
