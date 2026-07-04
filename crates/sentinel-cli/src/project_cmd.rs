@@ -409,7 +409,7 @@ Examples that don't fit (and where they belong):
 
 - "Use `RUST_LOG=debug` for verbose logs" → CONTRIBUTING.md or README.
 - "Slack thinks pizza is a vegetable" → Slack.
-- "Gary prefers terse PR descriptions" → `~/.claude/projects/<project>/memory/` (global, applies across repos).
+- "The user prefers terse PR descriptions" → `~/.claude/projects/<project>/memory/` (global, applies across repos).
 
 ## Schema
 

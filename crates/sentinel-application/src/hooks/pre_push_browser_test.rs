@@ -157,7 +157,7 @@ fn has_recent_browser_test(fs: &dyn super::FileSystemPort, session_id: &str) -> 
 }
 
 /// Extract the repo directory name from a cwd path.
-/// e.g. "C:\Users\garys\Documents\GitHub\firefly-pro-crm" → "firefly-pro-crm"
+/// e.g. "C:\Users\operator\Documents\GitHub\firefly-pro-crm" → "firefly-pro-crm"
 /// Also handles worktree paths like "repo--branch-name" by stripping the "--" suffix.
 fn repo_name_from_cwd(cwd: &str) -> Option<String> {
     let path = std::path::Path::new(cwd);

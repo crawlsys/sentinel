@@ -399,12 +399,12 @@ mod tests {
                 "base": { "ref": "main" }
             },
             "repository": { "full_name": "fireflypro/firefly-pro-crm" },
-            "sender": { "login": "garysomerhalder" }
+            "sender": { "login": "legatus-ai" }
         });
         let d = decode("github", Some("pull_request"), &body);
         assert_eq!(
             d.summary,
-            "[GITHUB] PR #658 merged to main by @garysomerhalder (sha e22f87a) in fireflypro/firefly-pro-crm"
+            "[GITHUB] PR #658 merged to main by @legatus-ai (sha e22f87a) in fireflypro/firefly-pro-crm"
         );
     }
 
@@ -469,12 +469,12 @@ mod tests {
             "after": "5a0201f0123456789abcdef",
             "commits": [{ "id": "1" }, { "id": "2" }, { "id": "3" }],
             "repository": { "full_name": "o/r" },
-            "pusher": { "name": "gary" }
+            "pusher": { "name": "operator" }
         });
         let d = decode("github", Some("push"), &body);
         assert_eq!(
             d.summary,
-            "[GITHUB] Push: 3 commit(s) to main in o/r (head 5a0201f) by @gary"
+            "[GITHUB] Push: 3 commit(s) to main in o/r (head 5a0201f) by @operator"
         );
     }
 
@@ -483,11 +483,11 @@ mod tests {
         let body = json!({
             "action": "submitted",
             "pull_request": { "number": 42 },
-            "review": { "state": "approved", "user": { "login": "pedro" } },
+            "review": { "state": "approved", "user": { "login": "qa-reviewer" } },
             "repository": { "full_name": "o/r" }
         });
         let d = decode("github", Some("pull_request_review"), &body);
-        assert_eq!(d.summary, "[GITHUB] @pedro approved PR #42 in o/r");
+        assert_eq!(d.summary, "[GITHUB] @qa-reviewer approved PR #42 in o/r");
     }
 
     #[test]

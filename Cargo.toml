@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.4.1"
 edition = "2021"
-authors = ["Gary Somerhalder"]
+authors = ["Kevin Crawley <kevin@legatus.io>", "Gary Somerhalder <gary@legatus.io>"]
 license = "MIT"
 repository = "https://github.com/legatus-ai/sentinel"
 rust-version = "1.87"
@@ -99,6 +99,14 @@ colored = "3"
 glob = "0.3"
 fs2 = "0.4"
 getrandom = "0.2"
+# Telemetry spool batches (LEG-259) are zstd-compressed NDJSON staged for
+# the R2 data lake (`sentinel telemetry collect`).
+zstd = "0.13"
+# Read-only access to the ldesk `legatus.db` for the LEG-261 agent
+# $/issue usage-rollup snapshot source (`telemetry::snapshot`). Bundled
+# so the build never depends on the system libsqlite3 (and the window
+# functions the rollup query needs are guaranteed present).
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Dev
 tempfile = "3"

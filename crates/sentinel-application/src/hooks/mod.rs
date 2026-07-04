@@ -39,6 +39,7 @@ pub mod mcp_health;
 pub mod memory_extract;
 pub mod memory_feedback;
 pub mod memory_inject;
+pub mod memory_provision;
 pub mod memory_turn_capture;
 pub mod memory_verify;
 pub mod orchestration_nudge;
@@ -280,6 +281,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "memory_extract",
     "memory_feedback",
     "memory_inject",
+    "memory_provision",
     "memory_turn_capture",
     "memory_verify",
     "orchestration_nudge",
@@ -799,17 +801,18 @@ mod project_hash_tests {
     #[test]
     fn worktree_collapse_invariant_holds_for_project_hash() {
         // The whole point: main repo and any worktree of it produce the same hash.
-        let main = "/Users/gary/Documents/GitHub/sentinel";
-        let wt_a = "/Users/gary/Documents/GitHub/sentinel/.claude/worktrees/feat-stepproof";
-        let wt_b = "/Users/gary/Documents/GitHub/sentinel/.claude/worktrees/feat-other/crates/x";
+        let main = "/Users/operator/Documents/GitHub/sentinel";
+        let wt_a = "/Users/operator/Documents/GitHub/sentinel/.claude/worktrees/feat-stepproof";
+        let wt_b =
+            "/Users/operator/Documents/GitHub/sentinel/.claude/worktrees/feat-other/crates/x";
         assert_eq!(project_hash(main), project_hash(wt_a));
         assert_eq!(project_hash(main), project_hash(wt_b));
     }
 
     #[test]
     fn project_hash_distinguishes_different_repos() {
-        let a = "/Users/gary/Documents/GitHub/sentinel";
-        let b = "/Users/gary/Documents/GitHub/twilio-mcp-rust";
+        let a = "/Users/operator/Documents/GitHub/sentinel";
+        let b = "/Users/operator/Documents/GitHub/twilio-mcp-rust";
         assert_ne!(project_hash(a), project_hash(b));
     }
 

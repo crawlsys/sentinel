@@ -615,7 +615,9 @@ mod tests {
     #[test]
     fn test_flutter_exception() {
         assert!(is_flutter_sdk_path("/home/user/dev/flutter/bin"));
-        assert!(is_flutter_sdk_path(r"C:\Users\gary\dev\flutter\packages"));
+        assert!(is_flutter_sdk_path(
+            r"C:\Users\operator\dev\flutter\packages"
+        ));
         assert!(!is_flutter_sdk_path("/home/user/projects/my-app"));
     }
 

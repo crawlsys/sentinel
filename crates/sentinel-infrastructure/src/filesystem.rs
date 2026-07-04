@@ -58,6 +58,49 @@ impl FileSystemPort for RealFileSystem {
             .map_err(FileSystemError::backend)
     }
 
+    /// Owner-only write for credential material (0600 on unix), with no
+    /// window where the secret bytes sit world-readable on disk:
+    /// * a FRESH file is created with mode 0600 (`OpenOptionsExt::mode`
+    ///   applies at creation) — never 0644-then-chmod;
+    /// * an EXISTING file is tightened to 0600 BEFORE it is truncated and the
+    ///   new content is written into it (`mode()` is ignored for existing
+    ///   files, and chmod-after-write would expose the fresh secret through
+    ///   the old loose mode for the duration of the write).
+    #[cfg(unix)]
+    fn write_private(&self, path: &Path, content: &[u8]) -> Result<()> {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {}", parent.display()))
+                .map_err(FileSystemError::backend)?;
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)
+                .with_context(|| format!("chmod 0600 {}", path.display()))
+                .map_err(FileSystemError::backend)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("open private {}", path.display()))
+            .map_err(FileSystemError::backend)?;
+        file.write_all(content)
+            .with_context(|| format!("write private {}", path.display()))
+            .map_err(FileSystemError::backend)
+    }
+
+    /// Non-unix: no POSIX mode bits — behaves like `write` (keeps the crate
+    /// compiling on Windows; NTFS ACLs are out of scope here).
+    #[cfg(not(unix))]
+    fn write_private(&self, path: &Path, content: &[u8]) -> Result<()> {
+        self.write(path, content)
+    }
+
     fn replace_file_atomic(&self, path: &Path, content: &[u8]) -> Result<()> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)
@@ -388,6 +431,30 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn write_private_creates_0600_and_tightens_existing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fs = RealFileSystem;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Fresh file: created 0600, no world-readable window.
+        let fresh = dir.path().join("cred.json");
+        fs.write_private(&fresh, b"secret").unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh private file must be 0600");
+        assert_eq!(fs.read_to_string(&fresh).unwrap(), "secret");
+
+        // Pre-existing 0644 file: mode tightened on rewrite.
+        let existing = dir.path().join("cred2.json");
+        std::fs::write(&existing, b"old").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).unwrap();
+        fs.write_private(&existing, b"new-secret").unwrap();
+        let mode = std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "existing file must be tightened to 0600");
+        assert_eq!(fs.read_to_string(&existing).unwrap(), "new-secret");
+    }
+
     #[test]
     fn replace_file_atomic_replaces_existing_file() {
         let fs = RealFileSystem;
@@ -417,10 +484,10 @@ mod tests {
     #[test]
     fn is_metrics_jsonl_classifier() {
         assert!(is_metrics_jsonl(Path::new(
-            "/c/Users/garys/.claude/sentinel/metrics/sessions.jsonl"
+            "/c/Users/operator/.claude/sentinel/metrics/sessions.jsonl"
         )));
         assert!(is_metrics_jsonl(Path::new(
-            "C:\\Users\\garys\\.claude\\sentinel\\metrics\\errors.jsonl"
+            "C:\\Users\\operator\\.claude\\sentinel\\metrics\\errors.jsonl"
         )));
         // Wrong extension
         assert!(!is_metrics_jsonl(Path::new("/sentinel/metrics/state.json")));

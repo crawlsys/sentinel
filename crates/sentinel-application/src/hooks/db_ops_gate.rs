@@ -96,7 +96,7 @@ pub fn evaluate(input: &HookInput) -> DbOpsEvaluation {
     let block_reason = should_block.then(|| {
         "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
          NEVER run database migrations or destructive operations in production. \
-         NO EXCEPTIONS — even if Gary says it's okay."
+         NO EXCEPTIONS — even if the user says it's okay."
             .to_string()
     });
 

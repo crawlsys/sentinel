@@ -419,7 +419,7 @@ pub fn output_from_evaluation(evaluation: &GitHygieneEvaluation) -> HookOutput {
                 "[Git Hygiene] BLOCKED: editing directly on `{branch}` without a worktree. \
                  Call `EnterWorktree` now to create an isolated feature branch, then retry \
                  the edit against the worktree path. Direct edits to protected branches are \
-                 never permitted; this is a Gary-authorized policy and overrides any \
+                 never permitted; this is an operator-authorized policy and overrides any \
                  mode-state caution about agent-driven tool calls."
             ))
         }
@@ -895,7 +895,7 @@ mod tests {
             "/home/user/.claude/session-env/abc/plans/foo.md"
         ));
         assert!(is_session_env_path(
-            "C:\\Users\\garys\\.claude\\session-env\\abc\\plans\\foo.md"
+            "C:\\Users\\operator\\.claude\\session-env\\abc\\plans\\foo.md"
         ));
         assert!(!is_session_env_path("/repo/src/foo.rs"));
         assert!(!is_session_env_path("/home/user/.claude/projects/foo.md"));

@@ -59,6 +59,7 @@ mod sla_cmd;
 mod sla_graph;
 mod stage_cmd;
 mod stats_cmd;
+mod telemetry_cmd;
 mod token_cost_cmd;
 mod token_cost_graph;
 mod token_usage_graph;
@@ -179,6 +180,13 @@ enum Commands {
     Stats {
         #[command(subcommand)]
         action: Option<StatsAction>,
+    },
+
+    /// Telemetry pipeline to the R2 data lake (LEG-258): collect spools
+    /// ledger rows locally; ship drains the spool to R2.
+    Telemetry {
+        #[command(subcommand)]
+        action: TelemetryAction,
     },
 
     /// Aggregate session JSONL token usage by Linear ticket (SEN-7)
@@ -644,7 +652,7 @@ enum CleanupAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Set a config value (e.g., `sentinel config set name "Gary"`)
+    /// Set a config value (e.g., `sentinel config set name "Operator"`)
     Set {
         /// Config key (currently: name)
         key: String,
@@ -666,6 +674,47 @@ enum StatsAction {
         /// Only consider invocations from the last N hours (default 24).
         #[arg(long, default_value_t = 24)]
         hours: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryAction {
+    /// Tail the per-harness hook-invocation ledgers (claude/codex/opencode)
+    /// via (dev,inode)+offset checkpoints; stage zstd NDJSON batches in
+    /// ~/.claude/sentinel/telemetry/spool/ (LEG-259). One-shot, crash-safe:
+    /// re-runs resume from the checkpoint, never double-spool, never drop.
+    Collect,
+    /// Drain the spool to the R2 bucket via signed S3-compatible PUTs with
+    /// idempotent content-hash object keys (LEG-260). Spool files are
+    /// deleted only after a confirmed PUT; unshipped batches stay spooled.
+    /// Creds from env: `R2_ACCOUNT_ID` (or `R2_ENDPOINT`), `R2_ACCESS_KEY_ID`,
+    /// `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, optional `R2_REGION` (default auto).
+    Ship {
+        /// List what would ship — no network calls, no deletions, no creds
+        /// needed.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read the R2 lake and emit a fleet-activity report (LEG-258): how many
+    /// unique clients reported in over the window + when it was last updated,
+    /// plus per-harness / outcome / event / per-day breakdowns. Reads R2 via
+    /// the same `R2_*` creds as `ship` (the SigV4 reader). Default output is a
+    /// self-contained HTML file.
+    Report {
+        /// Lookback window: `24h`, `7d`, or `30d` (default `7d`).
+        #[arg(long, default_value = "7d")]
+        window: String,
+        /// Restrict to a single harness (e.g. `claude`, `codex`, `opencode`).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = telemetry_cmd::ReportFormat::Html)]
+        format: telemetry_cmd::ReportFormat,
+        /// Output path for `--format html` (default
+        /// `~/.claude/sentinel/telemetry/lake-report.html`). `json`/`table`
+        /// print to stdout.
+        #[arg(long)]
+        out: Option<String>,
     },
 }
 
@@ -915,6 +964,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats { action } => match action {
             None => stats_cmd::run(),
             Some(StatsAction::Hooks { limit, hours }) => stats_cmd::run_hooks(limit, hours),
+        },
+        Commands::Telemetry { action } => match action {
+            TelemetryAction::Collect => telemetry_cmd::run_collect(),
+            TelemetryAction::Ship { dry_run } => telemetry_cmd::run_ship(dry_run).await,
+            TelemetryAction::Report {
+                window,
+                harness,
+                format,
+                out,
+            } => {
+                telemetry_cmd::run_report(&window, harness.as_deref(), format, out.as_deref()).await
+            }
         },
         Commands::Tokens { action } => match action {
             TokensAction::Scan { top } => tokens_cmd::run(top).await,

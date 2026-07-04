@@ -1,13 +1,13 @@
 # BA6 — Connector Layer Scoping
 
-**Status:** Proposed (scoping doc; pending Gary's ratification of direction, not detail)
+**Status:** Proposed (scoping doc; pending operator ratification of direction, not detail)
 **Author:** Jared (drafted with Claude Opus 4.7)
 **Date:** 2026-05-16
 **Source brief:** `docs/ai-factory-brief.md` — recommendation **BA6** (S-tier; product-critical)
 **Related:**
 - `docs/policy-replay-mining-quarantine.md` (R5)
 - `docs/policy-no-auto-summary-without-critique.md` (R8 / acute in BA context)
-- Legatus AI side ADRs at `garysomerhalder/legatus-ai:docs/adr/` — ADR-016 (Legatus AI Peer Registration), ADR-017 (Artifact + Requirement Metadata Extensions), forward-reference ADR-018 (Legatus AI peer Capability Tokens, not yet drafted).
+- Legatus AI side ADRs at `legatus-ai/legatus-ai:docs/adr/` — ADR-016 (Legatus AI Peer Registration), ADR-017 (Artifact + Requirement Metadata Extensions), forward-reference ADR-018 (Legatus AI Peer Capability Tokens, not yet drafted).
 
 ---
 
@@ -20,7 +20,7 @@ BA6 is the connector layer that feeds the BA-vertical product its data. The brie
 - **Contract every connector must honor**: provenance metadata on every artifact, content-hashing for change detection, scoped capability tokens, audit emission, failure-mode taxonomy.
 - **What is *not* in scope** for this doc: any actual implementation, vendor SDK choice, deployment topology, or commercial connector ecosystem decisions.
 
-This is a *direction* document. Gary ratifies direction; the connector contract becomes a separate ADR once implementation begins.
+This is a *direction* document. The operator ratifies direction; the connector contract becomes a separate ADR once implementation begins.
 
 ---
 
@@ -249,7 +249,7 @@ Each *specific* decision (which connector first ships, which framework it uses, 
 ## 9. Decision and ownership
 
 - **Decision class:** scoping / direction. Not a quarantine (R5), not a governance retirement (R1/R2/R3/R8/R14), not an architectural commitment (an ADR).
-- **Owner:** Gary Somerhalder ratifies direction; per-connector implementation ADRs need separate ratification.
+- **Owner:** The operator ratifies direction; per-connector implementation ADRs need separate ratification.
 - **Re-evaluation cadence:** revisit when the first connector ships, to see if the contract held up under real implementation.
 - **Related items in the brief:** BA6 (this scoping), BA1 (citations — direct downstream), BA2 (two-mode discovery — direct downstream), BA3 (traceability matrix — direct downstream).
 
@@ -261,7 +261,7 @@ No literature citations needed — this doc is a direction-setting scoping for a
 
 ## 11. Ratification
 
-This document is **proposed direction**. Gary's ratification commits Sentinel to:
+This document is **proposed direction**. Operator ratification commits Sentinel to:
 - The starter connector set (Linear, Confluence, Notion, Drive in that order).
 - The contract every connector honors (§3).
 - The hex/DDD-respecting integration shape (§4).
@@ -269,5 +269,5 @@ This document is **proposed direction**. Gary's ratification commits Sentinel to
 
 Per-connector implementation ADRs follow, each separately ratifiable.
 
-**Ratified by:** _________________________ (Gary Somerhalder)
+**Ratified by:** _________________________
 **Date:** _________________________

@@ -30,9 +30,15 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 fs2 = { workspace = true }
+zstd = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# In-process fake S3 endpoint for the telemetry ship tests (LEG-260) —
+# proves idempotent re-ship / retry-on-5xx / delete-after-confirm at the
+# wire level without a real bucket.
+axum = { workspace = true }
 
 [lints]
 workspace = true

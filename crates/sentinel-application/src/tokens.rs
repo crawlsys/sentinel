@@ -293,7 +293,7 @@ fn ticket_regex() -> &'static regex::Regex {
 
 /// Extract the first known-prefix ticket id from an arbitrary string
 /// (typically a Claude-Code path slug like
-/// `C--Users-garys-...-feat-fpcrm-289-foo`).
+/// `C--Users-operator-...-feat-fpcrm-289-foo`).
 ///
 /// Returns the canonical uppercase form (`FPCRM-289`).
 #[must_use]
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn ticket_extracted_from_lowercase_path_slug() {
-        let slug = "C--Users-garys-Documents-GitHub-firefly-pro-crm--claude-worktrees-feat-fpcrm-289-email-signature";
+        let slug = "C--Users-operator-Documents-GitHub-firefly-pro-crm--claude-worktrees-feat-fpcrm-289-email-signature";
         assert_eq!(
             extract_ticket_from_path(slug),
             Some("FPCRM-289".to_string())

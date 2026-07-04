@@ -426,18 +426,18 @@ mod tests {
 
     #[test]
     fn test_project_hash_deterministic() {
-        let h1 = project_hash("/Users/gary/projects/firefly");
-        let h2 = project_hash("/Users/gary/projects/firefly");
+        let h1 = project_hash("/Users/operator/projects/firefly");
+        let h2 = project_hash("/Users/operator/projects/firefly");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 8);
     }
 
     #[test]
     fn test_project_name_extraction() {
-        assert_eq!(project_name("/Users/gary/projects/firefly"), "firefly");
+        assert_eq!(project_name("/Users/operator/projects/firefly"), "firefly");
         #[cfg(windows)]
         assert_eq!(
-            project_name("C:\\Users\\gary\\Documents\\GitHub\\sentinel"),
+            project_name("C:\\Users\\operator\\Documents\\GitHub\\sentinel"),
             "sentinel"
         );
     }

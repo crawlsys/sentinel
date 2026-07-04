@@ -558,7 +558,7 @@ mod tests {
     fn mcp_search_hit_deserialises_from_memory_search_shape() {
         let raw = serde_json::json!({
             "atom_id": "0190a3b4-8811-7c6e-8000-000000000001",
-            "subject": "gary",
+            "subject": "operator",
             "predicate": "prefers",
             "value": "terse",
             "project": "firefly-pro",
@@ -573,7 +573,7 @@ mod tests {
         });
         let hit: McpSearchHit = serde_json::from_value(raw).unwrap();
         assert_eq!(hit.atom_id, "0190a3b4-8811-7c6e-8000-000000000001");
-        assert_eq!(hit.subject, "gary");
+        assert_eq!(hit.subject, "operator");
         assert!((hit.final_score - 0.78).abs() < 1e-6);
     }
 

@@ -177,6 +177,28 @@ mod tests {
     }
 
     #[test]
+    fn shipped_prompts_include_cron_failure_circuit_breaker() {
+        let rules = parse(SHIPPED_AUTOCRON_DEFAULTS);
+        for rule in rules {
+            assert!(
+                rule.prompt_template.contains("CRON CIRCUIT BREAKER"),
+                "{} is missing the cron circuit-breaker preamble",
+                rule.id
+            );
+            assert!(
+                rule.prompt_template.contains("3 consecutive failures"),
+                "{} is missing the failure budget",
+                rule.id
+            );
+            assert!(
+                rule.prompt_template.contains("CronDelete"),
+                "{} must be able to self-delete after repeated failures",
+                rule.id
+            );
+        }
+    }
+
+    #[test]
     fn overlay_merge_by_id_replaces_and_appends() {
         let mut base = parse(SHIPPED_AUTOCRON_DEFAULTS);
         let base_count = base.len();

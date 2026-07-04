@@ -135,9 +135,9 @@ fn relative_time(updated_at: &str) -> String {
 /// Format the rehydration instruction tail. Pure function so the
 /// mode-aware branching can be unit-tested without a real `HookContext`.
 ///
-/// In Autopilot the agent is meant to drain the queue, not interrupt Gary
+/// In Autopilot the agent is meant to drain the queue, not interrupt the user
 /// every session — instruction directs immediate recreation via `TaskCreate`.
-/// In Planned mode, Gary may have moved on from stale work, so instruction
+/// In Planned mode, the user may have moved on from stale work, so instruction
 /// directs the agent to ask first.
 fn format_rehydrate_instruction(
     incomplete_count: usize,
@@ -150,27 +150,27 @@ fn format_rehydrate_instruction(
                 "\n\nINSTRUCTION (AUTOPILOT — AUTO-REHYDRATE): Recreate these {incomplete_count} task(s) immediately \
                  using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
                  Preserve subjects, descriptions, status, and metadata verbatim. After rehydration, \
-                 brief Gary in one sentence (\"rehydrated N tasks\") and continue with his opening prompt."
+                 brief the user in one sentence (\"rehydrated N tasks\") and continue with their opening prompt."
             )
         } else {
             format!(
                 "\n\nINSTRUCTION (AUTOPILOT — AUTO-REHYDRATE): Recreate these {incomplete_count} task(s) immediately \
                  using TaskCreate with the exact subjects, descriptions, status, and metadata shown above. \
-                 After rehydration, brief Gary in one sentence (\"rehydrated N tasks\") and continue \
-                 with his opening prompt."
+                 After rehydration, brief the user in one sentence (\"rehydrated N tasks\") and continue \
+                 with their opening prompt."
             )
         }
     } else if has_blocking {
         format!(
             "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
-             Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             Ask the user: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
              If yes, recreate using TaskCreate + TaskUpdate(addBlockedBy) to wire blocking chains exactly as shown. \
              If no or unclear, skip rehydration and proceed with the user's opening prompt."
         )
     } else {
         format!(
             "\n\nINSTRUCTION (PLANNED — ASK FIRST): Do NOT auto-recreate these tasks. \
-             Ask Gary: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
+             Ask the user: \"Found {incomplete_count} incomplete task(s) from a previous session — rehydrate them? (y/n)\". \
              If yes, recreate using TaskCreate with the exact subjects and descriptions shown above. \
              If no or unclear, skip rehydration and proceed with the user's opening prompt."
         )
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn test_project_hash_matches_persist() {
         // Must match task_persist.rs hash
-        let h = project_hash("/Users/gary/projects/firefly");
+        let h = project_hash("/Users/operator/projects/firefly");
         assert_eq!(h.len(), 8);
     }
 

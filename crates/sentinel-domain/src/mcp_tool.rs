@@ -64,7 +64,7 @@ pub const SAFE_METHOD_PREFIXES: &[&str] = &[
 /// Their tools are NOT gated as dangerous regardless of method verb. These are
 /// servers the operator controls (browser automation, reasoning, memory,
 /// sentinel's own surface, issue tracking) where the per-tool verb gate adds
-/// friction without security value. Per Gary: "MCPs are safe."
+/// friction without security value. Operator policy: "MCPs are safe."
 ///
 /// The fall-through (deny-by-default) is RETAINED for servers NOT on this
 /// list — notably raw code-execution servers like `codex` (`shell`,
@@ -96,7 +96,7 @@ pub const TRUSTED_MCP_SERVERS: &[&str] = &[
 /// gated, not allowed. See module docs.
 #[must_use]
 pub fn is_dangerous_mcp_tool(tool_name: &str) -> bool {
-    // Trusted-server short-circuit (Gary: "MCPs are safe"): if the tool
+    // Trusted-server short-circuit (operator policy: "MCPs are safe"): if the tool
     // belongs to an operator-registered trusted server, it's not gated —
     // browser/reasoning/memory/sentinel/etc. tools are trusted infrastructure.
     // Raw-exec servers NOT on the trust list (e.g. `codex`) still fall through

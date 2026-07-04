@@ -369,8 +369,8 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     );
 
     // Dual-display capture notice: if the detached turn-capture from a prior
-    // turn left a one-shot notice, surface it to BOTH audiences — Gary via
-    // `systemMessage` (shown in his terminal, not in the model's context) and
+    // turn left a one-shot notice, surface it to BOTH audiences — the user via
+    // `systemMessage` (shown in their terminal, not in the model's context) and
     // the model via `additionalContext`. Read-and-delete so it shows once.
     let notice = take_capture_notice(ctx.fs);
 
@@ -515,11 +515,11 @@ mod tests {
     #[test]
     fn test_project_from_cwd_posix_and_windows() {
         assert_eq!(
-            project_from_cwd("/Users/gary/code/firefly-pro"),
+            project_from_cwd("/Users/operator/code/firefly-pro"),
             "firefly-pro"
         );
         assert_eq!(
-            project_from_cwd(r"C:\Users\gary\code\firefly-pro"),
+            project_from_cwd(r"C:\Users\operator\code\firefly-pro"),
             "firefly-pro"
         );
     }

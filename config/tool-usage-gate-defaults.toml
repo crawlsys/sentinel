@@ -1,0 +1,11 @@
+# Tool Usage Gate — shipped defaults.
+#
+# Operator override: ~/.claude/sentinel/config/tool-usage-gate.toml
+# (wholesale replacement, same schema — mirrors memory-provision.toml).
+#
+# sequential_thinking_check — Check 1 of the gate: mutating tools are blocked
+# unless `mcp__sequential-thinking__sequentialthinking` appears in the live
+# session transcript. Set to false to skip ONLY this check; the task-list,
+# plan-mode, and in_progress-task checks are unaffected. A missing key or an
+# unparseable file falls back to `true` (fail closed to enforcement).
+sequential_thinking_check = true

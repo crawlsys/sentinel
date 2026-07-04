@@ -619,12 +619,12 @@ mod tests {
     #[test]
     fn test_project_from_cwd() {
         assert_eq!(
-            project_from_cwd(Some("/Users/gary/projects/sentinel")),
+            project_from_cwd(Some("/Users/operator/projects/sentinel")),
             Some("sentinel".to_string())
         );
         #[cfg(windows)]
         assert_eq!(
-            project_from_cwd(Some("C:\\Users\\gary\\sentinel")),
+            project_from_cwd(Some("C:\\Users\\operator\\sentinel")),
             Some("sentinel".to_string())
         );
         assert_eq!(project_from_cwd(None), None);
@@ -639,10 +639,13 @@ mod tests {
                 "body": "hi",
                 "issue": { "identifier": "FPCRM-1", "team": { "key": "FPCRM" } }
             },
-            "actor": { "name": "Pedro" }
+            "actor": { "name": "QA reviewer" }
         });
         let ev = channel_event_from_webhook("linear", None, &body, serde_json::Map::new());
-        assert_eq!(ev.summary, "[LINEAR] Pedro commented on FPCRM-1: \"hi\"");
+        assert_eq!(
+            ev.summary,
+            "[LINEAR] QA reviewer commented on FPCRM-1: \"hi\""
+        );
         assert_eq!(ev.event, "hookdeck.linear");
         assert_eq!(ev.source_agent.as_deref(), Some("hookdeck"));
         assert_eq!(

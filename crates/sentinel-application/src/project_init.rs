@@ -62,7 +62,7 @@ pub fn extract_metadata(repo: &Path) -> ProjectMetadata {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         if !dir_name.is_empty() {
-            meta.repository = Some(format!("https://github.com/garysomerhalder/{dir_name}"));
+            meta.repository = Some(format!("https://github.com/legatus-ai/{dir_name}"));
         }
     }
 
@@ -409,7 +409,7 @@ fn gen_readme(meta: &ProjectMetadata) -> String {
         Some(RustFlavor::McpServer) => {
             let product = title.trim_end_matches("-mcp");
             format!(
-                "\nMCP server for {product} — built with [Vulcan SDK](https://github.com/garysomerhalder/vulcan-mcp-sdk-rust), wrapped by `mcp-router` for hot-reload.\n"
+                "\nMCP server for {product} — built with [Vulcan SDK](https://github.com/legatus-ai/vulcan-mcp-sdk-rust), wrapped by `mcp-router` for hot-reload.\n"
             )
         }
         Some(RustFlavor::Cli) => {
@@ -607,7 +607,7 @@ fn gen_license(meta: &ProjectMetadata) -> String {
     let author = meta
         .authors
         .first()
-        .map_or("Gary Somerhalder", std::string::String::as_str);
+        .map_or("Legatus AI", std::string::String::as_str);
 
     format!(
         r#"MIT License
@@ -689,7 +689,7 @@ fn gen_security_md(meta: &ProjectMetadata) -> String {
     let repo_url = meta
         .repository
         .as_deref()
-        .unwrap_or("https://github.com/garysomerhalder");
+        .unwrap_or("https://github.com/legatus-ai");
 
     format!(
         r"# Security Policy
@@ -700,7 +700,7 @@ If you discover a security vulnerability, please report it responsibly:
 
 1. **Do NOT** open a public GitHub issue
 2. Use [GitHub Security Advisories]({repo_url}/security/advisories/new) to report privately
-3. Or email: security@garysomerhalder.com
+3. Or email: security@legatus.io
 
 ## Response Timeline
 
@@ -1030,7 +1030,7 @@ clap = { version = "4", features = ["derive"] }
         let meta = ProjectMetadata::default();
         let license = gen_license(&meta);
         assert!(license.contains("MIT License"));
-        assert!(license.contains("Gary Somerhalder"));
+        assert!(license.contains("Legatus AI"));
     }
 
     #[test]
