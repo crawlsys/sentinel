@@ -586,7 +586,14 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("sentinel-tmp");
+    // Append the tmp suffix to the FULL filename rather than
+    // `with_extension`, which would replace the final extension
+    // (`.claude.json` -> `.claude.sentinel-tmp`) and could collide with an
+    // unrelated `foo.sentinel-tmp` sitting next to a `foo.claude.json`.
+    // Appending keeps the tmp name unique-by-construction per target.
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".sentinel-tmp");
+    let tmp = PathBuf::from(tmp_name);
     {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(content)?;
@@ -599,6 +606,15 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
             Err(e)
         }
     }
+    // NIT (rename durability): the tmp file's contents are fsync'd above, but
+    // the parent-directory entry created by the rename is NOT fsync'd, so on a
+    // crash immediately after `rename` the directory metadata may not be
+    // durable yet. Fixing this would require opening a directory handle and
+    // flushing it — on Windows that needs `FILE_FLAG_BACKUP_SEMANTICS` and a
+    // raw `FlushFileBuffers`, which is `unsafe`. This workspace forbids unsafe
+    // (`unsafe_code = "forbid"`), and heals are rare, best-effort, and re-run
+    // every session start, so the durability gap is accepted rather than
+    // reaching for unsafe FFI. Documented deliberately.
 }
 
 /// Exclusive advisory lock on a `<file>.sentinel-lock` sidecar, released on drop.
@@ -612,6 +628,13 @@ struct FileLock {
 
 impl FileLock {
     fn acquire(target: &Path) -> Self {
+        // Fail-open by design: if the sidecar lockfile can't be opened or
+        // locked (permissions, read-only FS, fs2 error), we proceed WITHOUT a
+        // lock rather than block or abort the heal. The lock only serializes
+        // concurrent sentinel heals against each other; losing it degrades to
+        // last-writer-wins between sentinel processes, which is acceptable for
+        // a rare, idempotent, best-effort heal. Guarding the registry is more
+        // important than guaranteeing mutual exclusion for it.
         let lock_path = lock_path_for(target);
         let file = fs::OpenOptions::new()
             .create(true)

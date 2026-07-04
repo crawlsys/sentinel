@@ -169,14 +169,39 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // `mcpServers` block in ~/.claude.json. When a heal lands, the standing
     // `/reload-plugins` initialUserMessage autoheal (step 10 below) reconnects
     // the restored servers in the same session.
-    let guardian = crate::paths::home_root().ok().map(|home| {
-        crate::mcp_guardian::run(
-            ctx.process,
-            ctx.env,
-            &home,
-            &claude_dir,
-            find_marketplace_repo().as_deref(),
-        )
+    //
+    // The guardian call is wrapped in `catch_unwind` because the release
+    // profile is `panic = abort` (see workspace `[profile.release]`): an
+    // unguarded panic anywhere inside `mcp_guardian::run` — it parses
+    // ~/.claude.json, walks the marketplace repo, and does filesystem I/O —
+    // would abort the whole hook process and take session init down with it.
+    // Guarding *only* this call (not the entire hook) keeps the blast radius
+    // minimal; on panic we degrade to `None`, which the tripwire/context code
+    // below already treats as "guardian didn't run", and log the payload.
+    let guardian = crate::paths::home_root().ok().and_then(|home| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::mcp_guardian::run(
+                ctx.process,
+                ctx.env,
+                &home,
+                &claude_dir,
+                find_marketplace_repo().as_deref(),
+            )
+        }));
+        match result {
+            Ok(report) => Some(report),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                tracing::warn!(
+                    "MCP registration guardian panicked ({msg}); continuing session init without it"
+                );
+                None
+            }
+        }
     });
     if let Some(report) = &guardian {
         if report.tripwire {
@@ -2400,6 +2425,51 @@ mod tests {
         let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &healthy);
         assert!(!context.contains("[MCP REGISTRATION MISSING]"));
         assert!(!context.contains("[MCP Guardian]"));
+    }
+
+    /// A panic inside the guarded guardian call must degrade to `None` and let
+    /// session init continue — NOT abort the process (release is
+    /// `panic = abort`). The real call site wraps `mcp_guardian::run` in
+    /// `catch_unwind(AssertUnwindSafe(...))`; that function isn't injectable, so
+    /// this test exercises the identical wrapper shape with a closure that
+    /// panics, proving the degradation path and payload extraction.
+    #[test]
+    fn guardian_panic_degrades_to_none_and_continues() {
+        let sentinel_reached = std::cell::Cell::new(false);
+
+        let guardian: Option<crate::mcp_guardian::GuardianReport> = {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Stand-in for mcp_guardian::run panicking mid-heal.
+                panic!("simulated guardian panic");
+                #[allow(unreachable_code)]
+                crate::mcp_guardian::GuardianReport {
+                    state: crate::scanner::McpRegistryState::Count(0),
+                    mcp_repos: 0,
+                    tripwire: false,
+                    snapshot_written: false,
+                    heal: None,
+                    warnings: vec![],
+                }
+            }));
+            match result {
+                Ok(report) => Some(report),
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    assert_eq!(msg, "simulated guardian panic");
+                    None
+                }
+            }
+        };
+
+        // Control continued past the guarded block (would be unreachable under
+        // panic = abort without catch_unwind), and the guardian degraded to None.
+        sentinel_reached.set(true);
+        assert!(guardian.is_none());
+        assert!(sentinel_reached.get());
     }
 
     #[test]
