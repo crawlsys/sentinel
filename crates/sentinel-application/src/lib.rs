@@ -33,6 +33,7 @@ pub mod lead_time;
 pub mod linear_code_audit;
 pub mod linear_health_score;
 pub mod linear_pm_audit;
+pub mod mcp_guardian;
 pub mod mcp_handler;
 pub mod memory_telemetry;
 pub mod operational_summary;
