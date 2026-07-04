@@ -83,9 +83,22 @@ Each `marketplace.json` `mcp[]` entry is full-fidelity:
      non-retired entries kept, declared entries inserted/overwritten, retired
      names removed, the `_mcpServers_disabled` marker dropped, **every other
      key preserved**
-   - writes are atomic (tmp + rename) under an fs2 exclusive lock on a
-     `<file>.sentinel-lock` sidecar (the sidecar, not the target, because
-     Windows cannot rename over a locked-open file)
+   - writes are atomic at the filesystem level (tmp + rename), and an fs2
+     exclusive lock on a `<file>.sentinel-lock` sidecar serializes concurrent
+     **sentinel** heals against each other (the sidecar, not the target,
+     because Windows cannot rename over a locked-open file)
+   - **write-safety caveat — TOCTOU vs the host:** the sidecar lock is
+     sentinel-vs-sentinel *only*. Claude Code, which owns and also writes
+     `~/.claude.json`, does not participate in this lock, so there is a
+     read → modify → write window between the guardian reading the current
+     registry and renaming its merged version over the top. If Claude Code
+     writes the file inside that window, the result is last-writer-wins (one
+     side's write is lost); tmp+rename guarantees no *torn/partial* file, not
+     mutual exclusion with the host. This is accepted rather than fixed
+     because a heal only fires on `Missing` / `Tampered` / `Count(0)` states —
+     precisely the cases where the host is **not** actively maintaining a
+     healthy `mcpServers` block — so a concurrent host write racing a heal is
+     not an expected steady-state condition
    - the standing `/reload-plugins` `initialUserMessage` autoheal in
      `session_init` then reconnects the healed servers in the same session
    - `Unreadable` is deliberately **alert-only**: merging into a file we cannot
