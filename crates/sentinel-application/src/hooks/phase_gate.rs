@@ -2195,10 +2195,16 @@ mod tests {
         let mut workflows = HashMap::new();
         workflows.insert("linear".to_string(), test_workflow());
 
+        // Phase resolution is anchored to the real home dir, so the fixture
+        // must be too (a literal username here breaks on any other machine).
+        let phase_path = dirs::home_dir()
+            .unwrap()
+            .join(".claude\\skills\\linear\\phases\\fetch.md");
+
         let input = HookInput {
             tool_name: Some("Read".to_string()),
             tool_input: Some(serde_json::json!({
-                "file_path": "C:\\Users\\operator\\.claude\\skills\\linear\\phases\\fetch.md"
+                "file_path": phase_path.to_string_lossy()
             })),
             ..Default::default()
         };
