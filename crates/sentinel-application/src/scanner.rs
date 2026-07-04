@@ -174,21 +174,81 @@ pub fn count_files_with_ext(dir: &Path, ext: &str) -> usize {
     })
 }
 
+/// State of the live MCP registration block in `~/.claude.json`.
+///
+/// Distinguishes "the registry is legitimately empty" from "the registry has
+/// been lost or tampered with" — the old `count_mcp_servers` coerced every
+/// failure mode to `0`, which made registration loss invisible to callers
+/// (the Jun 17-18 `.claude.json` corruption went undetected for weeks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpRegistryState {
+    /// `~/.claude.json` does not exist, or exists without an `mcpServers` key.
+    Missing,
+    /// The file exists but could not be read, or is not valid JSON.
+    Unreadable,
+    /// Evidence of deliberate tampering: a `_mcpServers_disabled` key is
+    /// present (the block was stashed aside), or `mcpServers` exists but is
+    /// not a JSON object.
+    Tampered,
+    /// A structurally valid registry with this many entries (may be 0).
+    Count(usize),
+}
+
+impl McpRegistryState {
+    /// Number of registered servers (0 for every non-`Count` state).
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        match self {
+            Self::Count(n) => *n,
+            _ => 0,
+        }
+    }
+
+    /// True when the registration block is lost or tampered (guardian tripwire
+    /// states, before considering the zero-count-with-repos heuristic).
+    #[must_use]
+    pub const fn is_compromised(&self) -> bool {
+        matches!(self, Self::Missing | Self::Unreadable | Self::Tampered)
+    }
+}
+
+/// Inspect the MCP registration state in `~/.claude.json`.
+///
+/// `home_dir` should be the user's home directory (parent of `~/.claude/`).
+pub fn mcp_registry_state(home_dir: &Path) -> McpRegistryState {
+    let path = home_dir.join(".claude.json");
+    if !path.exists() {
+        return McpRegistryState::Missing;
+    }
+
+    let Ok(content) = fs::read_to_string(&path) else {
+        return McpRegistryState::Unreadable;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return McpRegistryState::Unreadable;
+    };
+
+    // A stashed-aside block is a tamper marker even if `mcpServers` also exists.
+    if json.get("_mcpServers_disabled").is_some() {
+        return McpRegistryState::Tampered;
+    }
+
+    match json.get("mcpServers") {
+        None => McpRegistryState::Missing,
+        Some(v) => v.as_object().map_or(McpRegistryState::Tampered, |map| {
+            McpRegistryState::Count(map.len())
+        }),
+    }
+}
+
 /// Count MCP servers from `~/.claude.json`.
 ///
 /// `home_dir` should be the user's home directory (parent of `~/.claude/`).
+/// Display-oriented: all failure states collapse to 0. Callers that need to
+/// distinguish Missing / Unreadable / Tampered / Count must use
+/// [`mcp_registry_state`] — do not add new callers that treat this 0 as truth.
 pub fn count_mcp_servers(home_dir: &Path) -> usize {
-    let path = home_dir.join(".claude.json");
-
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|json| {
-            json.get("mcpServers")
-                .and_then(|v| v.as_object())
-                .map(serde_json::Map::len)
-        })
-        .unwrap_or(0)
+    mcp_registry_state(home_dir).count()
 }
 
 /// Count MCP servers a marketplace repo *declares*, from `<root>/marketplace.json`'s
@@ -241,8 +301,12 @@ pub fn count_components(claude_dir: &Path) -> ComponentCounts {
     // when no such declaration exists. Without this, scanning a marketplace
     // clone reported 0 MCP servers (the clone has no ~/.claude.json) and
     // `--sync-counts` would write that 0 into the repo's own docs.
-    let mcp_servers =
-        count_declared_mcp_servers(claude_dir).unwrap_or_else(|| count_mcp_servers(&home_dir));
+    //
+    // NOTE: for display purposes a Missing/Unreadable/Tampered live registry
+    // still shows as 0 here — detection and healing of those states is the
+    // job of `mcp_guardian`, which consumes the full [`mcp_registry_state`].
+    let mcp_servers = count_declared_mcp_servers(claude_dir)
+        .unwrap_or_else(|| mcp_registry_state(&home_dir).count());
     let mcp_repos = count_repos_with_suffix(&home_dir, "-mcp-rust");
     let cli_repos = count_repos_with_suffix(&home_dir, "-cli-rust");
 
@@ -2504,5 +2568,59 @@ matcher = ["Edit", "Write"]
         assert_eq!(super::count_declared_mcp_servers(&tmp), None);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mcp_registry_state_distinguishes_missing_unreadable_tampered_count() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let config = home.join(".claude.json");
+
+        // No file at all -> Missing.
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Missing);
+
+        // File exists but is not valid JSON -> Unreadable (NOT zero).
+        fs::write(&config, "{ this is not json").unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Unreadable);
+
+        // Valid JSON without an mcpServers key -> Missing.
+        fs::write(&config, r#"{"numStartups": 3}"#).unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Missing);
+
+        // Stashed-aside block -> Tampered, even when mcpServers also exists.
+        fs::write(
+            &config,
+            r#"{"_mcpServers_disabled": {"a": {}}, "mcpServers": {"b": {}}}"#,
+        )
+        .unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Tampered);
+
+        // mcpServers present but not an object -> Tampered.
+        fs::write(&config, r#"{"mcpServers": []}"#).unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Tampered);
+
+        // Healthy registry -> Count(n), including a legitimate 0.
+        fs::write(&config, r#"{"mcpServers": {}}"#).unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Count(0));
+        fs::write(
+            &config,
+            r#"{"mcpServers": {"linear": {"command": "x"}, "doppler": {"command": "y"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(mcp_registry_state(home), McpRegistryState::Count(2));
+
+        // count_mcp_servers stays display-oriented: failures collapse to 0.
+        fs::write(&config, "{ corrupt").unwrap();
+        assert_eq!(count_mcp_servers(home), 0);
+    }
+
+    #[test]
+    fn mcp_registry_state_helpers() {
+        assert!(McpRegistryState::Missing.is_compromised());
+        assert!(McpRegistryState::Unreadable.is_compromised());
+        assert!(McpRegistryState::Tampered.is_compromised());
+        assert!(!McpRegistryState::Count(0).is_compromised());
+        assert_eq!(McpRegistryState::Count(7).count(), 7);
+        assert_eq!(McpRegistryState::Tampered.count(), 0);
     }
 }
