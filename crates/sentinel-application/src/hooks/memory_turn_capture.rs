@@ -62,12 +62,15 @@ fn project_label(cwd: &str) -> String {
         .unwrap_or_else(|| "global".to_string())
 }
 
-/// Locate the canonical `memory-rs` CLI binary. Returns the command string for
-/// `spawn_detached`.
+/// Locate the canonical memory CLI binary. Returns the command string for
+/// `spawn_detached`. The binary was renamed `memory-rs` → `memory` (the
+/// `memory-cli` crate's `[[bin]] name = "memory"`); the `turn-capture`
+/// subcommand lives on it. Probe `memory` first, keep `memory-rs` as a
+/// legacy fallback so an older install still works.
 fn memory_bin() -> Option<String> {
     let home = dirs::home_dir()?;
     let cargo_bin_dir = home.join(".cargo").join("bin");
-    for name in ["memory-rs", "memory-rs.exe"] {
+    for name in ["memory", "memory.exe", "memory-rs", "memory-rs.exe"] {
         let cand = cargo_bin_dir.join(name);
         if cand.exists() {
             return Some(cand.to_string_lossy().to_string());
@@ -115,11 +118,11 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         // every turn silently captures nothing — an undetectable memory outage
         // (this exact gap hid a multi-session capture loss). Surface it LOUDLY,
         // but only once per session so we don't spam every Stop.
-        warn!("memory_turn_capture: `memory-rs` CLI binary not found — auto-capture is DISABLED");
+        warn!("memory_turn_capture: `memory` CLI binary not found — auto-capture is DISABLED");
         if first_warn_this_session(ctx) {
-            let msg = "🧠 [memory] auto-capture DISABLED: the `memory-rs` CLI binary \
+            let msg = "🧠 [memory] auto-capture DISABLED: the `memory` CLI binary \
                 is not installed. Memories are NOT being saved this session. Fix: \
-                `cargo install --path ~/Downloads/memory-cli-rust/crates/memory-cli --bin memory-rs`.";
+                `cargo install --path ~/Documents/GitHub/memory-cli-rust/crates/memory-cli --bin memory`.";
             let mut out = HookOutput::inject_context(HookEvent::Stop, msg);
             out.system_message = Some(msg.to_string());
             return out;
