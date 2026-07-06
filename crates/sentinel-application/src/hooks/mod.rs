@@ -103,26 +103,54 @@ pub fn sentinel_dir(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".claude").join("sentinel")
 }
 
+/// Normalize a filesystem path string so that different textual spellings of
+/// the *same* directory produce the same string (and therefore the same
+/// `project_hash`).
+///
+/// Two spellings observed in the wild for one dir:
+/// `C:\Users\…\sentinel` (hooks/native) and `C:/Users/…/sentinel`
+/// (Bash/git/forward-slash callers). Without normalization they hash to
+/// different project keys and scatter one project's tasks into two snapshots
+/// (live-reproduced 2026-07-06). We therefore, before any further processing:
+///   1. Replace all `\` with `/` (single canonical separator).
+///   2. Lowercase a leading `X:` Windows drive letter (`C:` == `c:`).
+///
+/// Path casing *below* the drive letter is left untouched — Windows is
+/// case-insensitive but preserving, and lowercasing the whole path could
+/// collide two genuinely distinct case-sensitive paths on a case-sensitive
+/// mount. The drive letter is the only segment with a guaranteed canonical
+/// case, so it is the only one folded.
+#[must_use]
+pub fn normalize_path(cwd: &str) -> String {
+    let mut s = cwd.replace('\\', "/");
+    // Lowercase a leading drive letter: "C:/…" -> "c:/…".
+    if let Some(rest) = s.strip_prefix(|c: char| c.is_ascii_alphabetic()) {
+        if rest.starts_with(':') {
+            let drive = s.as_bytes()[0].to_ascii_lowercase() as char;
+            s = format!("{drive}{}", &s[1..]);
+        }
+    }
+    s
+}
+
 /// Canonicalize a working-directory path so that worktrees collapse to their
 /// parent repo. Worktrees live at `<repo>/.claude/worktrees/<name>/...`, and
 /// without this collapse every worktree-switch produces a different
 /// `project_hash`, breaking task rehydration across worktrees.
 ///
-/// The transform looks for the literal segment `/.claude/worktrees/` (or the
-/// same with `\` separators on Windows) and strips everything from that point
-/// onward, leaving the original repo root. Paths that don't contain a
-/// worktree segment are returned unchanged.
+/// The path is first run through [`normalize_path`] (separator + drive-case
+/// folding) so mixed-separator spellings of the same dir collapse. Then the
+/// transform looks for the literal segment `/.claude/worktrees/` and strips
+/// everything from that point onward, leaving the original repo root. Paths
+/// that don't contain a worktree segment are returned normalized-but-unchanged.
 #[must_use]
 pub fn canonical_project_cwd(cwd: &str) -> String {
     const NEEDLE_FWD: &str = "/.claude/worktrees/";
-    const NEEDLE_BWD: &str = r"\.claude\worktrees\";
-    if let Some(idx) = cwd.find(NEEDLE_FWD) {
-        return cwd[..idx].to_string();
+    let normalized = normalize_path(cwd);
+    if let Some(idx) = normalized.find(NEEDLE_FWD) {
+        return normalized[..idx].to_string();
     }
-    if let Some(idx) = cwd.find(NEEDLE_BWD) {
-        return cwd[..idx].to_string();
-    }
-    cwd.to_string()
+    normalized
 }
 
 /// Compute the canonical 4-byte project hash (8 hex chars) for a working
@@ -819,14 +847,45 @@ mod project_hash_tests {
 
     #[test]
     fn backslash_worktree_collapses_to_repo_root() {
+        // Output is now separator-normalized (backslashes → forward, drive
+        // lowercased) so mixed spellings of one dir collapse to one key.
         assert_eq!(
             canonical_project_cwd(r"C:\repo\.claude\worktrees\feat-x"),
-            r"C:\repo"
+            "c:/repo"
         );
         assert_eq!(
             canonical_project_cwd(r"C:\repo\.claude\worktrees\feat-x\crates\foo"),
-            r"C:\repo"
+            "c:/repo"
         );
+    }
+
+    #[test]
+    fn normalize_path_folds_separators_and_drive_case() {
+        assert_eq!(normalize_path(r"C:\Users\g\repo"), "c:/Users/g/repo");
+        assert_eq!(normalize_path("C:/Users/g/repo"), "c:/Users/g/repo");
+        assert_eq!(normalize_path(r"c:/Users\g/repo"), "c:/Users/g/repo"); // mixed
+        // Non-Windows paths: only separator folding (no drive letter).
+        assert_eq!(normalize_path("/home/g/repo"), "/home/g/repo");
+        // Path casing below the drive is preserved (not folded).
+        assert_eq!(normalize_path(r"C:\Users\MixedCase"), "c:/Users/MixedCase");
+    }
+
+    #[test]
+    fn same_dir_different_spellings_produce_same_project_hash() {
+        // The live-reproduced bug: C:\...\sentinel and C:/.../sentinel hashed
+        // to different keys (c08fea48 vs fdf9d8fd), scattering one project's
+        // tasks into two snapshots. All spellings must now collapse.
+        let back = project_hash(r"C:\Users\garys\Documents\GitHub\sentinel");
+        let fwd = project_hash("C:/Users/garys/Documents/GitHub/sentinel");
+        let lower = project_hash("c:/Users/garys/Documents/GitHub/sentinel");
+        let mixed = project_hash(r"c:/Users\garys/Documents\GitHub/sentinel");
+        assert_eq!(back, fwd, "backslash vs forward-slash must match");
+        assert_eq!(fwd, lower, "drive-letter case must not matter");
+        assert_eq!(lower, mixed, "mixed separators must match");
+        // And a worktree of it collapses to the same hash too.
+        let wt =
+            project_hash(r"C:\Users\garys\Documents\GitHub\sentinel\.claude\worktrees\feat-x");
+        assert_eq!(back, wt, "worktree collapses to the same project hash");
     }
 
     #[test]

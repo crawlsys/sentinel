@@ -20,8 +20,12 @@
 //!   - Repo root resolution via `GitStatusPort::repo_root(cwd)`. If the cwd is
 //!     outside any git repo, the markdown write is skipped (only the global JSON
 //!     snapshot is written, since there's no project root to anchor on).
-//!   - The `project_hash` keying the global snapshot is SHA-256(cwd)[..4]; this
-//!     matches `task_rehydrate.rs` so rehydration paths stay aligned.
+//!   - The `project_hash` keying the global snapshot is
+//!     `SHA-256(canonical_project_cwd(cwd))[..4]` — the cwd is first
+//!     separator/drive-case normalized and worktree-collapsed (see
+//!     `hooks::normalize_path` / `canonical_project_cwd`) so all spellings and
+//!     worktrees of one repo share a key; this matches `task_rehydrate.rs` so
+//!     rehydration paths stay aligned.
 
 use std::fmt::Write as _;
 
