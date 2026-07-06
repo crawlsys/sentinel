@@ -924,6 +924,24 @@ fn strip_status_priority_prefix(subject: &str) -> &str {
     s
 }
 
+/// Map a task status string to its glyph + word for the Status column
+/// (e.g. `in_progress` → `🔄 in_progress`). Matches the status-glyph
+/// convention used elsewhere in the codebase (`linear_inbound_sync`'s
+/// `DesiredStatus::emoji`, and the decoration list in
+/// [`strip_status_priority_prefix`]). Unknown statuses render the bare word
+/// so nothing is ever silently dropped.
+fn status_emoji(status: &str) -> String {
+    let glyph = match status {
+        "in_progress" => "🔄",
+        "pending" => "⏳",
+        "completed" => "✅",
+        "blocked" => "🚫",
+        "cancelled" | "canceled" | "deleted" => "❌",
+        _ => return status.to_string(),
+    };
+    format!("{glyph} {status}")
+}
+
 /// Render the **Active Tasks** section from the persistent-tasks snapshot for
 /// the current project.
 ///
@@ -982,10 +1000,11 @@ pub fn render_tasks_section(cwd: &Path) -> String {
         // string (e.g. "🔄 🔴 1 [P0] — Fix…"). Status and Priority render as
         // their own columns, so leading glyphs are pure redundant noise.
         let subject = strip_status_priority_prefix(raw_subject).replace('|', "\\|");
-        let status = t
+        let status_raw = t
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("pending");
+        let status = status_emoji(status_raw);
         let priority = t
             .get("metadata")
             .and_then(|m| m.get("priority"))
@@ -2260,6 +2279,18 @@ mod tests {
             strip_status_priority_prefix("Add 🔴 marker to UI"),
             "Add 🔴 marker to UI"
         );
+    }
+
+    #[test]
+    fn status_emoji_cases() {
+        assert_eq!(status_emoji("in_progress"), "🔄 in_progress");
+        assert_eq!(status_emoji("pending"), "⏳ pending");
+        assert_eq!(status_emoji("completed"), "✅ completed");
+        assert_eq!(status_emoji("blocked"), "🚫 blocked");
+        assert_eq!(status_emoji("cancelled"), "❌ cancelled");
+        assert_eq!(status_emoji("canceled"), "❌ canceled");
+        // Unknown status → bare word, never dropped.
+        assert_eq!(status_emoji("weird_state"), "weird_state");
     }
 
     #[test]

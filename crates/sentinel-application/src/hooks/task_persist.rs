@@ -160,6 +160,115 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
     })
 }
 
+/// Status/priority decoration glyphs that a caller may have baked into a task
+/// subject string (e.g. `"🔄 🔴 1 [P0] — Fix…"`). Kept in sync with
+/// `session_init::strip_status_priority_prefix`'s `DECOR_EMOJI`.
+const DECOR_EMOJI: &[char] = &['🔄', '⏳', '✅', '❌', '🔴', '🟠', '🟡', '🟢'];
+
+/// Infer a status from a leading status glyph, if present. Returns `None` for
+/// priority-only or unknown glyphs.
+fn status_from_glyph(subject: &str) -> Option<&'static str> {
+    match subject.trim_start().chars().next()? {
+        '🔄' => Some("in_progress"),
+        '⏳' => Some("pending"),
+        '✅' => Some("completed"),
+        '❌' => Some("cancelled"),
+        _ => None,
+    }
+}
+
+/// Infer a `[P0]`..`[P3]` priority from a leading priority token or colour
+/// glyph, if present. `🔴`=P0, `🟠`=P1, `🟡`=P2, `🟢`=P3; `[Pn]` wins over glyph.
+fn priority_from_decoration(subject: &str) -> Option<String> {
+    let s = subject.trim_start();
+    // Prefer an explicit [Pn] token anywhere in the leading decoration run.
+    for tok in ["[P0]", "[P1]", "[P2]", "[P3]"] {
+        if s.contains(tok) {
+            return Some(tok.trim_matches(['[', ']']).to_string());
+        }
+    }
+    match s.chars().find(|c| ['🔴', '🟠', '🟡', '🟢'].contains(c))? {
+        '🔴' => Some("P0".into()),
+        '🟠' => Some("P1".into()),
+        '🟡' => Some("P2".into()),
+        '🟢' => Some("P3".into()),
+        _ => None,
+    }
+}
+
+/// Strip leading status/priority decoration a caller baked into a subject
+/// string. Mirrors `session_init::strip_status_priority_prefix` (kept in the
+/// two modules independently since neither exports it). Idempotent.
+fn strip_subject_decoration(subject: &str) -> &str {
+    let mut s = subject.trim_start();
+    loop {
+        let before = s;
+        s = s.trim_start_matches(|c| DECOR_EMOJI.contains(&c)).trim_start();
+        if let Some(rest) = s.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let inner = &rest[..close];
+                if inner.len() <= 3
+                    && inner.starts_with('P')
+                    && inner[1..].chars().all(|c| c.is_ascii_digit())
+                {
+                    s = rest[close + 1..].trim_start();
+                }
+            }
+        }
+        let trimmed_num = s.trim_start_matches(|c: char| c.is_ascii_digit());
+        if trimmed_num.len() < s.len() && trimmed_num.starts_with([' ', '—', '-', ':']) {
+            s = trimmed_num.trim_start();
+        }
+        s = s.trim_start_matches(['—', '-', ':']).trim_start();
+        if s == before {
+            break;
+        }
+    }
+    s
+}
+
+/// Normalize a task read from disk: pull any status/priority decoration baked
+/// into the subject string out into the proper fields, and clean the subject.
+///
+/// The **field is authoritative** — a glyph only fills a *blank* field, and
+/// never overrides an explicit `status`/`priority`. This fixes the corruption
+/// where a task was stored as `"🔄 🔴 1 [P0] — Fix…"` with `status: "pending"`
+/// (glyph and field disagreeing): the subject is cleaned to `"Fix…"`, the
+/// explicit `pending` status is kept, and priority `P0` is backfilled only if
+/// `metadata.priority` was absent.
+fn normalize_task(mut task: Task) -> Task {
+    let raw = task.subject.clone();
+    let clean = strip_subject_decoration(&raw);
+
+    if task.status.trim().is_empty() {
+        if let Some(inferred) = status_from_glyph(&raw) {
+            task.status = inferred.to_string();
+        }
+    }
+
+    let has_priority = task
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("priority"))
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| !p.trim().is_empty());
+    if !has_priority {
+        if let Some(prio) = priority_from_decoration(&raw) {
+            let mut map = match task.metadata.take() {
+                Some(serde_json::Value::Object(m)) => m,
+                _ => serde_json::Map::new(),
+            };
+            map.insert("priority".to_string(), serde_json::Value::String(prio));
+            task.metadata = Some(serde_json::Value::Object(map));
+        }
+    }
+
+    if clean != raw {
+        task.subject = clean.to_string();
+    }
+    task
+}
+
 /// Read all tasks from a task list directory
 fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
     let mut tasks = Vec::new();
@@ -178,7 +287,7 @@ fn read_tasks(fs: &dyn FileSystemPort, dir: &PathBuf) -> Vec<Task> {
             }
             if let Ok(content) = fs.read_to_string(&path) {
                 if let Ok(task) = serde_json::from_str::<Task>(&content) {
-                    tasks.push(task);
+                    tasks.push(normalize_task(task));
                 }
             }
         }
@@ -806,6 +915,97 @@ fn write_persistent_tasks(
     Ok(())
 }
 
+/// Truncate the persistent task snapshot when the live task list is empty.
+///
+/// The counterpart to [`write_persistent_tasks`] for the "list is now empty"
+/// state. Without this, a `tasks.json` written while the list was non-empty
+/// stays frozen on disk once the list empties — driving phantom
+/// `task_coverage_check` nags, ghost rows in CLAUDE.md's Active Tasks table,
+/// and spurious `task_rehydrate` re-injection on the next SessionStart.
+///
+/// Behaviour:
+/// - **No-op when there is nothing to clear.** If no prior `tasks.json` exists
+///   (a project that never had tasks), we return without writing — truncation
+///   only matters where a stale snapshot is present.
+/// - Writes `tasks.json` = `[]` and `meta.json` with `task_count: 0` atomically
+///   (same crash-safety reasoning as the non-empty path).
+/// - Replaces the `tasks.md` marker block with an empty auto-block, preserving
+///   the user's hand-written content above/below. This bypasses the shrink
+///   guard on purpose: going to zero here is the *intended* state, not the
+///   accidental small-`TaskList`-clobbers-big-block case the guard defends.
+fn truncate_persistent_tasks(
+    fs: &dyn FileSystemPort,
+    git: &dyn GitStatusPort,
+    cwd: &str,
+    proj_hash: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let global_dir = match persistent_tasks_dir(fs, proj_hash) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+
+    let json_path = global_dir.join("tasks.json");
+
+    // Nothing to clear: no prior snapshot, or it is already empty. Reading the
+    // file and checking for a non-empty array avoids a pointless write (and a
+    // spurious meta.json mtime bump) every Stop fire on a project that has no
+    // tasks and never did.
+    let prior = fs.read_to_string(&json_path).ok();
+    let already_empty = match &prior {
+        None => true,
+        Some(s) => serde_json::from_str::<Vec<Task>>(s)
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+    };
+    if already_empty {
+        return Ok(());
+    }
+
+    fs.create_dir_all(&global_dir)?;
+
+    // Empty JSON array — passes the `starts_with('[')` guard in the non-empty
+    // path's writer, and is exactly what `task_rehydrate` reads as "no tasks".
+    atomic_write(fs, &json_path, "[]")?;
+
+    // Replace the tasks.md auto-block with an empty body (markers retained).
+    let repo_root = project_repo_root(git, cwd);
+    if let Some(root) = &repo_root {
+        let proj_name = project_name(root);
+        let empty_body = render_auto_block_body(&[], &proj_name, &[]);
+        let path = root.join("tasks.md");
+        if let Ok(existing) = fs.read_to_string(&path) {
+            let merged = merge_with_existing(Some(&existing), &empty_body);
+            if merged != existing {
+                if let Err(e) = atomic_write(fs, &path, &merged) {
+                    tracing::warn!(error = %e, repo_root = %root.display(),
+                        "Failed to clear tasks.md auto-block on truncate");
+                }
+            }
+        }
+    }
+
+    // Reset meta.json to a zero-count snapshot.
+    let meta = PersistMeta {
+        project_hash: proj_hash.to_string(),
+        cwd: cwd.to_string(),
+        session_id: session_id.to_string(),
+        updated_at: Utc::now().to_rfc3339(),
+        task_count: 0,
+        incomplete_count: 0,
+        last_block_hash: String::new(),
+    };
+    let meta_json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| anyhow::anyhow!("serialize meta for truncate: {e}"))?;
+    atomic_write(fs, &global_dir.join("meta.json"), &meta_json)?;
+
+    tracing::info!(
+        project_hash = proj_hash,
+        "Truncated stale task snapshot — live task list is empty"
+    );
+    Ok(())
+}
+
 /// Process task persistence on `TaskCreated`, `TaskCompleted`, or Stop events.
 ///
 /// Reads the active session's task files, then writes:
@@ -844,19 +1044,36 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let session_id: &str = &session_id;
     let cwd = input.cwd.as_deref().unwrap_or(".");
 
-    let task_dir = if let Some(dir) = find_active_task_dir(ctx.fs, session_id) {
-        dir
-    } else {
-        tracing::debug!("No active task directory found — skipping persist");
-        return HookOutput::allow();
+    let proj_hash = project_hash(cwd);
+
+    // Resolve the live source of truth. `None` = the session's task dir is
+    // absent; an empty vec = the dir exists but holds no task files. BOTH mean
+    // "the live task list is empty right now".
+    //
+    // **Ghost-snapshot fix (2026-07-06)**: previously both cases early-returned
+    // *without touching the snapshot*, so a `tasks.json` written when the list
+    // was non-empty stayed frozen on disk forever once the list emptied. That
+    // stale file then (a) drove `task_coverage_check` to nag about tasks that
+    // no longer exist, (b) rendered phantom rows in CLAUDE.md's Active Tasks
+    // table, and (c) got re-injected by `task_rehydrate` on the next
+    // SessionStart. The list going to zero is a real state that MUST be
+    // mirrored — truncate the snapshot instead of leaving ghosts.
+    //
+    // Safety: we only reach here with a *valid, non-empty* session_id (the
+    // durability-gap guard above already returned on a missing one), so an
+    // empty read here is a genuine "no live tasks", not a resolution failure.
+    let tasks = match find_active_task_dir(ctx.fs, session_id) {
+        Some(dir) => read_tasks(ctx.fs, &dir),
+        None => Vec::new(),
     };
 
-    let tasks = read_tasks(ctx.fs, &task_dir);
     if tasks.is_empty() {
+        if let Err(e) = truncate_persistent_tasks(ctx.fs, ctx.git, cwd, &proj_hash, session_id) {
+            tracing::warn!(error = %e, "Failed to truncate stale task snapshot");
+        }
         return HookOutput::allow();
     }
 
-    let proj_hash = project_hash(cwd);
     if let Err(e) = write_persistent_tasks(ctx.fs, ctx.git, &tasks, cwd, &proj_hash, session_id) {
         tracing::warn!(error = %e, "Failed to persist tasks");
     }
@@ -867,6 +1084,7 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sentinel_domain::port_errors::GitError;
     use std::path::Path;
 
     /// Minimal real-FS for tests that need to read temp directories.
@@ -1690,5 +1908,260 @@ mod tests {
         assert!(wrote, "growth must always write through");
         let after = std::fs::read_to_string(root.join("tasks.md")).unwrap();
         assert_eq!(count_block_tasks(&after), 30);
+    }
+
+    // ───────────── normalize_task / decoration stripping ─────────────
+
+    fn bare_task(id: &str, subject: &str, status: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            subject: subject.to_string(),
+            description: String::new(),
+            active_form: None,
+            owner: None,
+            status: status.to_string(),
+            blocks: vec![],
+            blocked_by: vec![],
+            checklist: vec![],
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn strip_subject_decoration_cases() {
+        assert_eq!(
+            strip_subject_decoration("🔄 🔴 1 [P0] — Fix memory-capture gate"),
+            "Fix memory-capture gate"
+        );
+        assert_eq!(strip_subject_decoration("✅ Ship the thing"), "Ship the thing");
+        assert_eq!(strip_subject_decoration("[P1] Do the work"), "Do the work");
+        assert_eq!(strip_subject_decoration("2 - build it"), "build it");
+        // Clean subject is untouched.
+        assert_eq!(
+            strip_subject_decoration("Restore mcpServers registrations"),
+            "Restore mcpServers registrations"
+        );
+        // A glyph mid-subject is preserved (only leading decoration is stripped).
+        assert_eq!(strip_subject_decoration("Add 🔴 marker to UI"), "Add 🔴 marker to UI");
+        // Idempotent.
+        let once = strip_subject_decoration("🔴 [P0] — X");
+        assert_eq!(strip_subject_decoration(once), once);
+    }
+
+    #[test]
+    fn normalize_task_cleans_subject_and_keeps_authoritative_status() {
+        // Glyph says in-progress (🔄) but the field explicitly says pending —
+        // the field wins; the subject is cleaned; P0 backfills from 🔴/[P0].
+        let t = normalize_task(bare_task(
+            "1",
+            "🔄 🔴 1 [P0] — Fix memory-capture dual-judge gate",
+            "pending",
+        ));
+        assert_eq!(t.subject, "Fix memory-capture dual-judge gate");
+        assert_eq!(t.status, "pending", "explicit status field is authoritative");
+        assert_eq!(
+            t.metadata
+                .as_ref()
+                .and_then(|m| m.get("priority"))
+                .and_then(|p| p.as_str()),
+            Some("P0"),
+            "priority backfilled from decoration when field absent"
+        );
+    }
+
+    #[test]
+    fn normalize_task_infers_status_only_when_field_blank() {
+        // Empty status field → glyph fills it.
+        let t = normalize_task(bare_task("2", "✅ Done thing", ""));
+        assert_eq!(t.status, "completed");
+        assert_eq!(t.subject, "Done thing");
+    }
+
+    #[test]
+    fn normalize_task_priority_field_beats_glyph() {
+        let mut base = bare_task("3", "🟢 [P3] — Low prio task", "in_progress");
+        base.metadata = Some(serde_json::json!({ "priority": "P1" }));
+        let t = normalize_task(base);
+        assert_eq!(t.subject, "Low prio task");
+        assert_eq!(
+            t.metadata
+                .as_ref()
+                .and_then(|m| m.get("priority"))
+                .and_then(|p| p.as_str()),
+            Some("P1"),
+            "explicit priority field is not overridden by the 🟢/[P3] glyph"
+        );
+    }
+
+    #[test]
+    fn normalize_task_clean_subject_is_noop() {
+        let t = normalize_task(bare_task("4", "Restore mcpServers registrations", "pending"));
+        assert_eq!(t.subject, "Restore mcpServers registrations");
+        assert_eq!(t.status, "pending");
+        assert!(t.metadata.is_none(), "no decoration → no priority backfill");
+    }
+
+    #[test]
+    fn truncate_persistent_tasks_is_noop_when_no_prior_snapshot() {
+        // A project that never had tasks: no tasks.json → truncate writes nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = HomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let git = NoGit;
+        let proj_hash = "deadbeef";
+        truncate_persistent_tasks(&fs, &git, "/nonexistent/cwd", proj_hash, "sess-1").unwrap();
+        let p = tmp
+            .path()
+            .join(".claude/sentinel/persistent-tasks")
+            .join(proj_hash)
+            .join("tasks.json");
+        assert!(!p.exists(), "no snapshot must be created for a task-less project");
+    }
+
+    #[test]
+    fn truncate_persistent_tasks_clears_stale_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = HomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let git = NoGit;
+        let proj_hash = "cafef00d";
+        let dir = tmp
+            .path()
+            .join(".claude/sentinel/persistent-tasks")
+            .join(proj_hash);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Seed a stale non-empty snapshot.
+        std::fs::write(
+            dir.join("tasks.json"),
+            r#"[{"id":"1","subject":"ghost","status":"in_progress"}]"#,
+        )
+        .unwrap();
+        truncate_persistent_tasks(&fs, &git, "/some/cwd", proj_hash, "sess-2").unwrap();
+        let after = std::fs::read_to_string(dir.join("tasks.json")).unwrap();
+        assert_eq!(after.trim(), "[]", "stale snapshot must be truncated to []");
+        let meta: PersistMeta =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta.task_count, 0);
+        assert_eq!(meta.incomplete_count, 0);
+    }
+
+    /// Real-FS test double rooted at a fixed home dir (so `home_dir()` points
+    /// at a tempdir). All other ops delegate to `std::fs`.
+    struct HomeFs {
+        home: PathBuf,
+    }
+    impl FileSystemPort for HomeFs {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn read_to_string(
+            &self,
+            p: &Path,
+        ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_to_string(p)?)
+        }
+        fn write(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            if let Some(par) = p.parent() {
+                std::fs::create_dir_all(par)?;
+            }
+            Ok(std::fs::write(p, c)?)
+        }
+        fn replace_file_atomic(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            self.write(p, c)
+        }
+        fn create_dir_all(
+            &self,
+            p: &Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::create_dir_all(p)?)
+        }
+        fn read_dir(
+            &self,
+            p: &Path,
+        ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::read_dir(p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect())
+        }
+        fn exists(&self, p: &Path) -> bool {
+            p.exists()
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            p.is_dir()
+        }
+        fn metadata(
+            &self,
+            p: &Path,
+        ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::metadata(p)?)
+        }
+        fn append(
+            &self,
+            p: &Path,
+            c: &[u8],
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            f.write_all(c)?;
+            Ok(())
+        }
+    }
+
+    /// Git port that reports "not a repo" for everything — truncate then skips
+    /// the tasks.md write path and only touches the JSON snapshot + meta.
+    struct NoGit;
+    impl GitStatusPort for NoGit {
+        fn has_uncommitted_changes(&self, _: &str) -> Result<bool, GitError> {
+            Ok(false)
+        }
+        fn changed_files(&self, _: &str) -> Result<Vec<String>, GitError> {
+            Ok(vec![])
+        }
+        fn current_branch(&self, _: &str) -> Result<String, GitError> {
+            Ok("main".into())
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(&self, _: &str) -> Result<bool, GitError> {
+            Ok(false)
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
+        }
     }
 }
