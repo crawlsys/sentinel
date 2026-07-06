@@ -56,6 +56,7 @@ pub mod pre_compact;
 pub mod pre_push_browser_test;
 pub mod production_action_notice;
 pub mod production_override;
+pub mod project_scope_tracker;
 pub mod prompt_injection_nudge;
 pub mod provenance_validate;
 pub mod requirements_traceability_gate;
@@ -298,6 +299,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "pre_push_browser_test",
     "production_action_notice",
     "production_override",
+    "project_scope_tracker",
     "prompt_injection_nudge",
     "provenance_validate",
     "requirements_traceability_gate",

@@ -6303,6 +6303,15 @@ async fn handle_post_tool_use(
     let activity_output = hooks::activity_tracker::process_post_tool(input, ctx);
     output.merge(&activity_output);
 
+    // Project-scope tracker — publish the session's current working repo to
+    // ~/.vulcan/hookdeck/session-<key>.project so the hookdeck channel router
+    // scopes incoming webhooks to the session actually working in that repo
+    // (fixes home-launch sessions receiving no events + cross-session bleed).
+    let project_scope_output = time_and_record(ctx.fs, &mk_ctx("project_scope_tracker"), || {
+        hooks::project_scope_tracker::process(input, ctx)
+    });
+    output.merge(&project_scope_output);
+
     // Browser test recorder — write state file on successful session release
     // (mcp__browserbase__release_session or mcp__cdp__close_instance)
     let browser_test_post_output = hooks::pre_push_browser_test::process_post_tool(input, ctx);
