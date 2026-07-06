@@ -249,12 +249,13 @@ fn extract_phase_file(
 // across hooks. Re-export so call sites here don't need to qualify.
 use sentinel_domain::path_safety::is_safe_name;
 
+/// Delegates to the canonical validator (`super::concrete_input_session_id`).
+/// Previously accepted `default`/`..`/oversized ids; a garbage id could activate
+/// a phase-gate override and bypass protection. The canonical validator rejects
+/// them; on rejection `is_some_and` short-circuits to `false`, so the phase
+/// protection stays ON (fails safe).
 fn concrete_session_id(input: &HookInput) -> Option<&str> {
-    input
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty() && *session_id != "unknown")
+    super::concrete_input_session_id(input)
 }
 
 /// Process a phase-gate hook event (`PreToolUse`)

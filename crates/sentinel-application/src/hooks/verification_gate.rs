@@ -14,7 +14,10 @@ use sentinel_domain::state::SessionState;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{FileSystemPort, HookContext};
+use super::{
+    concrete_input_session_id as concrete_session_id, session_path_component, FileSystemPort,
+    HookContext,
+};
 
 /// Cooldown duration.
 const COOLDOWN_MS: u64 = constants::HOOK_COOLDOWN_VERIFY_MS;
@@ -32,27 +35,10 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn session_path_component(session_id: &str) -> Option<&str> {
-    let session_id = session_id.trim();
-    if session_id.is_empty()
-        || session_id == "unknown"
-        || session_id == "default"
-        || session_id.len() > 128
-    {
-        return None;
-    }
-    if !session_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        return None;
-    }
-    Some(session_id)
-}
-
-fn concrete_session_id(input: &HookInput) -> Option<&str> {
-    input.session_id.as_deref().and_then(session_path_component)
-}
+// Session-id validation centralized in `super::session_path_component` /
+// `super::concrete_input_session_id` (imported at top, latter aliased). The
+// canonical validator adds path-traversal (`..`) rejection the inline copy
+// lacked.
 
 fn state_file(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
     let session_id = session_path_component(session_id)?;

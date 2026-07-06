@@ -169,12 +169,14 @@ use sentinel_domain::override_phrase::{
     is_doppler_override, is_hygiene_override, is_phase_gate_override, is_verification_override,
 };
 
+/// Delegates to the canonical validator (`super::concrete_input_session_id`).
+/// Previously this gate accepted `default` and path-traversal (`..`) ids and
+/// used a 128-cap-less inline check — a security-gate weakness, since a garbage
+/// id could arm a signed override. The canonical validator rejects
+/// `unknown`/`default`/`..`/oversized/unsafe-char ids; on rejection the caller
+/// fails safe (no override granted).
 fn concrete_session_id(input: &HookInput) -> Option<&str> {
-    input
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty() && *session_id != "unknown")
+    super::concrete_input_session_id(input)
 }
 
 /// Write a signed override file.

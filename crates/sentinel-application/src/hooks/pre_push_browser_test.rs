@@ -90,13 +90,12 @@ fn state_file_path(fs: &dyn super::FileSystemPort, session_id: &str) -> Option<P
     )
 }
 
+/// Delegates to the canonical session-id validator
+/// (`super::session_path_component`). Previously loose (rejected only empty and
+/// `unknown`, accepting `default`/`..`/oversized); the canonical validator adds
+/// `default`/path-traversal/length/char rejection.
 fn concrete_session_id(session_id: &str) -> Option<&str> {
-    let id = session_id.trim();
-    if id.is_empty() || id == "unknown" {
-        None
-    } else {
-        Some(id)
-    }
+    super::session_path_component(session_id)
 }
 
 fn input_session_id(input: &HookInput) -> Option<&str> {

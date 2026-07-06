@@ -52,12 +52,13 @@ fn session_has_recorded_evidence(fs: &dyn super::FileSystemPort, session_id: &st
     }
 }
 
+/// Delegates to the canonical validator (`super::concrete_input_session_id`).
+/// Previously the WEAKEST gate — rejected only empty ids, accepting
+/// `unknown`/`default`/`..`/oversized. The canonical validator rejects them; on
+/// rejection the override path is empty and verification stays enforced (fails
+/// safe).
 fn concrete_session_id(input: &HookInput) -> Option<&str> {
-    input
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty())
+    super::concrete_input_session_id(input)
 }
 
 // `BUILD_CONFIG_MARKERS`, `DOCS_ONLY_EXTENSIONS`, and the `is_docs_only_path`

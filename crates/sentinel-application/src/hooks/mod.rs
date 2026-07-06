@@ -760,6 +760,35 @@ mod persistent_tasks_root_tests {
             root.display()
         );
     }
+
+    /// The canonical session-id validator every hook now delegates to. Pins the
+    /// contract that made the dialect-collapse a security *hardening*: the loose
+    /// copies (in phase_gate / hygiene_override / pre_commit_verification) used
+    /// to accept `default`, path-traversal, oversized, and unsafe-char ids —
+    /// all of which could key durable override/authority state. This asserts
+    /// they are now rejected.
+    #[test]
+    fn session_path_component_rejects_unsafe_ids() {
+        // Accepts a real id.
+        assert_eq!(session_path_component("abc-123_DEF"), Some("abc-123_DEF"));
+        assert_eq!(session_path_component("  trimmed-id  "), Some("trimmed-id"));
+        // Synthetic placeholders — rejected (case-insensitive).
+        assert_eq!(session_path_component("unknown"), None);
+        assert_eq!(session_path_component("UNKNOWN"), None);
+        assert_eq!(session_path_component("default"), None);
+        assert_eq!(session_path_component("Default"), None);
+        assert_eq!(session_path_component(""), None);
+        assert_eq!(session_path_component("   "), None);
+        // Path traversal — the check the old inline copies LACKED.
+        assert_eq!(session_path_component("../etc/passwd"), None);
+        assert_eq!(session_path_component("a..b"), None);
+        // Unsafe characters.
+        assert_eq!(session_path_component("has/slash"), None);
+        assert_eq!(session_path_component("has space"), None);
+        // Oversized (> 128).
+        assert_eq!(session_path_component(&"a".repeat(129)), None);
+        assert_eq!(session_path_component(&"a".repeat(128)).map(str::len), Some(128));
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use sentinel_domain::events::{HookInput, HookOutput};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{FileSystemPort, HookContext};
+use super::{concrete_input_session_id as concrete_session_id, FileSystemPort, HookContext};
 
 /// Resolve `~/.claude/sentinel/metrics` directory, creating it if needed.
 fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
@@ -18,27 +18,10 @@ fn metrics_dir(fs: &dyn FileSystemPort) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn session_path_component(session_id: &str) -> Option<&str> {
-    let session_id = session_id.trim();
-    if session_id.is_empty()
-        || session_id == "unknown"
-        || session_id == "default"
-        || session_id.len() > 128
-    {
-        return None;
-    }
-    if !session_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        return None;
-    }
-    Some(session_id)
-}
-
-fn concrete_session_id(input: &HookInput) -> Option<&str> {
-    input.session_id.as_deref().and_then(session_path_component)
-}
+// Session-id validation centralized in `super::session_path_component` /
+// `super::concrete_input_session_id` (imported at top, latter aliased). The
+// canonical validator adds path-traversal (`..`) rejection the inline copy
+// lacked.
 
 /// Detect project language from well-known manifest files in `dir`.
 fn detect_language(fs: &dyn FileSystemPort, dir: &Path) -> &'static str {

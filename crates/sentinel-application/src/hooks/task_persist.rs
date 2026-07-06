@@ -125,6 +125,104 @@ fn persistent_tasks_dir(fs: &dyn FileSystemPort, project_hash: &str) -> Option<P
     Some(super::persistent_tasks_root(&home).join(project_hash))
 }
 
+/// Path to a session's "projects-written" ledger.
+///
+/// The native Claude Code `TaskList` is **session-global** (one list per
+/// session, not per project), but `task_persist` tags each snapshot with
+/// whatever project the cwd is in when the hook fires. A session that `cd`s
+/// through N repos therefore smears its identical task list into N project
+/// snapshots — cross-project bleed (observed: one 2-task list copied into 8
+/// distinct repos). The ledger records every `project_hash` this session has
+/// written a snapshot to, so on each fire we can truncate the session's
+/// snapshot in every project *except the current one* — keeping a session's
+/// tasks in exactly ONE project at a time (they follow the session as it moves
+/// between repos). Stored at
+/// `~/.claude/sentinel/persistent-tasks/.session-projects/{session_id}.json`.
+fn session_projects_ledger_path(fs: &dyn FileSystemPort, session_id: &str) -> Option<PathBuf> {
+    let home = fs.home_dir()?;
+    // session_id is already validated (concrete_input_session_id) before we get
+    // here, so it is safe as a path component.
+    Some(
+        super::persistent_tasks_root(&home)
+            .join(".session-projects")
+            .join(format!("{session_id}.json")),
+    )
+}
+
+/// Read the set of project hashes this session has written snapshots to.
+fn read_session_projects(fs: &dyn FileSystemPort, session_id: &str) -> Vec<String> {
+    let Some(path) = session_projects_ledger_path(fs, session_id) else {
+        return Vec::new();
+    };
+    fs.read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Record `project_hash` in this session's ledger (idempotent, deduped).
+fn record_session_project(fs: &dyn FileSystemPort, session_id: &str, project_hash: &str) {
+    let Some(path) = session_projects_ledger_path(fs, session_id) else {
+        return;
+    };
+    let mut projects = read_session_projects(fs, session_id);
+    if projects.iter().any(|p| p == project_hash) {
+        return; // already recorded
+    }
+    projects.push(project_hash.to_string());
+    if let Ok(json) = serde_json::to_string(&projects) {
+        if let Err(e) = atomic_write(fs, &path, &json) {
+            tracing::warn!(error = %e, "Failed to update session-projects ledger");
+        }
+    }
+}
+
+/// After persisting the current project's snapshot, clear this session's stale
+/// snapshot from every OTHER project it previously wrote — killing the bleed.
+///
+/// Truncating only *other* projects' copies (never the current, live one) means
+/// there is no race with the just-written snapshot: the current project keeps
+/// its real tasks; the projects the session has moved on from are cleared.
+fn clear_bled_snapshots(
+    fs: &dyn FileSystemPort,
+    git: &dyn GitStatusPort,
+    cwd: &str,
+    current_hash: &str,
+    session_id: &str,
+) {
+    let previous = read_session_projects(fs, session_id);
+    for other_hash in previous.iter().filter(|h| *h != current_hash) {
+        // Only clear if that other project's snapshot was written by THIS
+        // session (meta.session_id match) — never touch another session's data.
+        let Some(dir) = persistent_tasks_dir(fs, other_hash) else {
+            continue;
+        };
+        let owned_by_this_session = fs
+            .read_to_string(&dir.join("meta.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<PersistMeta>(&s).ok())
+            .is_some_and(|m| m.session_id == session_id);
+        if !owned_by_this_session {
+            continue;
+        }
+        // Reuse the safe truncate. `cwd` here is only used for the tasks.md
+        // path inside truncate; the other project's repo root differs, but
+        // truncate re-resolves it from git — and since we pass the ORIGINAL
+        // cwd we cannot know the other project's root, so we pass the other
+        // project's recorded cwd from its own meta when available.
+        let other_cwd = fs
+            .read_to_string(&dir.join("meta.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<PersistMeta>(&s).ok())
+            .map(|m| m.cwd)
+            .unwrap_or_else(|| cwd.to_string());
+        if let Err(e) = truncate_persistent_tasks(fs, git, &other_cwd, other_hash, session_id) {
+            tracing::warn!(error = %e, other_hash = %other_hash,
+                "Failed to clear bled task snapshot for a project this session left");
+        }
+    }
+}
+
 /// Find the active task list directory for this session.
 ///
 /// Strictly scoped to `~/.claude/tasks/{session_id}/`. Returns `None` if that
@@ -1076,7 +1174,16 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
 
     if let Err(e) = write_persistent_tasks(ctx.fs, ctx.git, &tasks, cwd, &proj_hash, session_id) {
         tracing::warn!(error = %e, "Failed to persist tasks");
+        return HookOutput::allow();
     }
+
+    // Bleed fix: the session-global task list now lives in THIS project's
+    // snapshot. Clear this session's stale copies from every OTHER project it
+    // previously wrote (the session has moved on from them), then record the
+    // current project in the ledger. Net: a session's tasks appear in exactly
+    // one project at a time and follow the session across repos.
+    clear_bled_snapshots(ctx.fs, ctx.git, cwd, &proj_hash, session_id);
+    record_session_project(ctx.fs, session_id, &proj_hash);
 
     HookOutput::allow()
 }
@@ -2163,5 +2270,98 @@ mod tests {
         fn head_sha(&self, _: &str) -> Option<String> {
             None
         }
+    }
+
+    // ───────────── Piece 2: cross-project bleed ledger ─────────────
+
+    /// Seed a non-empty snapshot for (project_hash, session_id) with a given
+    /// task list, writing meta.json so ownership checks pass.
+    fn seed_snapshot(home: &Path, project_hash: &str, session_id: &str, cwd: &str, tasks_json: &str) {
+        let dir = home
+            .join(".claude/sentinel/persistent-tasks")
+            .join(project_hash);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tasks.json"), tasks_json).unwrap();
+        let meta = serde_json::json!({
+            "project_hash": project_hash,
+            "cwd": cwd,
+            "session_id": session_id,
+            "updated_at": "2026-07-06T00:00:00+00:00",
+            "task_count": 1,
+            "incomplete_count": 1,
+            "last_block_hash": ""
+        });
+        std::fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    }
+
+    fn snapshot_tasks(home: &Path, project_hash: &str) -> String {
+        let p = home
+            .join(".claude/sentinel/persistent-tasks")
+            .join(project_hash)
+            .join("tasks.json");
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn ledger_records_and_reads_back_deduped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = HomeFs { home: tmp.path().to_path_buf() };
+        record_session_project(&fs, "sess-1", "projaaaa");
+        record_session_project(&fs, "sess-1", "projbbbb");
+        record_session_project(&fs, "sess-1", "projaaaa"); // dup — ignored
+        let got = read_session_projects(&fs, "sess-1");
+        assert_eq!(got, vec!["projaaaa".to_string(), "projbbbb".to_string()]);
+    }
+
+    #[test]
+    fn clear_bled_truncates_other_projects_of_same_session_not_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let fs = HomeFs { home: home.to_path_buf() };
+        let git = NoGit;
+        let sid = "sess-bleed";
+        let ghost = r#"[{"id":"1","subject":"global task","status":"in_progress"}]"#;
+        // Session visited projA and projB earlier (both hold the identical list),
+        // and is now in projC (current).
+        seed_snapshot(home, "projaaaa", sid, "/repo/a", ghost);
+        seed_snapshot(home, "projbbbb", sid, "/repo/b", ghost);
+        seed_snapshot(home, "projcccc", sid, "/repo/c", ghost);
+        record_session_project(&fs, sid, "projaaaa");
+        record_session_project(&fs, sid, "projbbbb");
+        record_session_project(&fs, sid, "projcccc");
+
+        // Now persisting for projC clears A and B (the bled copies), keeps C.
+        clear_bled_snapshots(&fs, &git, "/repo/c", "projcccc", sid);
+
+        assert_eq!(snapshot_tasks(home, "projaaaa").trim(), "[]", "projA bled copy cleared");
+        assert_eq!(snapshot_tasks(home, "projbbbb").trim(), "[]", "projB bled copy cleared");
+        assert!(
+            snapshot_tasks(home, "projcccc").contains("global task"),
+            "current projC snapshot preserved"
+        );
+    }
+
+    #[test]
+    fn clear_bled_never_touches_another_sessions_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let fs = HomeFs { home: home.to_path_buf() };
+        let git = NoGit;
+        let mine = "sess-mine";
+        let theirs = "sess-theirs";
+        let list = r#"[{"id":"1","subject":"x","status":"pending"}]"#;
+        // projA holds ANOTHER session's snapshot; my ledger wrongly lists projA.
+        seed_snapshot(home, "projaaaa", theirs, "/repo/a", list);
+        seed_snapshot(home, "projcccc", mine, "/repo/c", list);
+        record_session_project(&fs, mine, "projaaaa");
+        record_session_project(&fs, mine, "projcccc");
+
+        clear_bled_snapshots(&fs, &git, "/repo/c", "projcccc", mine);
+
+        // projA is owned by `theirs` → must NOT be truncated.
+        assert!(
+            snapshot_tasks(home, "projaaaa").contains("\"x\""),
+            "another session's snapshot must be untouched (meta.session_id guard)"
+        );
     }
 }

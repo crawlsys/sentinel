@@ -39,13 +39,12 @@ fn events_base_dir(fs: &dyn FileSystemPort) -> std::path::PathBuf {
     fs.claude_dir().join("sentinel").join("events")
 }
 
+/// Delegates to the canonical session-id validator
+/// (`crate::hooks::session_path_component`). This body was a byte-for-byte copy
+/// of the canonical logic; centralizing it keeps the event-routing key
+/// derivation in lockstep with the rest of sentinel.
 fn concrete_session_id(session_id: &str) -> Option<&str> {
-    let session_id = session_id.trim();
-    if session_id.eq_ignore_ascii_case("unknown") || session_id.eq_ignore_ascii_case("default") {
-        return None;
-    }
-    sentinel_domain::SessionId::validate(session_id).ok()?;
-    Some(session_id)
+    crate::hooks::session_path_component(session_id)
 }
 
 /// Get the session-scoped events directory.
