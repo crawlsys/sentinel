@@ -369,6 +369,22 @@ fn build_summary_block(
         return Ok(None);
     }
 
+    // Age out ancient summaries. Nothing rewrites session-summary.json until a
+    // later SessionEnd finds non-empty tasks for this project, so a repo
+    // touched once and left would surface "ended 19d ago … 1 in progress"
+    // verbatim at every session start, forever. Unparseable timestamps are
+    // treated as stale.
+    const MAX_SUMMARY_AGE_DAYS: i64 = 14;
+    if chrono::DateTime::parse_from_rfc3339(&summary.written_at)
+        .ok()
+        .is_none_or(|t| {
+            chrono::Utc::now().signed_duration_since(t)
+                > chrono::Duration::days(MAX_SUMMARY_AGE_DAYS)
+        })
+    {
+        return Ok(None);
+    }
+
     let when = relative_time(&summary.written_at);
     let mut block = format!("🕘 [Last Session] ended {when}");
     if !summary.branch.is_empty() {
@@ -620,6 +636,41 @@ mod tests {
         assert!(build_summary_block(&ctx, "zzzzzzzz", "any-session")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn summary_block_ages_out_after_recency_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+
+        let dir = persistent_tasks_dir(&fs, "agedhash").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_summary = |written_at: &str| {
+            std::fs::write(
+                dir.join("session-summary.json"),
+                format!(
+                    r#"{{"session_id":"other-sess","written_at":"{written_at}","branch":"","head_sha":"","recent_commits":[],"completed":0,"in_progress":1,"pending":0}}"#
+                ),
+            )
+            .unwrap();
+        };
+
+        // Ancient summary (the "ended 19d ago … 1 in progress" line that
+        // nothing ever rewrites) → suppressed.
+        write_summary("2026-06-01T00:00:00Z");
+        assert!(
+            build_summary_block(&ctx, "agedhash", "current-sess")
+                .unwrap()
+                .is_none(),
+            "summaries beyond the recency window must not be replayed"
+        );
+
+        // Fresh summary → rendered.
+        write_summary(&chrono::Utc::now().to_rfc3339());
+        assert!(build_summary_block(&ctx, "agedhash", "current-sess")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
