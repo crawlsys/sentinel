@@ -252,7 +252,13 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     write_cooldown(ctx.fs, session_id);
 
     let context = format!(
-        "[Context Monitor] {zone} zone — {pct:.0}% context used.\n{strategy}",
+        "{ze} [Context Monitor] {zone} zone — {pct:.0}% context used.\n{strategy}",
+        ze = match zone {
+            Zone::Green => "🟢",
+            Zone::Yellow => "🟡",
+            Zone::Orange => "🟠",
+            Zone::Red => "🔴",
+        },
         zone = zone.label(),
         pct = state.percent_used,
         strategy = zone.strategy(),

@@ -410,7 +410,7 @@ fn check_elevated_context(fs: &dyn FileSystemPort, session_id: &str) -> bool {
 fn build_summary_context(summary: &ActivitySummary) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
-        "[Activity Tracker] Session activity: {} tool calls.",
+        "📊 [Activity Tracker] Session activity: {} tool calls.",
         summary.total_calls
     ));
 

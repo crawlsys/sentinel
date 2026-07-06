@@ -260,14 +260,14 @@ fn build_tasks_block(
 
     // Build context injection
     let mut context = format!(
-        "[Persistent Tasks] {} incomplete task(s) from previous session (updated {time_str}):\n",
+        "📌 [Persistent Tasks] {} incomplete task(s) from previous session (updated {time_str}):\n",
         incomplete.len()
     );
 
     for task in &incomplete {
         let status_icon = match task.status.as_str() {
-            "in_progress" => "~",
-            _ => " ",
+            "in_progress" => "🔄",
+            _ => "⏳",
         };
         let _ = write!(
             context,
@@ -370,7 +370,7 @@ fn build_summary_block(
     }
 
     let when = relative_time(&summary.written_at);
-    let mut block = format!("[Last Session] ended {when}");
+    let mut block = format!("🕘 [Last Session] ended {when}");
     if !summary.branch.is_empty() {
         let _ = write!(block, " on `{}`", summary.branch);
     }

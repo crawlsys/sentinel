@@ -531,7 +531,7 @@ pub fn build_no_match_output(fs: &dyn FileSystemPort) -> HookOutput {
 
     HookOutput::inject_context(
         HookEvent::UserPromptSubmit,
-        "[Skill Router] No skill matched — general conversation mode.".to_string(),
+        "🎯 [Skill Router] No skill matched — general conversation mode.".to_string(),
     )
 }
 

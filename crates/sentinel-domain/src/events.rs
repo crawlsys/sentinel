@@ -211,6 +211,10 @@ pub enum HookTier {
     Info,
     /// Warning — user should notice but isn't blocked. Yellow dot.
     Warn,
+    /// High-severity warning / soft block (dry-run auditors, BA structural
+    /// gates). Orange dot — several hooks hand-rolled 🟠 because the enum
+    /// couldn't express it.
+    High,
     /// Blocking — the hook is rejecting the action. Red dot.
     Block,
 }
@@ -222,6 +226,7 @@ impl HookTier {
         match self {
             Self::Info => "🟢",
             Self::Warn => "🟡",
+            Self::High => "🟠",
             Self::Block => "🔴",
         }
     }

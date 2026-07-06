@@ -1997,7 +1997,7 @@ fn build_startup_context(
     // from CARGO_PKG_VERSION (compile-time); hook count is the live length
     // of HOOK_NAMES so it can't drift from the registered handlers.
     parts.push(format!(
-        "[SessionStart] session_id: {} | engine: sentinel v{} | hooks: {}",
+        "🛡️ [SessionStart] session_id: {} | engine: sentinel v{} | hooks: {}",
         session_id,
         env!("CARGO_PKG_VERSION"),
         super::HOOK_NAMES.len(),
@@ -2008,30 +2008,30 @@ fn build_startup_context(
         SyncResult::Synced { files, pulled } => {
             let pull_tag = if *pulled { " (pulled)" } else { "" };
             if *files > 0 {
-                parts.push(format!("[Marketplace Sync] {files} files synced{pull_tag}"));
+                parts.push(format!("📦 [Marketplace Sync] {files} files synced{pull_tag}"));
             } else {
-                parts.push("[Marketplace Sync] No changes".to_string());
+                parts.push("📦 [Marketplace Sync] No changes".to_string());
             }
         }
         SyncResult::UpToDate => {
-            parts.push("[Marketplace Sync] Up to date".to_string());
+            parts.push("📦 [Marketplace Sync] Up to date".to_string());
         }
         SyncResult::NoRepo => {
-            parts.push("[Marketplace Sync] No local repo found".to_string());
+            parts.push("📦 [Marketplace Sync] No local repo found".to_string());
         }
     }
 
     // Validation warnings
     if !validation.valid {
         parts.push(format!(
-            "[Validation] FAILED: {}",
+            "❌ [Validation] FAILED: {}",
             validation.reasons.join("; ")
         ));
     }
 
     // Component counts
     parts.push(format!(
-        "[Components] {} skills | {} hooks | {} commands | {} agents | {} MCP servers",
+        "🧩 [Components] {} skills | {} hooks | {} commands | {} agents | {} MCP servers",
         counts.skills, counts.hooks, counts.commands, counts.agents, counts.mcp_servers
     ));
 
@@ -2044,7 +2044,7 @@ fn build_startup_context(
                 .map(sentinel_domain::project::StandardFile::path)
                 .collect();
             parts.push(format!(
-                "[Project Init] Auto-generated {} standard file(s): {}",
+                "📁 [Project Init] Auto-generated {} standard file(s): {}",
                 result.created.len(),
                 file_names.join(", ")
             ));
@@ -2055,7 +2055,7 @@ fn build_startup_context(
                 .iter()
                 .map(|(f, e)| format!("{}: {}", f.path(), e))
                 .collect();
-            parts.push(format!("[Project Init] Errors: {}", err_names.join("; ")));
+            parts.push(format!("📁 [Project Init] Errors: {}", err_names.join("; ")));
         }
     }
 
@@ -2063,31 +2063,31 @@ fn build_startup_context(
     if let Some(report) = guardian {
         if report.tripwire {
             parts.push(format!(
-                "[MCP REGISTRATION MISSING] live ~/.claude.json registry state: {:?} while {} MCP repos exist on disk",
+                "🚨 [MCP REGISTRATION MISSING] live ~/.claude.json registry state: {:?} while {} MCP repos exist on disk",
                 report.state, report.mcp_repos
             ));
         }
         if let Some(heal) = &report.heal {
             parts.push(format!(
-                "[MCP Guardian] HEALED {} MCP registration(s) from {} into {} config file(s) — /reload-plugins queued to reconnect",
+                "🛡️ [MCP Guardian] HEALED {} MCP registration(s) from {} into {} config file(s) — /reload-plugins queued to reconnect",
                 heal.entries,
                 heal.source,
                 heal.merged_files.len()
             ));
             if !heal.unresolved_env.is_empty() {
                 parts.push(format!(
-                    "[MCP Guardian] WARNING: unresolved $doppler env refs omitted (degraded entries): {}",
+                    "🛡️ [MCP Guardian] WARNING: unresolved $doppler env refs omitted (degraded entries): {}",
                     heal.unresolved_env.join(", ")
                 ));
             }
         } else if report.tripwire {
             parts.push(
-                "[MCP Guardian] heal did NOT run — restore ~/.claude.json manually from ~/.claude/sentinel/state/mcp-registry/".to_string(),
+                "🛡️ [MCP Guardian] heal did NOT run — restore ~/.claude.json manually from ~/.claude/sentinel/state/mcp-registry/".to_string(),
             );
         }
         if !report.warnings.is_empty() {
             parts.push(format!(
-                "[MCP Guardian] warnings: {}",
+                "🛡️ [MCP Guardian] warnings: {}",
                 report.warnings.join("; ")
             ));
         }
@@ -2520,7 +2520,7 @@ mod tests {
             warnings: vec!["~/.claude.json is unreadable".to_string()],
         });
         let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &unhealed);
-        assert!(context.contains("[MCP REGISTRATION MISSING]"));
+        assert!(context.contains("🚨 [MCP REGISTRATION MISSING]"));
         assert!(context.contains("Unreadable"));
         assert!(context.contains("heal did NOT run"));
 
@@ -2539,7 +2539,7 @@ mod tests {
             warnings: vec![],
         });
         let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &healed);
-        assert!(context.contains("[MCP REGISTRATION MISSING]"));
+        assert!(context.contains("🚨 [MCP REGISTRATION MISSING]"));
         assert!(context.contains("HEALED 40 MCP registration(s) from marketplace"));
         assert!(context.contains("/reload-plugins queued"));
         assert!(context.contains("linear.LINEAR_API_KEY"));
@@ -2555,8 +2555,8 @@ mod tests {
             warnings: vec![],
         });
         let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &healthy);
-        assert!(!context.contains("[MCP REGISTRATION MISSING]"));
-        assert!(!context.contains("[MCP Guardian]"));
+        assert!(!context.contains("🚨 [MCP REGISTRATION MISSING]"));
+        assert!(!context.contains("🛡️ [MCP Guardian]"));
     }
 
     /// A panic inside the guarded guardian call must degrade to `None` and let
@@ -2965,7 +2965,7 @@ issue_prefix: TEAMA
             cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "s1", &init_result, &None);
-        assert!(context.contains("[Project Init] Auto-generated 3 standard file(s)"));
+        assert!(context.contains("📁 [Project Init] Auto-generated 3 standard file(s)"));
         assert!(context.contains("LICENSE"));
         assert!(context.contains("SECURITY.md"));
         assert!(context.contains("BUILDING.md"));
@@ -2988,7 +2988,7 @@ issue_prefix: TEAMA
             cli_repos: 0,
         };
         let context = build_startup_context(&sync, &validation, &counts, "s1", &None, &None);
-        assert!(!context.contains("[Project Init]"));
+        assert!(!context.contains("📁 [Project Init]"));
     }
 
     #[test]

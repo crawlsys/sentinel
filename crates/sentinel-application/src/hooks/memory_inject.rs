@@ -221,7 +221,7 @@ fn compact_summary(content: &str, max_chars: usize) -> String {
 }
 
 fn render_context(hits: &[UnifiedHit]) -> String {
-    let mut out = format!("[Memory] {} relevant atom(s):\n", hits.len());
+    let mut out = format!("🧠 [Memory] {} relevant atom(s):\n", hits.len());
     for h in hits {
         let short = compact_summary(&h.value, 150);
         let _ = write!(
@@ -472,7 +472,7 @@ fn format_capture_notice(n: &CaptureNotice) -> Option<(String, String)> {
         n.project, quar
     );
     let model = format!(
-        "[Memory] Auto-captured last turn ({landed} durable atom(s) in {}{}):{bullets}{more}",
+        "🧠 [Memory] Auto-captured last turn ({landed} durable atom(s) in {}{}):{bullets}{more}",
         n.project, quar
     );
     Some((human, model))
@@ -658,7 +658,7 @@ mod tests {
         assert!(human.contains("1 quarantined"));
         assert!(human.contains("(+1 more)")); // names_total 3 > 2 shown
                                               // Model channel: same substance, [Memory] prefix.
-        assert!(model.starts_with("[Memory]"));
+        assert!(model.starts_with("🧠 [Memory]"));
         assert!(model.contains("3 durable atom"));
     }
 
