@@ -562,6 +562,15 @@ mod tests {
                 .open(p)?;
             Ok(file.write_all(c)?)
         }
+
+        // The port's default `remove_file` fails as unsupported — the
+        // stale-event sweep actually deletes, so the fixture must too.
+        fn remove_file(
+            &self,
+            p: &std::path::Path,
+        ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+            Ok(std::fs::remove_file(p)?)
+        }
     }
 
     #[test]
@@ -704,7 +713,8 @@ mod tests {
         assert_eq!(pending.len(), 1);
         let event = read_event(&fs, &pending[0]).expect("channel event");
         assert_eq!(event.session_id.as_deref(), Some("channel-real-session"));
-        assert_eq!(event.summary, "Agent completed");
+        // `emit` stamps the event-kind emoji onto ASCII summaries.
+        assert_eq!(event.summary, "✅ Agent completed");
     }
 
     #[test]
@@ -852,7 +862,7 @@ mod tests {
         let ev = channel_event_from_webhook("linear", None, &body, serde_json::Map::new());
         assert_eq!(
             ev.summary,
-            "[LINEAR] QA reviewer commented on FPCRM-1: \"hi\""
+            "🔔 [LINEAR] QA reviewer commented on FPCRM-1: \"hi\""
         );
         assert_eq!(ev.event, "hookdeck.linear");
         assert_eq!(ev.source_agent.as_deref(), Some("hookdeck"));
@@ -876,7 +886,7 @@ mod tests {
             &body,
             serde_json::Map::new(),
         );
-        assert_eq!(ev.summary, "[HOOKDECK:unknown_src] thing.event on x1");
+        assert_eq!(ev.summary, "🔔 [HOOKDECK:unknown_src] thing.event on x1");
         // Never 400-line JSON — summary stays one short line.
         assert!(ev.summary.len() < 200);
         assert_eq!(
