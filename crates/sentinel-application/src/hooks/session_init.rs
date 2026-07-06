@@ -884,6 +884,46 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
     accounts
 }
 
+/// Strip leading status/priority decoration a caller baked into a task subject
+/// string, so the Subject column shows just the description (Status/Priority
+/// have their own columns). Trims, in a loop, any of: a leading status/priority
+/// emoji (🔄 ⏳ ✅ ❌ 🔴 🟠 🟡 🟢), a `[P0]`..`[P3]` token, a bare leading
+/// numeric rank, and a leading `—`/`-`/`:` separator. Idempotent, and a no-op
+/// for a clean subject.
+fn strip_status_priority_prefix(subject: &str) -> &str {
+    const DECOR_EMOJI: &[char] = &['🔄', '⏳', '✅', '❌', '🔴', '🟠', '🟡', '🟢'];
+    let mut s = subject.trim_start();
+    loop {
+        let before = s;
+        // Leading decoration emoji.
+        s = s.trim_start_matches(|c| DECOR_EMOJI.contains(&c));
+        s = s.trim_start();
+        // Leading [Pn] priority token.
+        if let Some(rest) = s.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let inner = &rest[..close];
+                if inner.len() <= 3
+                    && inner.starts_with('P')
+                    && inner[1..].chars().all(|c| c.is_ascii_digit())
+                {
+                    s = rest[close + 1..].trim_start();
+                }
+            }
+        }
+        // Bare leading numeric rank (e.g. the "1" in "🔴 1 [P0]").
+        let trimmed_num = s.trim_start_matches(|c: char| c.is_ascii_digit());
+        if trimmed_num.len() < s.len() && trimmed_num.starts_with([' ', '—', '-', ':']) {
+            s = trimmed_num.trim_start();
+        }
+        // Leading separator.
+        s = s.trim_start_matches(['—', '-', ':']).trim_start();
+        if s == before {
+            break;
+        }
+    }
+    s
+}
+
 /// Render the **Active Tasks** section from the persistent-tasks snapshot for
 /// the current project.
 ///
@@ -937,11 +977,11 @@ pub fn render_tasks_section(cwd: &Path) -> String {
     );
     for t in &live {
         let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        let subject = t
-            .get("subject")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .replace('|', "\\|");
+        let raw_subject = t.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+        // Strip any status/priority decoration a caller baked into the subject
+        // string (e.g. "🔄 🔴 1 [P0] — Fix…"). Status and Priority render as
+        // their own columns, so leading glyphs are pure redundant noise.
+        let subject = strip_status_priority_prefix(raw_subject).replace('|', "\\|");
         let status = t
             .get("status")
             .and_then(|v| v.as_str())
@@ -1855,16 +1895,33 @@ CIRCUMSTANCE**
 /// Active Tasks section in sync after any task-state mutation.
 ///
 /// Returns the path that was written.
+///
+/// Uses the hook PROCESS's cwd to key the per-project task snapshot. Prefer
+/// [`regenerate_global_claude_md_for`] from the task hooks, which pass the
+/// SESSION's cwd — the hook process cwd is not reliably the session's working
+/// directory, so keying on it renders another project's tasks into the single
+/// global CLAUDE.md (cross-session task bleed). This no-arg form is retained for
+/// the CLI regeneration path, which legitimately wants the invoking cwd.
 pub fn regenerate_global_claude_md() -> PathBuf {
+    let cwd = std::env::current_dir()
+        .expect("[sentinel] FATAL: Cannot determine current directory for CLAUDE.md regeneration");
+    regenerate_global_claude_md_for(&cwd)
+}
+
+/// Regenerate `~/.claude/CLAUDE.md` rendering the Active Tasks table for the
+/// task snapshot keyed on `cwd` (the SESSION's working directory).
+///
+/// The task hooks call this with `input.cwd` so each session's CLAUDE.md
+/// reflects ITS OWN tasks. Keying on the hook process cwd (as the no-arg form
+/// does) picks the wrong per-project snapshot when the hook runs from a
+/// different directory than the session, bleeding another project's tasks into
+/// the table.
+pub fn regenerate_global_claude_md_for(cwd: &Path) -> PathBuf {
     let claude_dir = claude_dir();
     let counts = count_components(&claude_dir);
     let project_names = list_project_configs(&claude_dir);
     let linear_accounts = list_linear_accounts(&claude_dir);
-    // Use the process cwd that triggered regeneration. If the cwd is
-    // unreadable, fail closed instead of rendering task state from ".".
-    let cwd = std::env::current_dir()
-        .expect("[sentinel] FATAL: Cannot determine current directory for CLAUDE.md regeneration");
-    let tasks_section = render_tasks_section(&cwd);
+    let tasks_section = render_tasks_section(cwd);
     generate_claude_md(
         &claude_dir,
         &counts,
@@ -2170,6 +2227,40 @@ enum SyncResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_status_priority_prefix_cases() {
+        // The exact shape seen on disk: "🔄 🔴 1 [P0] — Fix…".
+        assert_eq!(
+            strip_status_priority_prefix("🔄 🔴 1 [P0] — Fix memory-capture gate"),
+            "Fix memory-capture gate"
+        );
+        // Single emoji + separator.
+        assert_eq!(
+            strip_status_priority_prefix("✅ Ship the thing"),
+            "Ship the thing"
+        );
+        // Priority token only.
+        assert_eq!(
+            strip_status_priority_prefix("[P1] Do the work"),
+            "Do the work"
+        );
+        // Bare rank + dash.
+        assert_eq!(strip_status_priority_prefix("2 - build it"), "build it");
+        // Clean subject is a no-op.
+        assert_eq!(
+            strip_status_priority_prefix("Restore mcpServers registrations"),
+            "Restore mcpServers registrations"
+        );
+        // Idempotent.
+        let once = strip_status_priority_prefix("🔴 [P0] — X");
+        assert_eq!(strip_status_priority_prefix(once), once);
+        // A subject that merely CONTAINS an emoji later is untouched.
+        assert_eq!(
+            strip_status_priority_prefix("Add 🔴 marker to UI"),
+            "Add 🔴 marker to UI"
+        );
+    }
 
     #[test]
     fn test_process_returns_context() {

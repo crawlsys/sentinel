@@ -73,9 +73,12 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Keep the Active Tasks section of ~/.claude/CLAUDE.md in sync with live
     // task state. Fire-and-forget: failure here must never block task
-    // creation. `regenerate_global_claude_md` is a pure filesystem op — no
-    // network, no lock contention — so the cost is a few ms per TaskCreated.
-    let _ = std::panic::catch_unwind(super::session_init::regenerate_global_claude_md);
+    // creation. Pass the SESSION's cwd (not the hook-process cwd) so the table
+    // renders THIS session's project tasks, not another project's.
+    let session_cwd = input.cwd.clone().unwrap_or_else(|| ".".to_string());
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::session_init::regenerate_global_claude_md_for(std::path::Path::new(&session_cwd))
+    }));
 
     // Allow task creation — no blocking or modification needed
     HookOutput::allow()
