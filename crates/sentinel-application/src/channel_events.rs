@@ -68,11 +68,25 @@ pub fn events_dir(fs: &dyn FileSystemPort, env: &dyn EnvPort) -> Option<std::pat
     events_dir_for_session(fs, session_id.as_deref())
 }
 
+/// Env vars that may carry the session identity, in priority order.
+///
+/// MUST stay in lockstep with the consumer (`sentinel-mcp-rust`
+/// `resolve_session_id_opt`): Claude Code exports `CLAUDE_CODE_SESSION_ID`,
+/// while the handler/SDK stack uses `VULCAN_SESSION_ID`/`CLAUDE_SESSION_ID`.
+/// A producer and consumer that resolve different strings for the same
+/// session strand every event in a directory no live watcher reads.
+pub const SESSION_ID_ENV_VARS: [&str; 4] = [
+    "VULCAN_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "SESSION_ID",
+];
+
 /// Detect the current session ID from the env adapter.
 fn detect_session_id(env: &dyn EnvPort) -> Option<String> {
-    env.var("CLAUDE_SESSION_ID")
-        .or_else(|| env.var("SESSION_ID"))
-        .and_then(|s| concrete_session_id(&s).map(str::to_string))
+    SESSION_ID_ENV_VARS
+        .iter()
+        .find_map(|key| env.var(key).and_then(|s| concrete_session_id(&s).map(str::to_string)))
 }
 
 /// Derive a project name from a cwd path (uses the last path component).
@@ -83,6 +97,34 @@ fn project_from_cwd(cwd: Option<&str>) -> Option<String> {
             .and_then(|n| n.to_str())
             .map(String::from)
     })
+}
+
+/// Emoji vocabulary for channel-event kinds — one glyph per event family so
+/// pushed notifications scan at a glance. Unknown kinds get no prefix.
+fn event_emoji(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "agent_completed" | "task_completed" => "✅",
+        "teammate_idle" => "💤",
+        "build_completed" => "🔨",
+        "deploy_completed" => "🚀",
+        "mcp_server_failure" | "mcp_registration_missing" => "🚨",
+        "context_threshold" => "🟡",
+        "plan_organized" => "📋",
+        "linear_inbound_drift" => "🔄",
+        _ if event.starts_with("hookdeck.") => "🔔",
+        _ => return None,
+    })
+}
+
+/// Prefix `summary` with the event's vocabulary emoji unless the producer
+/// already leads with a non-ASCII glyph of its own.
+fn decorate_summary(event: &str, summary: &str) -> String {
+    match event_emoji(event) {
+        Some(emoji) if summary.chars().next().is_some_and(|c| c.is_ascii()) => {
+            format!("{emoji} {summary}")
+        }
+        _ => summary.to_string(),
+    }
 }
 
 /// Emit a channel event by writing a JSON file to the session-scoped events directory.
@@ -122,8 +164,8 @@ pub fn emit(
     );
 
     let channel_event = ChannelEvent {
+        summary: decorate_summary(event, summary),
         event: event.to_string(),
-        summary: summary.to_string(),
         ts: now.to_rfc3339(),
         session_id: resolved_session_id,
         project: project_from_cwd(cwd),
@@ -228,6 +270,53 @@ pub fn cleanup_stale_sessions(fs: &dyn FileSystemPort, max_age: std::time::Durat
     }
 }
 
+/// Remove individual event *files* older than `max_age`, whatever the age of
+/// their session directory.
+///
+/// `cleanup_stale_sessions` removes whole directories by mtime — but a
+/// directory whose producer is alive while no consumer watches it (session-id
+/// split-brain, crashed watcher) keeps a fresh mtime forever as its backlog
+/// grows. Event filenames lead with the emit timestamp in unix millis, so
+/// staleness is decided from the name alone; unparseable names fall back to
+/// fs metadata. Directories themselves are left in place — deleting a live
+/// consumer's watched directory would sever its `notify` subscription.
+pub fn cleanup_stale_events(fs: &dyn FileSystemPort, max_age: std::time::Duration) {
+    let base = events_base_dir(fs);
+    let Ok(entries) = fs.read_dir(&base) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let cutoff_ms = cutoff
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+
+    for dir in entries {
+        if !fs.is_dir(&dir) {
+            continue;
+        }
+        for file in pending_events_in_dir(fs, &dir) {
+            let by_name = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.split('_').next())
+                .and_then(|ms| ms.parse::<u128>().ok())
+                .map(|ms| ms < cutoff_ms);
+            let stale = by_name.unwrap_or_else(|| {
+                fs.metadata(&file)
+                    .and_then(|m| m.modified().map_err(Into::into))
+                    .is_ok_and(|t| t < cutoff)
+            });
+            if stale {
+                if let Err(e) = fs.remove_file(&file) {
+                    debug!(error = %e, path = %file.display(), "Failed to remove stale event file");
+                }
+            }
+        }
+    }
+}
+
 /// Build a [`ChannelEvent`] from a Hookdeck webhook, using the typed decoders
 /// to produce a human-readable `summary` and preserving the raw JSON body
 /// under `meta.raw` so consumers can still drill into the full payload.
@@ -273,14 +362,17 @@ pub fn channel_event_from_webhook(
     // Session-visible content uses only `summary`.
     meta.insert("raw".to_string(), decoded.raw);
 
+    let event = format!("hookdeck.{source}");
+    let summary = decorate_summary(&event, &decoded.summary);
     ChannelEvent {
-        event: format!("hookdeck.{source}"),
-        summary: decoded.summary,
+        event,
+        summary,
         ts: Utc::now().to_rfc3339(),
-        session_id: std::env::var("CLAUDE_SESSION_ID")
-            .ok()
-            .or_else(|| std::env::var("SESSION_ID").ok())
-            .and_then(|s| concrete_session_id(&s).map(str::to_string)),
+        session_id: SESSION_ID_ENV_VARS.iter().find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|s| concrete_session_id(&s).map(str::to_string))
+        }),
         project: None,
         source_agent: Some("hookdeck".into()),
         meta,
@@ -613,6 +705,123 @@ mod tests {
         let event = read_event(&fs, &pending[0]).expect("channel event");
         assert_eq!(event.session_id.as_deref(), Some("channel-real-session"));
         assert_eq!(event.summary, "Agent completed");
+    }
+
+    #[test]
+    fn detect_session_id_reads_claude_code_var() {
+        // Claude Code exports CLAUDE_CODE_SESSION_ID — the producer must
+        // resolve it, or events land in a dir no consumer watches.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::with(&[(
+            "CLAUDE_CODE_SESSION_ID",
+            "cc-session-1",
+        )]);
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "done",
+            serde_json::Map::new(),
+            None,
+            None,
+            Some("tester"),
+        );
+
+        assert_eq!(pending_events_for_session(&fs, Some("cc-session-1")).len(), 1);
+    }
+
+    #[test]
+    fn detect_session_id_priority_order_prefers_vulcan() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::with(&[
+            ("VULCAN_SESSION_ID", "vulcan-sess"),
+            ("CLAUDE_CODE_SESSION_ID", "cc-sess"),
+            ("SESSION_ID", "generic-sess"),
+        ]);
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "done",
+            serde_json::Map::new(),
+            None,
+            None,
+            Some("tester"),
+        );
+
+        assert_eq!(pending_events_for_session(&fs, Some("vulcan-sess")).len(), 1);
+        assert!(pending_events_for_session(&fs, Some("cc-sess")).is_empty());
+        assert!(pending_events_for_session(&fs, Some("generic-sess")).is_empty());
+    }
+
+    #[test]
+    fn summary_gets_event_emoji_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let env = crate::hooks::test_support::StubEnv::new();
+
+        emit(
+            &fs,
+            &env,
+            "agent_completed",
+            "Agent \"Explore\" has finished.",
+            serde_json::Map::new(),
+            Some("emoji-sess-1"),
+            None,
+            Some("Explore"),
+        );
+
+        let pending = pending_events_for_session(&fs, Some("emoji-sess-1"));
+        let event = read_event(&fs, &pending[0]).expect("channel event");
+        assert_eq!(event.summary, "✅ Agent \"Explore\" has finished.");
+    }
+
+    #[test]
+    fn summary_with_existing_emoji_is_not_double_prefixed() {
+        assert_eq!(decorate_summary("agent_completed", "✅ already tagged"), "✅ already tagged");
+        assert_eq!(decorate_summary("teammate_idle", "plain text"), "💤 plain text");
+        assert_eq!(decorate_summary("hookdeck.linear", "[linear] Issue.update"), "🔔 [linear] Issue.update");
+        assert_eq!(decorate_summary("unmapped_kind", "plain text"), "plain text");
+    }
+
+    #[test]
+    fn cleanup_stale_events_removes_old_files_keeps_fresh_and_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fs = TempHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        let dir = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("events")
+            .join("stale-sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let old = dir.join("1000000000000_agent_completed.json");
+        let fresh = dir.join(format!("{now_ms}_agent_completed.json"));
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+
+        cleanup_stale_events(&fs, std::time::Duration::from_secs(24 * 60 * 60));
+
+        assert!(!old.exists(), "stale event file must be removed");
+        assert!(fresh.exists(), "fresh event file must be kept");
+        assert!(dir.exists(), "session dir must never be removed by file sweep");
     }
 
     #[test]

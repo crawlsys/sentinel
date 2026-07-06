@@ -151,6 +151,14 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         ctx.fs,
         sentinel_domain::constants::STALE_SESSION_EVENTS_AGE,
     );
+    // ...and stale event FILES inside still-active directories. A directory
+    // whose producer is alive but whose consumer died (or resolved a
+    // different session id) keeps a fresh mtime while its backlog grows
+    // unbounded — dir-level cleanup never catches it.
+    crate::channel_events::cleanup_stale_events(
+        ctx.fs,
+        sentinel_domain::constants::STALE_SESSION_EVENTS_AGE,
+    );
 
     // 2. Sync marketplace repo (if found)
     let sync_result = sync_marketplace(ctx.process, &claude_dir);
