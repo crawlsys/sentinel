@@ -98,28 +98,105 @@ fn osc_title(text: &str) -> Vec<u8> {
     seq
 }
 
-/// Write raw bytes to the attached console's active screen buffer (`CONOUT$`).
+/// Write raw bytes so the OSC title sequence reaches the terminal.
 ///
-/// Best-effort: any failure (no console attached, redirected, permission)
-/// is swallowed — a title that can't be set must never break the session.
+/// Claude Code spawns hooks with their stdout redirected to a pipe (it captures
+/// hook stdout for context injection), and may run them without the parent
+/// tab's console attached. We therefore, in order (all safe — this crate forbids
+/// `unsafe`):
+///   1. `CONOUT$` — works when the hook shares the tab's console (bytes land on
+///      the tab). Silently no-ops if no console is attached.
+///   2. **stderr** — Claude Code redirects/captures hook *stdout*, but hook
+///      *stderr* is inherited from the parent and reaches the terminal, so an
+///      OSC sequence written there still moves the tab title. This is the path
+///      that works in the normal harness-spawned case.
+///
+/// Both are attempted every call (cheap); the terminal ignores a duplicate
+/// title write. Best-effort — every failure is swallowed so a title that can't
+/// be set never breaks the session.
 #[cfg(windows)]
 fn write_to_console(bytes: &[u8]) {
     use std::io::Write as _;
-    if let Ok(mut conout) = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$") {
-        let _ = conout.write_all(bytes);
-        let _ = conout.flush();
+
+    // 1. CONOUT$ (attached-console case).
+    let conout_ok = match std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$") {
+        Ok(mut conout) => conout.write_all(bytes).and_then(|()| conout.flush()).is_ok(),
+        Err(_) => false,
+    };
+
+    // 2. stderr (harness case — inherited handle reaches the tty).
+    let stderr_ok = std::io::stderr()
+        .write_all(bytes)
+        .and_then(|()| std::io::stderr().flush())
+        .is_ok();
+
+    log_write(
+        match (conout_ok, stderr_ok) {
+            (true, true) => "conout+stderr",
+            (true, false) => "conout",
+            (false, true) => "stderr",
+            (false, false) => "none",
+        },
+        conout_ok || stderr_ok,
+    );
+}
+
+/// Diagnostic breadcrumb: append one line per invocation recording which write
+/// path was taken and whether it succeeded, so the harness path is observable
+/// after the fact. Best-effort; failure to log never affects the hook.
+#[cfg(windows)]
+fn log_write(path: &str, ok: bool) {
+    use std::io::Write as _;
+    if let Some(home) = dirs::home_dir() {
+        let logp = home
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("tab-title.log");
+        if let Some(parent) = logp.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logp) {
+            let _ = writeln!(f, "path={path} ok={ok}");
+        }
     }
 }
 
-/// Non-Windows fallback: emit to the controlling terminal via `/dev/tty` so
-/// the sequence bypasses captured stdout the same way `CONOUT$` does on
-/// Windows. Best-effort.
+/// Non-Windows: emit to the controlling terminal via `/dev/tty` so the
+/// sequence bypasses captured stdout the same way `CONOUT$` does on Windows,
+/// falling back to stderr. Best-effort.
 #[cfg(not(windows))]
 fn write_to_console(bytes: &[u8]) {
     use std::io::Write as _;
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        let _ = tty.write_all(bytes);
-        let _ = tty.flush();
+        if tty.write_all(bytes).and_then(|()| tty.flush()).is_ok() {
+            log_write("dev-tty", true);
+            return;
+        }
+    }
+    let ok = std::io::stderr()
+        .write_all(bytes)
+        .and_then(|()| std::io::stderr().flush())
+        .is_ok();
+    log_write("stderr-fallback", ok);
+}
+
+/// Diagnostic breadcrumb (non-Windows twin of the Windows `log_write`).
+#[cfg(not(windows))]
+fn log_write(path: &str, ok: bool) {
+    use std::io::Write as _;
+    if let Some(home) = dirs::home_dir() {
+        let logp = home
+            .join(".claude")
+            .join("sentinel")
+            .join("state")
+            .join("tab-title.log");
+        if let Some(parent) = logp.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logp) {
+            let _ = writeln!(f, "path={path} ok={ok}");
+        }
     }
 }
 
