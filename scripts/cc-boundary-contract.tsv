@@ -1,0 +1,44 @@
+# Sentinel ↔ Claude Code boundary contract — machine-readable manifest.
+# Consumed by scripts/cc_contract_check.sh, which greps each `expect` regex
+# against a deobfuscated CC bundle and reports drift.
+#
+# Columns (TAB-separated):
+#   id            short stable identifier
+#   kind          env | field | method | event | enum | deprecation
+#   must_exist    true  = pattern MUST be present (absence = sentinel breaks → FAIL)
+#                 false = pattern must be ABSENT (presence = FAIL)
+#                 warn  = presence is a WARNing (deprecation watch; still works today)
+#   severity      high | med | low   (only affects reporting weight)
+#   sentinel_ref  where sentinel depends on this (file:line-ish)
+#   expect        egrep -o pattern to search for in the bundle
+#   note          human explanation
+#
+# Blank lines and lines starting with # are ignored.
+#
+# id	kind	must_exist	severity	sentinel_ref	expect	note
+session_id_env	env	true	high	channel_events.rs:79 hook_cmd.rs:153	CLAUDE_CODE_SESSION_ID	CC exports the session UUID as CLAUDE_CODE_SESSION_ID into hook/MCP children; producer+dispatcher key on it.
+project_dir_env	env	true	med	hook_cmd.rs:1059	CLAUDE_PROJECT_DIR	CC exports the project directory path; used for [Project Context] injection + hookdeck scoping.
+entrypoint_env	env	true	low	hook_cmd.rs:6796	CLAUDE_CODE_ENTRYPOINT	CC sets CLAUDE_CODE_ENTRYPOINT (no underscore before POINT) as a caller-attestation marker.
+config_dir_env	env	true	med	filesystem.rs channel_bridge.rs	CLAUDE_CONFIG_DIR	CC exports the per-session config dir; used as a session-key fallback.
+tool_response_field	field	true	high	events.rs:158	tool_response	PostToolUse tool output is sent under the key tool_response (NOT tool_result); HookInput aliases it.
+agent_type_field	field	true	high	subagent_stop.rs subagent_start.rs	agent_type	agent_type is a top-level field on hook payloads (SubagentStart/Stop); read typed, not from extra.
+tool_input_field	field	true	med	many hooks	tool_input	Pre/PostToolUse carry tool_input; many hooks extract the bash command from it.
+session_id_field	field	true	high	HookInput events.rs	session_id	Every hook payload carries session_id; all session-scoped state keys on it.
+channel_method	method	true	high	sentinel-mcp channel_events	notifications/claude/channel	The MCP channel push wire method; sentinel-mcp delivers events over it.
+initial_user_message	method	true	high	session_init /reload-plugins	initialUserMessage	SessionStart hookSpecificOutput.initialUserMessage drives the /reload-plugins autoheal.
+hook_specific_output	method	true	high	HookOutput events.rs	hookSpecificOutput	The envelope key CC reads structured hook output from.
+additional_context	method	true	high	HookOutput inject_context	additionalContext	The field sentinel injects context through (UserPromptSubmit/SessionStart etc.).
+system_message	method	true	med	HookOutput	systemMessage	Dual-display notice channel (production_override etc.).
+permission_defer	enum	true	low	PermissionDecision	"defer"	CC's permissionDecision enum accepts defer (sentinel added it; keep in step).
+event_subagent_stop	event	true	high	subagent_stop.rs	"SubagentStop"	Hook event name sentinel handles.
+event_teammate_idle	event	true	high	teammate_idle.rs	"TeammateIdle"	Hook event name sentinel handles.
+event_task_created	event	true	med	task_created.rs	"TaskCreated"	Hook event name sentinel handles.
+event_task_completed	event	true	med	task_completed.rs	"TaskCompleted"	Hook event name sentinel handles.
+event_pre_tool_use	event	true	high	hook_cmd.rs	"PreToolUse"	Hook event name sentinel handles.
+event_post_tool_use	event	true	high	hook_cmd.rs	"PostToolUse"	Hook event name sentinel handles.
+event_session_start	event	true	high	session_init.rs	"SessionStart"	Hook event name sentinel handles.
+event_user_prompt_submit	event	true	high	skill_router.rs etc	"UserPromptSubmit"	Hook event name sentinel handles.
+event_stop	event	true	high	claim_reality_check.rs	"Stop"	Hook event name sentinel handles.
+event_pre_compact	event	true	low	pre_compact.rs	"PreCompact"	Hook event name sentinel handles.
+team_name_present	field	true	low	task_created.rs:49	team_name	team_name is still present in TaskCreated payloads (sentinel reads it).
+team_name_deprecated	deprecation	warn	med	task_created.rs:49	team_name:[^,}]{0,80}[Dd]eprecated	team_name is @deprecated in CC's schema — WARN, plan migration off it before CC drops it.
