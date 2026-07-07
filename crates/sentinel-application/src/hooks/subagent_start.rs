@@ -11,10 +11,24 @@ use super::concrete_input_session_id;
 ///
 /// Injects active skill and project context into the spawned agent.
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
+    // Claude Code sends `agent_type` as a TOP-LEVEL SubagentStart field, which
+    // serde routes into the typed `HookInput::agent_type` — never into the
+    // `#[serde(flatten)]` extra map. Reading it from `extra` (the pre-fix code)
+    // was therefore always empty, so every injection said "Agent type
+    // 'unknown'". Read the typed field first, fall back to `extra` only for
+    // resilience against a future harness that relocates it — the same pattern
+    // as `subagent_stop::resolve_agent_identity`.
     let agent_type = input
-        .extra
-        .get("agent_type")
-        .and_then(|v| v.as_str())
+        .agent_type
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            input
+                .extra
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or("unknown");
 
     // Read active skill from session state if available
@@ -53,10 +67,11 @@ mod tests {
 
     #[test]
     fn test_subagent_start_injects_context() {
-        let mut input = HookInput::default();
-        input
-            .extra
-            .insert("agent_type".to_string(), serde_json::json!("code-reviewer"));
+        // Real CC payload: agent_type on the TYPED field, not extra.
+        let input = HookInput {
+            agent_type: Some("code-reviewer".to_string()),
+            ..Default::default()
+        };
 
         let ctx = crate::hooks::test_support::stub_ctx();
         let output = process(&input, &ctx);
@@ -64,6 +79,26 @@ mod tests {
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("code-reviewer"));
+    }
+
+    #[test]
+    fn reads_typed_agent_type_not_extra() {
+        // Regression: the typed field must be authoritative. A CC payload
+        // deserializes agent_type into the typed field; extra stays empty.
+        let payload = serde_json::json!({
+            "hook_event_name": "SubagentStart",
+            "agent_type": "debugger"
+        });
+        let input: HookInput = serde_json::from_value(payload).unwrap();
+        assert!(input.extra.get("agent_type").is_none(), "typed field is not in extra");
+        let ctx = crate::hooks::test_support::stub_ctx();
+        let body = process(&input, &ctx)
+            .hook_specific_output
+            .unwrap()
+            .additional_context
+            .unwrap();
+        assert!(body.contains("debugger"), "must read the typed agent_type");
+        assert!(!body.contains("unknown"));
     }
 
     #[test]
@@ -78,13 +113,11 @@ mod tests {
             r#"{"active_skill":"linear"}"#,
         )
         .unwrap();
-        let mut input = HookInput {
+        let input = HookInput {
             session_id: Some(" unknown ".to_string()),
+            agent_type: Some("code-reviewer".to_string()),
             ..Default::default()
         };
-        input
-            .extra
-            .insert("agent_type".to_string(), serde_json::json!("code-reviewer"));
 
         let output = process(&input, &ctx);
 
