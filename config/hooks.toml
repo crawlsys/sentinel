@@ -6,6 +6,13 @@
 # === SessionStart ===
 
 [[hooks]]
+id = "tab-title"
+event = "SessionStart"
+description = "Write `claude <session-id>` into the terminal tab title via a direct OSC-0 write to CONOUT$ (Windows) / /dev/tty (unix). Also runs on UserPromptSubmit to re-assert after the shell prompt overwrites it. Side-effect only; injects nothing. Opt out via SENTINEL_NO_TAB_TITLE."
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "session-init"
 event = "SessionStart"
 description = "Initialize session state, generate CLAUDE.md"
@@ -31,6 +38,13 @@ has_api_call = false
 # instead — see the PreCompact section below.
 
 # === UserPromptSubmit ===
+
+[[hooks]]
+id = "tab-title"
+event = "UserPromptSubmit"
+description = "Re-assert the `claude <session-id>` terminal tab title (OSC-0 to CONOUT$/dev-tty) so it snaps back after the shell prompt or a launched program overwrites it. Side-effect only; injects nothing. Opt out via SENTINEL_NO_TAB_TITLE."
+depends_on = []
+has_api_call = false
 
 [[hooks]]
 id = "skill-router"

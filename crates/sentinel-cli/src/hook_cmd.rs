@@ -425,6 +425,22 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
 
     match hook_event {
         HookEvent::UserPromptSubmit => {
+            // Re-assert the session-id tab title every turn so it snaps back
+            // after the shell prompt (or any launched program) overwrites it.
+            // Side-effect only (writes OSC to CONOUT$); merges a no-op output.
+            let title_output = time_and_record(
+                ctx.fs,
+                &InvocationContext {
+                    event: "UserPromptSubmit",
+                    hook: "tab_title",
+                    tool: None,
+                    session_id: input.session_id.as_deref(),
+                    repo_root: repo_root_for_metrics.as_deref(),
+                },
+                || hooks::tab_title::process(&input, &ctx),
+            );
+            output.merge(&title_output);
+
             let arm_output = handle_user_prompt_submit(
                 &input,
                 &mut state,
@@ -503,6 +519,14 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
                 session_id: input.session_id.as_deref(),
                 repo_root: repo_root_for_metrics.as_deref(),
             };
+
+            // Tab title — label the terminal tab with `claude <session-id>`.
+            // First thing on SessionStart so the tab is identifiable as early
+            // as possible. Side-effect only (writes OSC to CONOUT$).
+            let title_output = time_and_record(ctx.fs, &mk_ctx("tab_title"), || {
+                hooks::tab_title::process(&input, &ctx)
+            });
+            output.merge(&title_output);
 
             // Session init — log session, sync marketplace repo, inject startup context
             let init_output = time_and_record(ctx.fs, &mk_ctx("session_init"), || {

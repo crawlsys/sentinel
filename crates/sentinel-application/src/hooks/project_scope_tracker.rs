@@ -156,7 +156,7 @@ fn repo_name_from_root(root: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::test_support::{stub_ctx_with_fs, StubEnv, TestHomeFs};
+    use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
     use crate::hooks::{EnvPort, FileSystemPort, GitStatusPort, HookContext};
     use sentinel_domain::events::HookInput;
 
