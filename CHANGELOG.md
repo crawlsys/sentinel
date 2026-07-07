@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **`hygiene_reminders` never offers `rm -rf` through a junction** (2026-07-07).
+  The Worktree Cleanup reminder flagged every deregistered directory under
+  `.claude/worktrees/` as an "orphaned shell" and emitted a batch `rm -rf`
+  command — but junctions placed there on purpose (path-dep links into
+  sibling repos, e.g. `langgraph-python-to-rust` in sentinel and the
+  `claude-accounts-cli-rust`/`vulcan-cli-sdk-rust`/`vulcan-mcp-sdk-rust`
+  trio in claude-code-handler-rust) resolve as directories, so the
+  suggested command would recurse *through the link into the real repo*.
+  Both the Stop-phase detector and the prompt-time re-validation now skip
+  links via a new `FileSystemPort::is_symlink` (defaults false for
+  in-memory stubs; the real adapter treats any Windows reparse point —
+  junctions included, which `FileType::is_symlink()` misses — as a link).
+  The read-time guard also sanitizes state written by older engines.
+  Regression test pins that a junction name never appears in the reminder.
+
 ### Removed
 - **`tab_title` hook removed — superseded by the handler** (2026-07-07). The `tab_title` SessionStart/UserPromptSubmit hook (added earlier the same day) could never set the Windows Terminal tab title: `claude` mediates all hook stdio, so a hook process's `CONOUT$`/stderr writes never reach the tab's ConPTY tty — proven live by a `tab-title.log` showing `path=conout+stderr ok=true` while the tab never changed. The capability now lives in the correct place — `claude-code-handler` writes the OSC title at launch, where it owns the tab's tty (handler 1.1.58) — so the hook was dead weight. Removed the module, its `HOOK_NAMES`/`hooks.toml` registrations, and both dispatch blocks (hook count 87 → 86). The unrelated `project_scope_tracker` unused-import cleanup that rode in with the original hook commit is kept.
 

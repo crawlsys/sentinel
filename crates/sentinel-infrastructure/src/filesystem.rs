@@ -47,6 +47,24 @@ impl FileSystemPort for RealFileSystem {
             .map_err(FileSystemError::backend)
     }
 
+    fn is_symlink(&self, path: &Path) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        #[cfg(windows)]
+        {
+            // Junctions are reparse points but NOT `FileType::is_symlink()`.
+            // Any reparse point counts as a link here — the callers use this
+            // to keep `rm -rf` suggestions from recursing into link targets.
+            use std::os::windows::fs::MetadataExt as _;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return true;
+            }
+        }
+        meta.file_type().is_symlink()
+    }
+
     fn write(&self, path: &Path, content: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)

@@ -206,6 +206,16 @@ pub trait FileSystemPort: Send + Sync {
         self.write(path, content)
     }
 
+    /// True when `path` is a symlink or (on Windows) any reparse point —
+    /// junctions included. Directory-scanning hooks use this to keep
+    /// suggested cleanup commands (`rm -rf`) from recursing through an
+    /// intentional link into the real repo it points at. Defaults to
+    /// `false` so in-memory test stubs — where links don't exist — keep
+    /// compiling; disk-backed adapters MUST override.
+    fn is_symlink(&self, _path: &Path) -> bool {
+        false
+    }
+
     /// Atomically replace a file's full contents.
     ///
     /// Adapters that support durable authority snapshots must implement this

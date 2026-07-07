@@ -205,7 +205,8 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         "📋 [Todos] {project_name} — this session: ⏳{mine_pending} 🔄{mine_in_progress} · recent ({RECENT_WINDOW_DAYS}d): ⏳{recent_pending} 🔄{recent_in_progress} · 🔴{p0_count} 🟠{p1_count}"
     );
     if stale_hidden > 0 {
-        context.push_str(&format!(" · 💤 {stale_hidden} stale hidden"));
+        use std::fmt::Write as _;
+        let _ = write!(context, " · 💤 {stale_hidden} stale hidden");
     }
     if !top_todos.is_empty() {
         context.push_str(" | Top: ");

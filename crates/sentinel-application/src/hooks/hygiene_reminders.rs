@@ -99,7 +99,13 @@ pub fn process_stop(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if !registered.is_empty() {
             if let Ok(entries) = ctx.fs.read_dir(&worktree_dir) {
                 for entry in entries {
-                    if ctx.fs.is_dir(&entry) {
+                    // Junctions/symlinks under worktrees/ are intentional
+                    // path-dep links into sibling repos (e.g. the langgraph
+                    // junction that makes worktree builds resolve `../../..`
+                    // deps). They are never orphaned shells, and the `rm -rf`
+                    // suggestion downstream would recurse THROUGH the link
+                    // into the real repo.
+                    if ctx.fs.is_dir(&entry) && !ctx.fs.is_symlink(&entry) {
                         if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
                             if !registered.contains(name) {
                                 state.stale_worktrees.push(name.to_string());
@@ -208,7 +214,14 @@ pub fn process_prompt(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     let still_stale: Vec<String> = state
         .stale_worktrees
         .iter()
-        .filter(|name| ctx.fs.is_dir(&worktree_dir.join(name)))
+        .filter(|name| {
+            let path = worktree_dir.join(name.as_str());
+            // Re-apply the junction guard at read time too: a state file
+            // written by an older engine may still name a junction, and the
+            // `rm -rf` below must never include a path that recurses through
+            // a link into the real repo.
+            ctx.fs.is_dir(&path) && !ctx.fs.is_symlink(&path)
+        })
         .cloned()
         .collect();
 
@@ -527,6 +540,182 @@ mod tests {
         assert!(
             !injected.contains("Worktree Cleanup"),
             "stale dir was removed; reminder should not fire. Got: {injected:?}"
+        );
+    }
+
+    /// Safety regression: a junction (or symlink) under `.claude/worktrees/`
+    /// must never appear in the Worktree Cleanup reminder — the suggested
+    /// `rm -rf` recurses THROUGH the link and deletes the real repo it
+    /// points at. Covers state written by an older engine that flagged the
+    /// junction before the detector learned to skip links.
+    #[test]
+    fn test_stale_worktrees_junctions_never_flagged() {
+        use crate::hooks::FileSystemPort;
+        use std::path::{Path, PathBuf};
+
+        // FS stub: every path exists and is a dir (the junction resolves like
+        // a dir), and the flagged name IS a link per `is_symlink`.
+        struct JunctionFs;
+        impl FileSystemPort for JunctionFs {
+            fn home_dir(&self) -> Option<PathBuf> {
+                Some(PathBuf::from("/mock/home"))
+            }
+            fn read_to_string(
+                &self,
+                p: &Path,
+            ) -> Result<String, sentinel_domain::port_errors::FileSystemError> {
+                let state = ReminderState {
+                    repo_root: "/repo".to_string(),
+                    stale_worktrees: vec!["langgraph-python-to-rust".to_string()],
+                    ..Default::default()
+                };
+                if p.to_string_lossy().contains("hygiene-reminders") {
+                    serde_json::to_string(&state)
+                        .map_err(sentinel_domain::port_errors::FileSystemError::backend)
+                } else {
+                    Err(sentinel_domain::port_errors::FileSystemError::NotFound(
+                        "not found".into(),
+                    ))
+                }
+            }
+            fn write(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                Ok(())
+            }
+            fn create_dir_all(
+                &self,
+                _: &Path,
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                Ok(())
+            }
+            fn read_dir(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<PathBuf>, sentinel_domain::port_errors::FileSystemError> {
+                Ok(vec![])
+            }
+            fn exists(&self, _: &Path) -> bool {
+                true
+            }
+            fn is_dir(&self, _: &Path) -> bool {
+                true
+            }
+            fn is_symlink(&self, p: &Path) -> bool {
+                p.to_string_lossy().contains("langgraph-python-to-rust")
+            }
+            fn metadata(
+                &self,
+                _: &Path,
+            ) -> Result<std::fs::Metadata, sentinel_domain::port_errors::FileSystemError>
+            {
+                Err(sentinel_domain::port_errors::FileSystemError::Backend(
+                    "not used in this test".into(),
+                ))
+            }
+            fn append(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
+                Ok(())
+            }
+        }
+
+        struct RepoRootGit;
+        impl crate::hooks::GitStatusPort for RepoRootGit {
+            fn has_uncommitted_changes(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+                Ok(false)
+            }
+            fn changed_files(
+                &self,
+                _: &str,
+            ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+                Ok(vec![])
+            }
+            fn current_branch(
+                &self,
+                _: &str,
+            ) -> Result<String, sentinel_domain::port_errors::GitError> {
+                Ok("main".into())
+            }
+            fn is_worktree(&self, _: &str) -> bool {
+                false
+            }
+            fn has_unpushed_commits(
+                &self,
+                _: &str,
+            ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+                Ok(false)
+            }
+            fn repo_root(&self, _: &str) -> Option<String> {
+                Some("/repo".into())
+            }
+            fn list_worktree_names(&self, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
+            fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+                None
+            }
+            fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+                None
+            }
+            fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn head_sha(&self, _: &str) -> Option<String> {
+                None
+            }
+        }
+
+        let fs = JunctionFs;
+        let git = RepoRootGit;
+        let stub_proc = crate::hooks::test_support::StubProcess;
+        let stub_mcp = crate::hooks::test_support::StubMemoryMcp;
+        let stub_env = crate::hooks::test_support::StubEnv::new();
+        let ctx = crate::hooks::HookContext {
+            git: &git,
+            vector_store: None,
+            fs: &fs,
+            process: &stub_proc,
+            llm: None,
+            memory_mcp: &stub_mcp,
+            env: &stub_env,
+            linear_lookup: None,
+        };
+
+        let input = HookInput {
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        };
+
+        let output = process_prompt(&input, &ctx);
+        let injected = output
+            .hook_specific_output
+            .as_ref()
+            .and_then(|o| o.additional_context.as_deref())
+            .unwrap_or("");
+        assert!(
+            !injected.contains("Worktree Cleanup"),
+            "junctions must never be offered for rm -rf. Got: {injected:?}"
+        );
+        assert!(
+            !injected.contains("langgraph-python-to-rust"),
+            "junction name must not appear in any cleanup suggestion. Got: {injected:?}"
         );
     }
 }
