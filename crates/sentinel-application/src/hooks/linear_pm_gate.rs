@@ -582,15 +582,19 @@ fn higher_priority_available(ctx: &HookContext<'_>, target: &Value) -> Option<St
         if p >= target_pri {
             continue;
         }
-        // Must be startable: open and not blocked.
+        // Must be STARTABLE: not-yet-started and not blocked. `started`
+        // (already In Progress) is deliberately excluded — a higher-priority
+        // ticket the assignee is *already working on* is not a "start the more
+        // urgent work first" reason to block a parallel/resumed start, and
+        // including it produced a false BlockHigherPriorityAvailable.
         let ty = issue
             .get("state")
             .and_then(|s| s.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_lowercase();
-        let open = matches!(ty.as_str(), "backlog" | "unstarted" | "triage" | "started");
-        if !open || blocked_reason(issue).is_some() {
+        let startable = matches!(ty.as_str(), "backlog" | "unstarted" | "triage");
+        if !startable || blocked_reason(issue).is_some() {
             continue;
         }
         if let Some(id) = issue.get("identifier").and_then(Value::as_str) {
@@ -826,5 +830,50 @@ mod tests {
         // Absent signal → also exempt.
         let unknown = serde_json::json!({ "identifier": "M-4" });
         assert!(!needs_milestone(&unknown));
+    }
+
+    #[test]
+    fn higher_priority_started_peer_does_not_block_but_backlog_peer_does() {
+        use crate::hooks::test_support::{stub_ctx_with_fs, TestHomeFs};
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let cache = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("linear-assigned.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+
+        // Target: priority-2 ticket assigned to "me".
+        let target = serde_json::json!({
+            "identifier": "T-2", "priority": 2, "assignee": { "id": "me" }
+        });
+
+        // Queue holds a higher-priority (P1) same-assignee peer. When that peer
+        // is already `started` (in progress), it is NOT a startable reason to
+        // block — you're already working it. When it's `backlog`, it IS.
+        let started_peer = serde_json::json!([
+            { "identifier": "T-1", "priority": 1, "assignee": { "id": "me" },
+              "state": { "type": "started" } }
+        ]);
+        std::fs::write(&cache, started_peer.to_string()).unwrap();
+        let ctx = stub_ctx_with_fs(&fs);
+        assert_eq!(
+            higher_priority_available(&ctx, &target),
+            None,
+            "an already-started higher-priority ticket must not trigger a block"
+        );
+
+        let backlog_peer = serde_json::json!([
+            { "identifier": "T-1", "priority": 1, "assignee": { "id": "me" },
+              "state": { "type": "backlog" } }
+        ]);
+        std::fs::write(&cache, backlog_peer.to_string()).unwrap();
+        let ctx = stub_ctx_with_fs(&fs);
+        assert_eq!(
+            higher_priority_available(&ctx, &target).as_deref(),
+            Some("T-1"),
+            "a backlog higher-priority ticket must still trigger a block"
+        );
     }
 }
