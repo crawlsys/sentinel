@@ -153,8 +153,17 @@ pub struct HookInput {
     #[serde(default)]
     pub file_path: Option<String>,
 
-    /// Tool result (`PostToolUse`)
-    #[serde(default)]
+    /// Tool result (`PostToolUse`).
+    ///
+    /// Claude Code sends this field as `tool_response` on the wire (verified in
+    /// the deobfuscated 2.1.201 bundle: the PostToolUse payload and its zod
+    /// schema both use `tool_response`; `tool_result` is never emitted). Without
+    /// the alias every PostToolUse hook that inspects tool output — including the
+    /// `prompt_injection_nudge` scanner — deserialized `None` and early-returned,
+    /// silently disabling itself. The alias accepts both keys so the field
+    /// populates from real CC payloads while existing `tool_result`-keyed test
+    /// fixtures keep working.
+    #[serde(default, alias = "tool_response")]
     pub tool_result: Option<serde_json::Value>,
 
     /// Permission mode
