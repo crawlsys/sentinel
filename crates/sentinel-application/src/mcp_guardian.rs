@@ -70,6 +70,45 @@ pub const SNAPSHOT_KEEP: usize = 14;
 /// unioned with this list at heal time.
 pub const RETIRED_BUILTIN: &[&str] = &["agents", "skills"];
 
+/// Launchers the heal is permitted to write into `~/.claude.json`'s `command`
+/// field. Claude Code executes each server's `command` as a child process at
+/// session start, so the heal — which copies `command` out of a file-sourced
+/// marketplace declaration (a committed file in a local git clone, no
+/// signature) — MUST NOT be able to install an arbitrary executable or a shell
+/// interpreter. Every legitimate registration in the contract launches through
+/// one of these wrappers (`mcp-supervisor` / `mcp-router`) or a bare product
+/// binary of the form `<name>-mcp[.exe]`; anything else (a `powershell`/`cmd`/
+/// `bash -c`, an absolute path to an arbitrary binary, a path with separators)
+/// is rejected and the entry is skipped with a loud warning. A degraded
+/// registry beats an arbitrary-exec primitive.
+pub const ALLOWED_LAUNCHERS: &[&str] = &["mcp-supervisor", "mcp-router"];
+
+/// True when `command` is a safe launcher for the heal to write verbatim.
+///
+/// Accepts the known wrappers, or a bare `*-mcp` / `*-mcp.exe` product binary
+/// name (no path separators, no shell metacharacters). Rejects shell
+/// interpreters, absolute/relative paths, and anything carrying separators or
+/// argument-injection characters — those have no place in a `command` field
+/// and are the arbitrary-exec vector.
+fn is_allowed_command(command: &str) -> bool {
+    let cmd = command.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    // No path separators, no shell metacharacters, no whitespace — a bare
+    // program name only. (Args live in the separate `args` array.)
+    if cmd.contains(['/', '\\', ' ', '\t', ';', '&', '|', '>', '<', '$', '`', '"', '\'', '%'])
+    {
+        return false;
+    }
+    if ALLOWED_LAUNCHERS.contains(&cmd) {
+        return true;
+    }
+    // Bare product binary: `<name>-mcp` or `<name>-mcp.exe`.
+    let stem = cmd.strip_suffix(".exe").unwrap_or(cmd);
+    stem.ends_with("-mcp") && stem.len() > "-mcp".len()
+}
+
 /// Where the heal registry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealSource {
@@ -99,6 +138,10 @@ pub struct HealOutcome {
     pub merged_files: Vec<PathBuf>,
     /// `server.VAR` env refs that failed doppler resolution and were omitted.
     pub unresolved_env: Vec<String>,
+    /// The `(name, command)` pairs actually written, so the operator notice can
+    /// show WHAT was installed — not just how many. Makes a poisoned-but-
+    /// allowlisted command visible instead of hidden behind a bare count.
+    pub commands: Vec<(String, String)>,
 }
 
 /// Full report from one guardian pass.
@@ -375,11 +418,26 @@ fn heal_registry(
         "MCP guardian healed lost registration block"
     );
 
+    // Capture (name, command) for the operator notice — sorted for stable
+    // output. Surfacing the actual commands is what makes a poisoned entry
+    // that slipped the allowlist visible instead of hidden behind a count.
+    let mut commands: Vec<(String, String)> = desired
+        .iter()
+        .filter_map(|(name, server)| {
+            server
+                .get("command")
+                .and_then(Value::as_str)
+                .map(|c| (name.clone(), c.to_string()))
+        })
+        .collect();
+    commands.sort();
+
     Some(HealOutcome {
         source,
         entries: desired.len(),
         merged_files,
         unresolved_env,
+        commands,
     })
 }
 
@@ -431,6 +489,23 @@ fn desired_from_marketplace(
             ));
             continue;
         };
+        // SECURITY: the heal writes `command` verbatim into ~/.claude.json,
+        // which Claude Code execs at session start. Reject anything that isn't
+        // an approved launcher / bare product binary, so a poisoned or
+        // compromised marketplace declaration can't turn the heal into an
+        // arbitrary-exec primitive. (Audit 2026-07: heal-path arbitrary-exec.)
+        if !is_allowed_command(command) {
+            warnings.push(format!(
+                "marketplace mcp entry '{name}' has a disallowed command '{command}' \
+                 (not an approved launcher / *-mcp binary) — skipped for safety"
+            ));
+            tracing::warn!(
+                name,
+                command,
+                "REJECTED non-allowlisted MCP command during heal — possible poisoned marketplace entry"
+            );
+            continue;
+        }
 
         let args = entry.get("args").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
         let transport = entry
@@ -681,6 +756,37 @@ mod tests {
     use sentinel_domain::ports::ProcessOutput;
     use tempfile::TempDir;
 
+    #[test]
+    fn command_allowlist_accepts_launchers_and_bare_mcp_binaries() {
+        assert!(is_allowed_command("mcp-supervisor"));
+        assert!(is_allowed_command("mcp-router"));
+        assert!(is_allowed_command("linear-mcp"));
+        assert!(is_allowed_command("linear-mcp.exe"));
+        assert!(is_allowed_command("  sentinel-mcp  ")); // trimmed
+    }
+
+    #[test]
+    fn command_allowlist_rejects_arbitrary_exec_vectors() {
+        // Shell interpreters — the core RCE vector.
+        assert!(!is_allowed_command("powershell"));
+        assert!(!is_allowed_command("cmd"));
+        assert!(!is_allowed_command("bash"));
+        assert!(!is_allowed_command("node"));
+        // Anything with args / metacharacters / separators.
+        assert!(!is_allowed_command("powershell -c calc"));
+        assert!(!is_allowed_command("cmd /c evil.bat"));
+        assert!(!is_allowed_command("bash -c 'curl x|sh'"));
+        assert!(!is_allowed_command("/usr/bin/evil"));
+        assert!(!is_allowed_command(r"C:\Windows\System32\calc.exe"));
+        assert!(!is_allowed_command("./evil-mcp")); // has a separator
+        assert!(!is_allowed_command("linear-mcp; rm -rf /"));
+        assert!(!is_allowed_command("$(evil)"));
+        // Not a launcher and not a *-mcp binary.
+        assert!(!is_allowed_command("linear"));
+        assert!(!is_allowed_command(""));
+        assert!(!is_allowed_command("-mcp")); // suffix only, no product name
+    }
+
     /// ProcessPort stub that resolves doppler refs to `resolved:<secret-name>`
     /// but only when invoked as the given binary.
     struct DopplerProcess {
@@ -808,6 +914,55 @@ mod tests {
             servers["linear"]["env"]["LINEAR_API_KEY"], "resolved:LINEAR_API_KEY",
             "$doppler ref must be resolved via the CLI"
         );
+        // HealOutcome carries the (name, command) pairs for the operator notice.
+        assert!(heal
+            .commands
+            .contains(&("linear".to_string(), "mcp-supervisor".to_string())));
+    }
+
+    #[test]
+    fn heal_rejects_poisoned_command_and_keeps_clean_entries() {
+        // SECURITY (audit 2026-07 heal-path arbitrary-exec): a marketplace entry
+        // whose `command` is a shell interpreter / arbitrary exec must be
+        // dropped, while legitimate entries in the same declaration still heal.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let claude_dir = home.join(".claude");
+        let repo = home.join("marketplace");
+        write_marketplace(
+            &repo,
+            r#"{
+                "mcp": [
+                    { "name": "evil", "command": "powershell", "args": ["-c","calc"], "transport": "stdio", "env": {} },
+                    { "name": "evil2", "command": "C:/Windows/System32/cmd.exe", "args": [], "transport": "stdio", "env": {} },
+                    { "name": "linear", "command": "mcp-supervisor", "args": [], "transport": "stdio", "env": {} }
+                ],
+                "retired": []
+            }"#,
+        );
+
+        let report = run_with_state(
+            &DopplerProcess { binary: "doppler-rs" },
+            &StubEnv::new(),
+            home,
+            &claude_dir,
+            Some(&repo),
+            McpRegistryState::Missing,
+            5,
+            today(),
+        );
+
+        let heal = report.heal.expect("heal runs — one clean entry survives");
+        let json = read_json(&home.join(".claude.json"));
+        let servers = json["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("linear"), "clean entry must heal");
+        assert!(!servers.contains_key("evil"), "shell-interpreter command must be rejected");
+        assert!(!servers.contains_key("evil2"), "abs-path exe command must be rejected");
+        assert_eq!(heal.entries, 1);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("disallowed command") && w.contains("evil")));
     }
 
     #[test]

@@ -2074,6 +2074,20 @@ fn build_startup_context(
                 heal.source,
                 heal.merged_files.len()
             ));
+            // Show the actual commands written — CC execs each at session start,
+            // so surfacing them makes a poisoned/unexpected entry operator-
+            // visible instead of hidden behind the count (audit 2026-07).
+            if !heal.commands.is_empty() {
+                let listing = heal
+                    .commands
+                    .iter()
+                    .map(|(name, cmd)| format!("{name}→{cmd}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!(
+                    "🛡️ [MCP Guardian] commands installed (verify these): {listing}"
+                ));
+            }
             if !heal.unresolved_env.is_empty() {
                 parts.push(format!(
                     "🛡️ [MCP Guardian] WARNING: unresolved $doppler env refs omitted (degraded entries): {}",
@@ -2535,6 +2549,7 @@ mod tests {
                 entries: 40,
                 merged_files: vec![std::path::PathBuf::from(".claude.json")],
                 unresolved_env: vec!["linear.LINEAR_API_KEY".to_string()],
+                commands: vec![("linear".to_string(), "mcp-supervisor".to_string())],
             }),
             warnings: vec![],
         });
@@ -2543,6 +2558,9 @@ mod tests {
         assert!(context.contains("HEALED 40 MCP registration(s) from marketplace"));
         assert!(context.contains("/reload-plugins queued"));
         assert!(context.contains("linear.LINEAR_API_KEY"));
+        // The operator notice must surface the actual command(s) written, so a
+        // poisoned/unexpected entry is visible not hidden behind a count.
+        assert!(context.contains("commands installed (verify these): linear→mcp-supervisor"));
         assert!(!context.contains("heal did NOT run"));
 
         // Healthy pass: no guardian noise at all.
