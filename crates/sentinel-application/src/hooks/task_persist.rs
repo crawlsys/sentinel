@@ -262,41 +262,9 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
     })
 }
 
-/// Status/priority decoration glyphs that a caller may have baked into a task
-/// subject string (e.g. `"🔄 🔴 1 [P0] — Fix…"`). Kept in sync with
-/// `session_init::strip_status_priority_prefix`'s `DECOR_EMOJI`.
-const DECOR_EMOJI: &[char] = &['🔄', '⏳', '✅', '❌', '🔴', '🟠', '🟡', '🟢'];
-
-/// Infer a status from a leading status glyph, if present. Returns `None` for
-/// priority-only or unknown glyphs.
-fn status_from_glyph(subject: &str) -> Option<&'static str> {
-    match subject.trim_start().chars().next()? {
-        '🔄' => Some("in_progress"),
-        '⏳' => Some("pending"),
-        '✅' => Some("completed"),
-        '❌' => Some("cancelled"),
-        _ => None,
-    }
-}
-
-/// Infer a `[P0]`..`[P3]` priority from a leading priority token or colour
-/// glyph, if present. `🔴`=P0, `🟠`=P1, `🟡`=P2, `🟢`=P3; `[Pn]` wins over glyph.
-fn priority_from_decoration(subject: &str) -> Option<String> {
-    let s = subject.trim_start();
-    // Prefer an explicit [Pn] token anywhere in the leading decoration run.
-    for tok in ["[P0]", "[P1]", "[P2]", "[P3]"] {
-        if s.contains(tok) {
-            return Some(tok.trim_matches(['[', ']']).to_string());
-        }
-    }
-    match s.chars().find(|c| ['🔴', '🟠', '🟡', '🟢'].contains(c))? {
-        '🔴' => Some("P0".into()),
-        '🟠' => Some("P1".into()),
-        '🟡' => Some("P2".into()),
-        '🟢' => Some("P3".into()),
-        _ => None,
-    }
-}
+use sentinel_domain::task_decoration::{
+    priority_from_decoration, status_from_glyph, DECOR_EMOJI,
+};
 
 /// Strip leading status/priority decoration a caller baked into a subject
 /// string. Mirrors `session_init::strip_status_priority_prefix` (kept in the

@@ -34,17 +34,13 @@ pub fn home_root() -> Option<PathBuf> {
 }
 
 /// Fallible authoritative home-root resolver.
+///
+/// Reads the env + OS home dir here (the IO boundary) and delegates the
+/// fail-closed decision to the shared, pure
+/// [`sentinel_domain::paths::resolve_home_root`] — identical policy to
+/// `sentinel-application::paths::home_root`, guaranteed by construction.
 pub fn try_home_root() -> Result<PathBuf, String> {
-    match std::env::var("SENTINEL_HOME") {
-        Ok(home) if !home.is_empty() => Ok(PathBuf::from(home)),
-        Ok(_) => Err("SENTINEL_HOME is set but empty".to_string()),
-        Err(std::env::VarError::NotPresent) => dirs::home_dir().ok_or_else(|| {
-            "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
-        }),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err("SENTINEL_HOME is not valid Unicode".to_string())
-        }
-    }
+    sentinel_domain::paths::resolve_home_root(std::env::var("SENTINEL_HOME"), dirs::home_dir())
 }
 
 /// Like [`home_root`] but panics with the standard FATAL message when no home is

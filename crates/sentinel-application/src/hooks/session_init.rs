@@ -939,15 +939,9 @@ fn strip_status_priority_prefix(subject: &str) -> &str {
 /// [`strip_status_priority_prefix`]). Unknown statuses render the bare word
 /// so nothing is ever silently dropped.
 fn status_emoji(status: &str) -> String {
-    let glyph = match status {
-        "in_progress" => "🔄",
-        "pending" => "⏳",
-        "completed" => "✅",
-        "blocked" => "🚫",
-        "cancelled" | "canceled" | "deleted" => "❌",
-        _ => return status.to_string(),
-    };
-    format!("{glyph} {status}")
+    // Canonical vocabulary lives in sentinel-domain so the render side here and
+    // the parse side in task_persist can never drift.
+    sentinel_domain::task_decoration::decorated_status(status)
 }
 
 /// Render the **Active Tasks** section from the persistent-tasks snapshot for

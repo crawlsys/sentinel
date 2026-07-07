@@ -15,19 +15,12 @@ use std::path::PathBuf;
 
 /// Resolve the home root used by application-level path helpers.
 ///
-/// `SENTINEL_HOME` wins when set. An explicit empty value is a configuration
-/// error; otherwise Sentinel uses the OS home directory. This mirrors the
-/// infrastructure path authority while keeping the application crate independent
-/// from infrastructure.
+/// Reads `SENTINEL_HOME` + the OS home directory here (the IO boundary) and
+/// delegates the fail-closed decision to the shared, pure
+/// [`sentinel_domain::paths::resolve_home_root`] — the single policy both this
+/// crate and `sentinel-infrastructure` apply, so they can never diverge.
 pub fn home_root() -> Result<PathBuf, String> {
-    match std::env::var("SENTINEL_HOME") {
-        Ok(root) if !root.is_empty() => Ok(PathBuf::from(root)),
-        Ok(_) => Err("SENTINEL_HOME is set but empty".to_string()),
-        Err(VarError::NotPresent) => dirs::home_dir().ok_or_else(|| {
-            "Cannot determine home directory. HOME/USERPROFILE must be set.".to_string()
-        }),
-        Err(VarError::NotUnicode(_)) => Err("SENTINEL_HOME is not valid Unicode".to_string()),
-    }
+    sentinel_domain::paths::resolve_home_root(std::env::var("SENTINEL_HOME"), dirs::home_dir())
 }
 
 /// Fatal form of [`home_root`].

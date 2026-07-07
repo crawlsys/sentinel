@@ -1056,7 +1056,16 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
     // tool hook bloats the transcript during tool-heavy sessions and drives
     // premature compaction.
     if should_attach_project_context(hook_event) {
-        if let Ok(project) = std::env::var("CLAUDE_PROJECT") {
+        // Claude Code exports CLAUDE_PROJECT_DIR (an absolute path), not
+        // CLAUDE_PROJECT (a name) — the latter is never set, so the old branch
+        // was dead (verified in the deobfuscated 2.1.201 bundle). Derive the
+        // project name from the dir's basename.
+        if let Some(project) = std::env::var("CLAUDE_PROJECT_DIR").ok().and_then(|dir| {
+            std::path::Path::new(dir.trim())
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        }) {
             if !project.is_empty() {
                 let project_header = format!("[Project Context] Active project: {project}");
                 if let Some(ref mut hso) = output.hook_specific_output {
@@ -6754,7 +6763,7 @@ fn write_safe_allow_response() -> Result<()> {
 /// 1. **Stdin is piped** (not a terminal) — hooks are always invoked via pipe
 ///    from Claude Code's hook runner, never interactively. Hard fail unless
 ///    `SENTINEL_ALLOW_TERMINAL=1` is set.
-/// 2. **`CLAUDE_CODE` env marker** — Claude Code sets `CLAUDE_CODE_ENTRY_POINT`
+/// 2. **`CLAUDE_CODE` env marker** — Claude Code sets `CLAUDE_CODE_ENTRYPOINT`
 ///    when spawning hook subprocesses. Its absence is suspicious.
 ///
 /// If validation fails, a `caller_rejected` event is logged to the security
@@ -6764,7 +6773,7 @@ fn write_safe_allow_response() -> Result<()> {
 /// This is defense-in-depth, not a security boundary. A determined attacker can
 /// still set the env var and pipe crafted JSON, but they must:
 ///   1. Know the sentinel CLI exists and its arguments
-///   2. Set `CLAUDE_CODE_ENTRY_POINT` in their environment
+///   2. Set `CLAUDE_CODE_ENTRYPOINT` in their environment
 ///   3. Construct valid `HookInput` JSON with a real `session_id`
 ///   4. Pipe it correctly (not type interactively)
 fn validate_caller() -> Result<()> {
@@ -6789,12 +6798,12 @@ fn validate_caller() -> Result<()> {
     }
 
     // Check for Claude Code environment marker.
-    // Claude Code sets CLAUDE_CODE_ENTRY_POINT (e.g. "cli", "sdk").
+    // Claude Code sets CLAUDE_CODE_ENTRYPOINT (e.g. "cli", "sdk").
     // Absence is not definitive proof of abuse (could be an older version),
     // so keep it as a debug-only signal instead of stderr noise. Claude treats
     // stderr from hooks as a non-blocking hook error banner.
-    if std::env::var("CLAUDE_CODE_ENTRY_POINT").is_err() {
-        debug!("CLAUDE_CODE_ENTRY_POINT not set for hook invocation");
+    if std::env::var("CLAUDE_CODE_ENTRYPOINT").is_err() {
+        debug!("CLAUDE_CODE_ENTRYPOINT not set for hook invocation");
     }
 
     // Optional parent-process attestation.
