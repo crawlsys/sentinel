@@ -76,7 +76,6 @@ pub mod step_judge;
 pub mod stop_failure;
 pub mod subagent_start;
 pub mod subagent_stop;
-pub mod tab_title;
 pub mod task_completed;
 pub mod task_coverage_check;
 pub mod task_created;
@@ -348,7 +347,6 @@ pub const HOOK_NAMES: &[&str] = &[
     "stop_failure",
     "subagent_start",
     "subagent_stop",
-    "tab_title",
     "task_completed",
     "task_coverage_check",
     "task_decomposition_gate",
