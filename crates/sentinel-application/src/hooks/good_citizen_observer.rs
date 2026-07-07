@@ -86,6 +86,17 @@ fn observation_path(home: &Path, session_id: &str) -> PathBuf {
         .join(format!("{session_id}.jsonl"))
 }
 
+/// True when `line` is one of this observer's own serialized `Observation`
+/// records echoed back through some command's output (e.g. `cat`/`grep` on the
+/// session log, or the Stop reminder printing a stored excerpt). Such a line
+/// carries all three `Observation` field keys; genuine build/test output never
+/// emits that exact JSON shape, so this discriminates a self-echo from a real
+/// finding without suppressing any real finding. Prevents the infinite
+/// re-capture loop where displaying the log re-seeds it.
+fn is_self_serialized_observation(line: &str) -> bool {
+    line.contains("\"ts_ms\"") && line.contains("\"category\"") && line.contains("\"excerpt\"")
+}
+
 /// `PostToolUse`: scan Bash tool result for known issue patterns and
 /// append any matches to the session log. Best-effort: any IO failure
 /// is silently swallowed.
@@ -109,6 +120,19 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
     let mut found: Vec<Observation> = Vec::new();
     for line in output_text.lines() {
         if line.is_empty() {
+            continue;
+        }
+        // Don't eat our own tail. When a command displays this very log
+        // (`cat`/`grep`/`Read` on the session JSONL, or the Stop reminder
+        // echoing a stored excerpt), the output contains a serialized
+        // `Observation` whose excerpt still holds the original `FAIL`/`TODO`
+        // text — which would re-match and re-capture, nesting forever. A line
+        // carrying all three Observation keys is unmistakably one of our own
+        // records (real cargo/test output never emits that exact triple), so
+        // skip it. Note we do NOT skip a bracketed `[ FAIL ]` status line from
+        // a checker: if e.g. the CC contract checker prints `[ FAIL ]` it means
+        // a real drift occurred and should be flagged.
+        if is_self_serialized_observation(line) {
             continue;
         }
         for (re, category) in &patterns {
@@ -442,6 +466,91 @@ mod tests {
             .map(|(_, b)| std::str::from_utf8(b).unwrap().to_string())
             .collect::<String>();
         assert!(body.contains("test failure"), "got: {body}");
+    }
+
+    #[test]
+    fn self_serialized_observation_echo_is_not_recaptured() {
+        // Regression: the observer used to eat its own tail. When a command
+        // displayed the session log (`cat`/`grep`/`Read`, or the Stop reminder
+        // echoing a stored excerpt), the output carried a serialized
+        // `Observation` whose excerpt still held the original "FAIL" text, so
+        // the `\bFAIL\b` pattern re-matched and re-captured it — nesting the old
+        // record inside a new one, forever. A line that is one of our own
+        // serialized records must be skipped.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = CapturingFs::new(tmp.path().to_path_buf());
+        let ctx = ctx_with_fs(&fs);
+        let echoed = r#"{"ts_ms":1783456663421,"category":"test failure","excerpt":"[ FAIL ] tool_response_field  field/high  hits=0  events.rs:158"}"#;
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": "cat good-citizen.jsonl"})),
+            tool_result: Some(serde_json::json!({ "stdout": echoed })),
+            session_id: Some("s-citizen-selfecho".into()),
+            ..Default::default()
+        };
+        process_post_tool(&input, &ctx);
+        let writes = fs.appends.lock().unwrap();
+        assert!(
+            writes.is_empty(),
+            "a self-serialized observation echo must NOT be re-captured, but {} write(s) happened: {:?}",
+            writes.len(),
+            writes
+                .iter()
+                .map(|(_, b)| String::from_utf8_lossy(b).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn real_failure_still_captured_alongside_self_echo_guard() {
+        // The self-echo guard must not suppress a genuine failure. A real test
+        // runner line ("test x ... FAILED") carries no Observation JSON keys, so
+        // it is still recorded even though the echo guard is active.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = CapturingFs::new(tmp.path().to_path_buf());
+        let ctx = ctx_with_fs(&fs);
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": "cargo test"})),
+            tool_result: Some(serde_json::json!({
+                // First line is a self-echo (must be skipped); second is a real
+                // failure (must be captured).
+                "stdout": "{\"ts_ms\":1,\"category\":\"x\",\"excerpt\":\"FAILED\"}\ntest real::case ... FAILED"
+            })),
+            session_id: Some("s-citizen-mixed".into()),
+            ..Default::default()
+        };
+        process_post_tool(&input, &ctx);
+        let writes = fs.appends.lock().unwrap();
+        assert_eq!(
+            writes.len(),
+            1,
+            "exactly the real FAILED line should be captured (echo skipped), got {} writes",
+            writes.len()
+        );
+        let line = std::str::from_utf8(&writes[0].1).unwrap();
+        assert!(line.contains("test failure"), "got: {line}");
+        assert!(
+            line.contains("test real::case"),
+            "captured excerpt should be the real failure line, got: {line}"
+        );
+    }
+
+    #[test]
+    fn is_self_serialized_observation_discriminates() {
+        // Positive: a real serialized record.
+        assert!(is_self_serialized_observation(
+            r#"{"ts_ms":123,"category":"test failure","excerpt":"boom"}"#
+        ));
+        // Negative: real tool output that merely contains FAIL/keywords.
+        assert!(!is_self_serialized_observation("test foo ... FAILED"));
+        assert!(!is_self_serialized_observation(
+            "[ FAIL ] tool_response_field  field/high  hits=0  events.rs:158"
+        ));
+        // Negative: a line mentioning only one of the keys is not our record.
+        assert!(!is_self_serialized_observation(
+            r#"logged {"ts_ms":123} for the request"#
+        ));
     }
 
     #[test]
