@@ -113,8 +113,11 @@ pub fn process_post_tool(input: &HookInput, ctx: &super::HookContext<'_>) -> Hoo
         }
         for (re, category) in &patterns {
             if re.is_match(line) {
-                let excerpt = if line.len() > 120 {
-                    format!("{}…", &line[..120])
+                // Truncate to 120 CHARACTERS on a char boundary — `&line[..120]`
+                // panics when byte 120 lands mid-UTF-8 (non-ASCII tool output:
+                // arrows, box-drawing, emoji in cargo/test logs).
+                let excerpt = if line.chars().count() > 120 {
+                    format!("{}…", line.chars().take(120).collect::<String>())
                 } else {
                     line.to_string()
                 };
@@ -439,6 +442,44 @@ mod tests {
             .map(|(_, b)| std::str::from_utf8(b).unwrap().to_string())
             .collect::<String>();
         assert!(body.contains("test failure"), "got: {body}");
+    }
+
+    #[test]
+    fn long_multibyte_matched_line_does_not_panic() {
+        // Regression: excerpt truncation used `&line[..120]` (byte index) which
+        // panicked when byte 120 landed mid-UTF-8. Build a matched ("FAILED")
+        // line whose 120th byte is inside a multibyte char (│ = 3 bytes each).
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = CapturingFs::new(tmp.path().to_path_buf());
+        let ctx = ctx_with_fs(&fs);
+        // >120 CHARS (not bytes) so truncation actually triggers, and the 120th
+        // byte lands mid-`│` (3 bytes) — the exact input `&line[..120]` panicked on.
+        let long_line = format!("FAILED {}", "│".repeat(200)); // 207 chars, 607 bytes
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_result: Some(serde_json::json!({ "stdout": long_line })),
+            session_id: Some("s-citizen-mb".into()),
+            ..Default::default()
+        };
+        // Primary assertion: must not panic on the multibyte byte-120 boundary.
+        process_post_tool(&input, &ctx);
+        let writes = fs.appends.lock().unwrap();
+        assert!(!writes.is_empty(), "expected an observation for the FAILED line");
+        // Parse the persisted observation and confirm the excerpt was truncated
+        // to 120 chars + ellipsis (the `…` is JSON-escaped in the raw bytes, so
+        // decode the record rather than substring-matching the wire form).
+        let raw = std::str::from_utf8(&writes[0].1).unwrap();
+        let obs: Observation = serde_json::from_str(raw.trim()).unwrap();
+        assert!(
+            obs.excerpt.ends_with('…'),
+            "long line excerpt should end with an ellipsis, got: {}",
+            obs.excerpt
+        );
+        assert_eq!(
+            obs.excerpt.chars().count(),
+            121,
+            "excerpt should be exactly 120 chars + the ellipsis"
+        );
     }
 
     #[test]

@@ -145,16 +145,23 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
     // wrong place (ghost session_id), and tasks.md regeneration appeared to
     // succeed but operated on the wrong session's task store.
     //
-    // Now: prefer input.session_id, then $CLAUDE_SESSION_ID env var (set by
-    // mcp-router and cron contexts), then fail loudly with a clear message
-    // instead of silently corrupting state under "unknown".
+    // Now: prefer input.session_id, then the env-var chain (Claude Code exports
+    // CLAUDE_CODE_SESSION_ID into MCP/hook children — verified in the
+    // deobfuscated 2.1.201 bundle; the wrapper/cron contexts may set
+    // VULCAN_SESSION_ID / CLAUDE_SESSION_ID). Must match the same precedence
+    // channel_events uses, or the dispatcher resolves a different id than the
+    // event producer. Then fail loudly instead of corrupting state under
+    // "unknown".
     let session_id_owned: String = match input.session_id.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => match std::env::var("CLAUDE_SESSION_ID") {
-            Ok(s) if !s.is_empty() => s,
-            _ => {
+        _ => match ["VULCAN_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "SESSION_ID"]
+            .into_iter()
+            .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+        {
+            Some(s) => s,
+            None => {
                 eprintln!(
-                    "[sentinel] hook: no session_id available — pass via stdin HookInput.session_id or set CLAUDE_SESSION_ID env var. Refusing to operate against synthetic 'unknown' session."
+                    "[sentinel] hook: no session_id available — pass via stdin HookInput.session_id or set CLAUDE_CODE_SESSION_ID. Refusing to operate against synthetic 'unknown' session."
                 );
                 // Return safe empty JSON so callers don't crash, but do not
                 // proceed with state mutations.
