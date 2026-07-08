@@ -519,12 +519,8 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         _ => return HookOutput::allow(),
     };
 
-    let team_name = input
-        .extra
-        .get("team_name")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown");
+    // NOTE: CC's `team_name` payload field is @deprecated (2.1.201, "single
+    // implicit team") and no longer read — it only fed this decorative label.
 
     let task_id = match input.extra.get("task_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() && s != "?" => s,
@@ -533,7 +529,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 
     // Base verification reminder
     let mut context = format!(
-        "[Task Completion Gate] Teammate '{teammate_name}' (team: {team_name}) is completing task #{task_id}: '{task_subject}'\n\
+        "[Task Completion Gate] Teammate '{teammate_name}' is completing task #{task_id}: '{task_subject}'\n\
          \n\
          BEFORE marking this task complete, verify:\n\
          1. All acceptance criteria from the task description are met\n\
@@ -870,6 +866,8 @@ mod tests {
             "teammate_name".to_string(),
             serde_json::json!("backend-dev"),
         );
+        // team_name is @deprecated in CC and no longer read — set it here to
+        // prove a stray upstream value does NOT leak into the gate context.
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("auth-team"));
@@ -883,9 +881,17 @@ mod tests {
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("backend-dev"));
-        assert!(ctx.contains("auth-team"));
         assert!(ctx.contains("Implement auth"));
         assert!(ctx.contains("#42"));
+        // The deprecated team_name must not surface, even when sent.
+        assert!(
+            !ctx.contains("auth-team"),
+            "deprecated team_name must not appear in the completion gate context"
+        );
+        assert!(
+            !ctx.contains("team:"),
+            "the (team: …) clause must be gone"
+        );
     }
 
     #[test]

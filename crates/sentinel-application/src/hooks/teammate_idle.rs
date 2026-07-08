@@ -11,23 +11,23 @@ use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // SEN-1: drop malformed TeammateIdle events. If the dispatcher didn't
     // populate teammate_name with a real value, the event is malformed —
-    // emitting "Teammate 'unknown' (team: unknown) is going idle" just
-    // spams the lead session.
+    // emitting "Teammate 'unknown' is going idle" just spams the lead session.
     let teammate_name = match input.extra.get("teammate_name").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() && s != "unknown" => s,
         _ => return HookOutput::allow(),
     };
 
-    let team_name = input
-        .extra
-        .get("team_name")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown");
+    // NOTE: the CC hook payload's `team_name` field is @deprecated as of
+    // 2.1.201 ("Sessions have a single implicit team… will be removed in a
+    // future release"), so we no longer read it. It only ever fed decorative
+    // label strings and a write-only channel-event meta stamp that no consumer
+    // reads back; the idle-debounce key is (session_id, teammate) and is
+    // unaffected. The contract-diff guard (cc-boundary-contract.tsv) still
+    // watches for CC actually removing the field.
 
     // Inject a reminder to check task list before going idle
     let context = format!(
-        "[Team Quality Gate] Teammate '{teammate_name}' (team: {team_name}) is going idle.\n\
+        "[Team Quality Gate] Teammate '{teammate_name}' is going idle.\n\
          \n\
          Before going idle, ensure:\n\
          1. All assigned tasks are marked completed (TaskUpdate with status: completed)\n\
@@ -43,15 +43,11 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     // the rest is spam. The context injection below is NOT debounced — the
     // quality-gate reminder is meant for every poll.
     if should_emit_idle_event(ctx.fs, input.session_id.as_deref(), teammate_name) {
-        let summary = format!("Teammate '{teammate_name}' (team: {team_name}) is going idle.");
+        let summary = format!("Teammate '{teammate_name}' is going idle.");
         let mut meta = serde_json::Map::new();
         meta.insert(
             "teammate_name".to_string(),
             serde_json::Value::String(teammate_name.to_string()),
-        );
-        meta.insert(
-            "team_name".to_string(),
-            serde_json::Value::String(team_name.to_string()),
         );
         crate::channel_events::emit(
             ctx.fs,
@@ -135,6 +131,8 @@ mod tests {
             "teammate_name".to_string(),
             serde_json::json!("backend-dev"),
         );
+        // team_name is intentionally NOT set — the field is @deprecated in CC
+        // and no longer read; a stray value must not surface in the context.
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("my-project"));
@@ -145,8 +143,17 @@ mod tests {
         let ctx = output.hook_specific_output.unwrap().additional_context;
         let ctx = ctx.as_deref().unwrap();
         assert!(ctx.contains("backend-dev"));
-        assert!(ctx.contains("my-project"));
         assert!(ctx.contains("TaskList"));
+        // The deprecated team_name must NOT leak into the injected context,
+        // even when the upstream still sends it.
+        assert!(
+            !ctx.contains("my-project"),
+            "deprecated team_name must not appear in the idle context"
+        );
+        assert!(
+            !ctx.contains("team:"),
+            "the (team: …) clause must be gone"
+        );
     }
 
     #[test]

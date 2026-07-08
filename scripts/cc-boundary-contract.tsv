@@ -40,5 +40,4 @@ event_session_start	event	true	high	session_init.rs	"SessionStart"	Hook event na
 event_user_prompt_submit	event	true	high	skill_router.rs etc	"UserPromptSubmit"	Hook event name sentinel handles.
 event_stop	event	true	high	claim_reality_check.rs	"Stop"	Hook event name sentinel handles.
 event_pre_compact	event	true	low	pre_compact.rs	"PreCompact"	Hook event name sentinel handles.
-team_name_present	field	true	low	task_created.rs:49	team_name	team_name is still present in TaskCreated payloads (sentinel reads it).
-team_name_deprecated	deprecation	warn	med	task_created.rs:49	team_name:[^,}]{0,80}[Dd]eprecated	team_name is @deprecated in CC's schema — WARN, plan migration off it before CC drops it.
+team_name_deprecated	deprecation	warn	med	(migrated off — no reads)	team_name:[^,}]{0,80}[Dd]eprecated	team_name is @deprecated in CC's schema. Sentinel no longer reads it (migrated 2026-07; hooks dropped the decorative label + write-only stamp). WARN tripwire kept: if this stops matching, CC removed the field — confirm nothing regressed.

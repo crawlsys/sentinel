@@ -46,8 +46,6 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .and_then(|v| v.as_str())
         .unwrap_or("untitled");
 
-    let team_name = input.extra.get("team_name").and_then(|v| v.as_str());
-
     // Extract structured metadata from the subject
     let priority = extract_priority(task_subject);
     let skill_tags = extract_skill_tags(task_subject);
@@ -60,10 +58,11 @@ pub fn process(input: &HookInput, _ctx: &super::HookContext<'_>) -> HookOutput {
         .and_then(|v| v.as_array())
         .is_some_and(|a| !a.is_empty());
 
+    // NOTE: CC's `team_name` payload field is @deprecated (2.1.201) — dropped
+    // from this telemetry line; it was a log-only field with no downstream use.
     tracing::debug!(
         task_id,
         task_subject,
-        ?team_name,
         ?priority,
         ?skill_tags,
         has_metadata,
