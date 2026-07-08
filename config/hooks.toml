@@ -47,6 +47,13 @@ depends_on = []
 has_api_call = false
 
 [[hooks]]
+id = "task-status-line"
+event = "UserPromptSubmit"
+description = "Tasks as first-class citizens: inject the live native TaskList (this session's tasks, emoji + id + subject) on every turn"
+depends_on = []
+has_api_call = false
+
+[[hooks]]
 id = "phase-validator"
 event = "UserPromptSubmit"
 description = "Validate phase completion and inject progress"

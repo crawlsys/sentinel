@@ -38,7 +38,7 @@ sentinel mcp                           Start MCP server over stdio
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `sentinel-domain` | — | Pure business logic: proofs, workflows, evidence, hooks, routing |
-| `sentinel-application` | — | Use cases: engine, classifier, gate, 87 hook modules |
+| `sentinel-application` | — | Use cases: engine, classifier, gate, 88 hook modules |
 | `sentinel-infrastructure` | — | IO adapters: config, state store, git, MCP transport, AI judge |
 | `sentinel-graph` | — | Phase-progression engine: compiles `workflows.toml` into a durable, checkpointed langgraph StateGraph with judge-verdict interrupts and Pass/Fail routing |
 | `sentinel-cli` | `sentinel` | CLI (37 top-level subcommands) + local REST API (axum) + in-repo MCP host (stdio) |
@@ -103,7 +103,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 - `Stop` — when Claude finishes responding
 - `SessionStart` / `PreCompact` — session lifecycle
 
-87 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 87:
+88 hook modules (one `.rs` file per hook in `hooks/`). The categories below are **representative, not exhaustive** — they show a sampling of each category, not all 88:
 
 | Category | Hooks (representative) |
 |----------|-------|
@@ -116,7 +116,7 @@ Hooks are invoked by Claude Code's runtime via `sentinel hook --event <Event>`:
 
 ## Key Paths
 
-- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 87 modules)
+- `crates/sentinel-application/src/hooks/` — all hook implementations (one file per hook; 88 modules)
 - `crates/sentinel-application/src/hooks/mod.rs` — `HOOK_NAMES` const, `GitStatusPort` trait
 - `crates/sentinel-domain/src/workflow.rs` — `SkillWorkflow`, `WorkflowPhase` definitions
 - `crates/sentinel-domain/src/proof.rs` — `ProofChain`, `PhaseProof`

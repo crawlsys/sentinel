@@ -1286,6 +1286,13 @@ async fn handle_user_prompt_submit(
     });
     output.merge(&todo_output);
 
+    // Task status line — tasks as first-class citizens: inject the live native
+    // TaskList (this session's tasks, with emoji + id + subject) on EVERY turn.
+    let task_line_output = time_and_record(ctx.fs, &mk_ctx("task_status_line"), || {
+        hooks::task_status_line::process(input, ctx)
+    });
+    output.merge(&task_line_output);
+
     // Linear inbound sync — poll the Hookdeck Events API for already-captured
     // Linear webhook deliveries and reconcile in-progress @linear-tagged tasks
     // whose issue moved to a terminal state, injecting TaskUpdate instructions.

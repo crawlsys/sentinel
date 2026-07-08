@@ -82,6 +82,7 @@ pub mod task_created;
 pub mod task_decomposition_gate;
 pub mod task_persist;
 pub mod task_rehydrate;
+pub mod task_status_line;
 pub mod tasks_md_guard;
 pub mod teammate_idle;
 pub mod test_evidence_recorder;
@@ -353,6 +354,7 @@ pub const HOOK_NAMES: &[&str] = &[
     "task_created",
     "task_persist",
     "task_rehydrate",
+    "task_status_line",
     "tasks_md_guard",
     "teammate_idle",
     "test_evidence_recorder",
