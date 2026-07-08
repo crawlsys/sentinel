@@ -34,6 +34,12 @@ struct ToolUsageGateConfig {
     /// the task-list / plan-mode / in_progress-task checks are unaffected.
     #[serde(default = "default_true")]
     sequential_thinking_check: bool,
+    /// Master switch. `false` disables the whole gate: every tool call is
+    /// allowed and no graph authority is consulted. For controlled
+    /// environments (benchmark arms); missing/corrupt config falls back to
+    /// `true` — fail closed to enforcement.
+    #[serde(default = "default_true")]
+    enabled: bool,
 }
 
 const fn default_true() -> bool {
@@ -44,6 +50,7 @@ impl Default for ToolUsageGateConfig {
     fn default() -> Self {
         Self {
             sequential_thinking_check: true,
+            enabled: true,
         }
     }
 }
@@ -382,6 +389,17 @@ pub fn evaluate(
         Some(t) => t.as_str(),
         None => return evaluation,
     };
+
+    // Master switch (operator config `enabled = false`): the whole gate stands
+    // down — allow without classifying, and leave `gate_required` false so no
+    // graph authority runs (nothing to keep in parity when nothing decides).
+    if !load_config(fs).enabled {
+        eprintln!(
+            "[sentinel] tool_usage_gate: disabled by operator config \
+             (tool-usage-gate.toml enabled = false) — allowing without checks."
+        );
+        return evaluation;
+    }
 
     // A6 Phase 4b + A3 Phase 4: class-based dispatch with A3 hand-off.
     let null_input = serde_json::Value::Null;
@@ -907,6 +925,42 @@ mod tests {
         assert!(
             output.blocked.is_none(),
             "operator config must skip Check 1 when other checks pass; got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn operator_config_enabled_false_disables_whole_gate() {
+        // enabled = false: NO task seeded, seq-thinking not used, no plan —
+        // every check would block, but the master switch stands the gate down
+        // entirely and no graph authority is required.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        seed_claude_json_with_sequential(home);
+        seed_gate_config(home, "enabled = false\n");
+        let transcript = write_transcript(&[]);
+
+        let evaluation = evaluate(
+            &edit_input("sess", &transcript),
+            &fs,
+            &permissive_classifier(),
+            false,
+        );
+        assert!(!evaluation.should_deny, "disabled gate must not deny");
+        assert!(
+            !evaluation.graph_authority_required(),
+            "disabled gate must not consult the graph authority"
+        );
+        let output = process(
+            &edit_input("sess", &transcript),
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert!(
+            output.blocked.is_none(),
+            "disabled gate must allow: {output:?}"
         );
     }
 

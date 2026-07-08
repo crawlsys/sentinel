@@ -38,6 +38,59 @@
 //! priority tags + emoji, real Na/Nb child subtasks, status CRUD).
 
 use sentinel_domain::events::{HookEnvelope, HookInput, HookOutput};
+
+// Shipped defaults compiled in; wholesale-replaced by the operator override at
+// `~/.claude/sentinel/config/task-decomposition-gate.toml` when present —
+// same pattern as tool_usage_gate.
+const SHIPPED_DEFAULTS: &str =
+    include_str!("../../../../config/task-decomposition-gate-defaults.toml");
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskDecompositionGateConfig {
+    /// Master switch. `false` disables the whole gate: mutating tools are
+    /// never blocked for a missing task list and no graph authority is
+    /// consulted. For controlled environments (benchmark arms);
+    /// missing/corrupt config falls back to `true` — fail closed to
+    /// enforcement.
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for TaskDecompositionGateConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl TaskDecompositionGateConfig {
+    fn from_toml_or_default(s: &str) -> Self {
+        toml::from_str(s).unwrap_or_else(|e| {
+            eprintln!(
+                "[sentinel] task_decomposition_gate: config TOML parse failed ({e}); \
+                 using enforced defaults"
+            );
+            Self::default()
+        })
+    }
+}
+
+fn load_config(fs: &dyn super::FileSystemPort) -> TaskDecompositionGateConfig {
+    let mut cfg = TaskDecompositionGateConfig::from_toml_or_default(SHIPPED_DEFAULTS);
+    let path = fs
+        .claude_dir()
+        .join("sentinel")
+        .join("config")
+        .join("task-decomposition-gate.toml");
+    if let Ok(content) = fs.read_to_string(&path) {
+        cfg = TaskDecompositionGateConfig::from_toml_or_default(&content);
+    }
+    cfg
+}
 use std::path::PathBuf;
 
 use super::{FileSystemPort, HookContext};
@@ -337,6 +390,30 @@ pub fn evaluate(input: &HookInput, ctx: &HookContext<'_>) -> TaskDecompositionEv
     let bash_tool = tool_name == "Bash";
     let bash_command = bash_tool.then(|| bash_command(input)).flatten();
     let bash_command_present = bash_command.is_some();
+
+    // Master switch (operator config `enabled = false`): the whole gate stands
+    // down. Report the tool as allowed so `graph_authority_required()` stays
+    // false — no graph runs, so there is no replica to keep in parity.
+    if !load_config(ctx.fs).enabled {
+        eprintln!(
+            "[sentinel] task_decomposition_gate: disabled by operator config \
+             (task-decomposition-gate.toml enabled = false) — allowing without checks."
+        );
+        return TaskDecompositionEvaluation {
+            tool,
+            session_id,
+            bash_command,
+            allowed_tool: true,
+            bash_tool,
+            bash_command_present,
+            mutating_tool: false,
+            task_state_readable: false,
+            task_list_confirmed: false,
+            unreadable_task_state: false,
+            should_block: false,
+            decision: TaskDecompositionDecision::Allow,
+        };
+    }
 
     // Never gate read / task tools — they are the fix path.
     if is_allowed_tool(tool_name) {
@@ -710,6 +787,34 @@ mod tests {
             .reason
             .as_ref()
             .is_some_and(|r| r.contains("decomposed task list")));
+    }
+
+    #[test]
+    fn operator_config_enabled_false_disables_whole_gate() {
+        // Same present-but-empty task dir that blocks above — but the operator
+        // override disables the gate, so the edit is allowed and no graph
+        // authority is required.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs: &'static ScopedHomeFs = Box::leak(Box::new(ScopedHomeFs {
+            home: tmp.path().to_path_buf(),
+        }));
+        seed_empty_dir(tmp.path(), "sess-empty");
+        let cfg_dir = tmp.path().join(".claude").join("sentinel").join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("task-decomposition-gate.toml"),
+            "enabled = false\n",
+        )
+        .unwrap();
+        let ctx = ctx_with_fs(fs);
+        let evaluation = evaluate(&input("Edit", Some("sess-empty")), &ctx);
+        assert!(!evaluation.should_block, "disabled gate must not block");
+        assert!(
+            !evaluation.graph_authority_required(),
+            "disabled gate must not consult the graph authority"
+        );
+        let out = process(&input("Edit", Some("sess-empty")), &ctx);
+        assert!(out.blocked.is_none(), "disabled gate must allow: {out:?}");
     }
 
     #[test]
