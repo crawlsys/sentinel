@@ -113,6 +113,33 @@ fn is_current_session(meta: &PersistMeta, current_session: &str) -> bool {
     meta.session_id == current_session
 }
 
+/// A cross-session task mirror this old is treated as abandoned: no live
+/// session is plausibly still working it, so re-injecting its `in_progress`
+/// tasks every SessionStart is noise. Matches the 14-day session-summary
+/// age-out so the two horizons stay consistent.
+const MAX_REHYDRATE_AGE_DAYS: i64 = 14;
+
+/// True when a foreign-session snapshot's `updated_at` is older than the
+/// rehydrate horizon. An unparseable timestamp is treated as NOT stale — we
+/// never prune on ambiguous data, only on a clearly-old one.
+fn is_stale_mirror(updated_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(updated_at).is_ok_and(|dt| {
+        Utc::now().signed_duration_since(dt) > chrono::Duration::days(MAX_REHYDRATE_AGE_DAYS)
+    })
+}
+
+/// Best-effort truncate of a stale cross-session mirror: blank `tasks.json` to
+/// `[]` so it stops being rehydrated and stops rendering in the CLAUDE.md
+/// Active Tasks table. Any IO failure is swallowed — GC must never break
+/// SessionStart. (We deliberately do NOT delete the dir: keeping an empty
+/// `tasks.json` preserves the same on-disk shape the live path maintains.)
+fn truncate_stale_mirror(fs: &dyn FileSystemPort, project_hash: &str) {
+    if let Some(dir) = persistent_tasks_dir(fs, project_hash) {
+        let path = dir.join("tasks.json");
+        let _ = fs.write(&path, b"[]");
+    }
+}
+
 /// Format a human-readable relative time
 fn relative_time(updated_at: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(updated_at) {
@@ -236,6 +263,27 @@ fn build_tasks_block(
     if let Some(meta) = &meta {
         if is_current_session(meta, session_id) {
             tracing::debug!("Persistent tasks are from current session — skipping rehydration");
+            return Ok(None);
+        }
+
+        // SessionStart GC (the missing reconcile safety net): the mirror is
+        // keyed per project-hash but the native task list is session-global, so
+        // a session that cd's across repos can leave frozen `in_progress`
+        // snapshots in hashes it never revisits. `task_persist`'s per-write
+        // cleanup only fires while that session is live; once it ends, nothing
+        // prunes the orphan — and this very function would otherwise re-inject
+        // it into EVERY future session forever. So: if a foreign session's
+        // snapshot is older than the rehydrate horizon, treat it as abandoned —
+        // truncate it and skip injection, instead of nagging about tasks no
+        // live session is working. Fresh foreign snapshots (a genuine recent
+        // prior session) are still rehydrated as before.
+        if is_stale_mirror(&meta.updated_at) {
+            tracing::info!(
+                hash = proj_hash,
+                updated_at = %meta.updated_at,
+                "Pruning stale cross-session task mirror (older than rehydrate horizon)"
+            );
+            truncate_stale_mirror(ctx.fs, proj_hash);
             return Ok(None);
         }
     }
@@ -671,6 +719,103 @@ mod tests {
         assert!(build_summary_block(&ctx, "agedhash", "current-sess")
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn is_stale_mirror_discriminates_by_age() {
+        // Well past the horizon → stale.
+        assert!(is_stale_mirror("2026-01-01T00:00:00Z"));
+        // Just now → not stale.
+        assert!(!is_stale_mirror(&chrono::Utc::now().to_rfc3339()));
+        // Unparseable → never treated as stale (no prune on ambiguous data).
+        assert!(!is_stale_mirror("not-a-timestamp"));
+        assert!(!is_stale_mirror(""));
+    }
+
+    #[test]
+    fn stale_cross_session_mirror_is_pruned_and_not_rehydrated() {
+        // The orphan-ghost end state: a foreign session left an in_progress
+        // snapshot that is now older than the rehydrate horizon. SessionStart
+        // must NOT re-inject it, and must truncate it so it stops rendering in
+        // the Active Tasks table forever.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+
+        let hash = "ghosthash";
+        let dir = persistent_tasks_dir(&fs, hash).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tasks.json"),
+            r#"[{"id":"1","subject":"orphaned ghost","status":"in_progress","blocks":[],"blocked_by":[]}]"#,
+        )
+        .unwrap();
+        // Foreign session, ancient timestamp.
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"project_hash":"ghosthash","cwd":"/old/repo","session_id":"long-dead-session","updated_at":"2026-01-01T00:00:00Z","task_count":1,"incomplete_count":1,"last_block_hash":""}"#,
+        )
+        .unwrap();
+
+        let input = HookInput {
+            session_id: Some("current-session".to_string()),
+            cwd: Some("/whatever".to_string()),
+            ..Default::default()
+        };
+        // build_tasks_block reads the mirror for project_hash(cwd); force the
+        // ghost hash by asserting the helper directly (cwd hashing is covered
+        // elsewhere). Prune + skip:
+        let block = build_tasks_block(&input, &ctx, hash, "current-session").unwrap();
+        assert!(
+            block.is_none(),
+            "a stale cross-session mirror must not be rehydrated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tasks.json")).unwrap().trim(),
+            "[]",
+            "the stale mirror must be truncated so it stops re-injecting/rendering"
+        );
+    }
+
+    #[test]
+    fn fresh_cross_session_mirror_is_still_rehydrated() {
+        // Guard against over-pruning: a RECENT foreign-session snapshot (a
+        // genuine prior session moments ago) must still rehydrate as before.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+        let ctx = stub_ctx_with_fs(&fs);
+
+        let hash = "freshhash";
+        let dir = persistent_tasks_dir(&fs, hash).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tasks.json"),
+            r#"[{"id":"1","subject":"real recent task","status":"in_progress","blocks":[],"blocked_by":[]}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            format!(
+                r#"{{"project_hash":"freshhash","cwd":"/r","session_id":"prev-session","updated_at":"{}","task_count":1,"incomplete_count":1,"last_block_hash":""}}"#,
+                chrono::Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        let input = HookInput {
+            session_id: Some("current-session".to_string()),
+            cwd: Some("/whatever".to_string()),
+            ..Default::default()
+        };
+        let block = build_tasks_block(&input, &ctx, hash, "current-session").unwrap();
+        assert!(
+            block.is_some(),
+            "a fresh cross-session mirror must still be rehydrated"
+        );
+        assert!(
+            block.unwrap().contains("real recent task"),
+            "the rehydrated block should name the incomplete task"
+        );
     }
 
     #[test]

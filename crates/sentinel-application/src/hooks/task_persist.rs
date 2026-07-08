@@ -1141,6 +1141,18 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         if let Err(e) = truncate_persistent_tasks(ctx.fs, ctx.git, cwd, &proj_hash, session_id) {
             tracing::warn!(error = %e, "Failed to truncate stale task snapshot");
         }
+        // Ghost-orphan fix (2026-07-08): the native task list is SESSION-global
+        // (one dir per session_id), but the mirror is keyed per project-hash
+        // (derived from cwd). When a session cd's between repos, each cwd gets
+        // its own hash dir. The empty branch used to `return` here WITHOUT
+        // clearing the OTHER hashes this session previously wrote — so a session
+        // that empties its list in a new cwd left frozen `in_progress` ghosts in
+        // every prior cwd's snapshot, re-injected forever by task_rehydrate and
+        // re-rendered in the CLAUDE.md Active Tasks table. Clearing bled
+        // snapshots on the empty path too closes that orphan window: the
+        // session's tasks live in exactly one project (or nowhere) at a time,
+        // whether the current list is empty or not.
+        clear_bled_snapshots(ctx.fs, ctx.git, cwd, &proj_hash, session_id);
         return HookOutput::allow();
     }
 
@@ -2377,6 +2389,48 @@ mod tests {
         assert!(
             snapshot_tasks(home, "projaaaa").contains("\"x\""),
             "another session's snapshot must be untouched (meta.session_id guard)"
+        );
+    }
+
+    #[test]
+    fn process_empty_native_list_still_clears_bled_snapshots() {
+        // Ghost-orphan regression: when the native list is empty, process() takes
+        // the truncate-and-return path. It used to `return` BEFORE
+        // clear_bled_snapshots, so a session that emptied its list in a new cwd
+        // left frozen in_progress ghosts in the hashes it visited earlier. The
+        // empty path must clear those bled snapshots too.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let fs = HomeFs {
+            home: home.to_path_buf(),
+        };
+        let sid = "sess-empty-clears";
+        let ghost = r#"[{"id":"1","subject":"orphan ghost","status":"in_progress"}]"#;
+
+        // The session previously wrote a snapshot in projA (a different cwd) and
+        // recorded it in the ledger. The current cwd (/repo/now) has NO native
+        // task dir, so process() will hit the empty branch.
+        let now_hash = project_hash("/repo/now");
+        seed_snapshot(home, "projaaaa", sid, "/repo/a", ghost);
+        record_session_project(&fs, sid, "projaaaa");
+        // Also record the current hash so the ledger reflects a real session.
+        record_session_project(&fs, sid, &now_hash);
+
+        let ctx = crate::hooks::test_support::stub_ctx_with_fs(&fs);
+        let input = HookInput {
+            hook_event: Some("PostToolUse".to_string()),
+            session_id: Some(sid.to_string()),
+            cwd: Some("/repo/now".to_string()),
+            ..Default::default()
+        };
+        // No native task dir for `sid` under ~/.claude/tasks/ → empty path.
+        let _ = process(&input, &ctx);
+
+        // The bled projA ghost must be cleared even though the current list is empty.
+        assert_eq!(
+            snapshot_tasks(home, "projaaaa").trim(),
+            "[]",
+            "empty-list path must still clear the session's bled snapshot in projA"
         );
     }
 }
