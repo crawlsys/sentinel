@@ -899,37 +899,11 @@ fn list_linear_accounts(claude_dir: &Path) -> Vec<String> {
 /// numeric rank, and a leading `—`/`-`/`:` separator. Idempotent, and a no-op
 /// for a clean subject.
 fn strip_status_priority_prefix(subject: &str) -> &str {
-    const DECOR_EMOJI: &[char] = &['🔄', '⏳', '✅', '❌', '🔴', '🟠', '🟡', '🟢'];
-    let mut s = subject.trim_start();
-    loop {
-        let before = s;
-        // Leading decoration emoji.
-        s = s.trim_start_matches(|c| DECOR_EMOJI.contains(&c));
-        s = s.trim_start();
-        // Leading [Pn] priority token.
-        if let Some(rest) = s.strip_prefix('[') {
-            if let Some(close) = rest.find(']') {
-                let inner = &rest[..close];
-                if inner.len() <= 3
-                    && inner.starts_with('P')
-                    && inner[1..].chars().all(|c| c.is_ascii_digit())
-                {
-                    s = rest[close + 1..].trim_start();
-                }
-            }
-        }
-        // Bare leading numeric rank (e.g. the "1" in "🔴 1 [P0]").
-        let trimmed_num = s.trim_start_matches(|c: char| c.is_ascii_digit());
-        if trimmed_num.len() < s.len() && trimmed_num.starts_with([' ', '—', '-', ':']) {
-            s = trimmed_num.trim_start();
-        }
-        // Leading separator.
-        s = s.trim_start_matches(['—', '-', ':']).trim_start();
-        if s == before {
-            break;
-        }
-    }
-    s
+    // Delegates to the single canonical stripper in the domain layer (shared
+    // with the native-subject decorator), so the render/parse vocabularies
+    // can't drift. The domain set includes 🚫 (blocked); this local copy used
+    // to omit it.
+    sentinel_domain::task_decoration::strip_decoration(subject)
 }
 
 /// Map a task status string to its glyph + word for the Status column

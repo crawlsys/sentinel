@@ -262,7 +262,66 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
     })
 }
 
-use sentinel_domain::task_decoration::{priority_from_decoration, status_from_glyph, DECOR_EMOJI};
+use sentinel_domain::task_decoration::{
+    priority_from_decoration, status_from_glyph, status_glyph, strip_decoration, DECOR_EMOJI,
+};
+
+/// Bake the current status emoji into each native task file's `subject` so
+/// Claude Code's own task panel renders it. For every `*.json` task file in the
+/// session's native task dir: parse as a generic JSON value (preserving every
+/// field), set `subject` = `"{status_glyph} {stripped_subject}"`, and
+/// atomically write it back **only if the subject actually changed**.
+///
+/// - **Idempotent**: strips any existing decoration first, so re-running never
+///   stacks glyphs, and a status change (`⏳`→`🔄`) re-glyphs cleanly.
+/// - **Non-destructive**: edits only the `subject` string; all other fields are
+///   round-tripped untouched.
+/// - **Unknown status**: leaves the subject clean (no glyph) rather than
+///   inventing one.
+/// - **Best-effort**: any read/parse/write failure on one file is skipped; a
+///   decoration must never break task persistence.
+fn decorate_native_task_subjects(fs: &dyn FileSystemPort, dir: &Path) {
+    let Ok(entries) = fs.read_dir(dir) else {
+        return;
+    };
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.starts_with('.')
+            || !std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            continue;
+        }
+        let Ok(content) = fs.read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let (Some(subject), Some(status)) = (
+            value.get("subject").and_then(serde_json::Value::as_str),
+            value.get("status").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let clean = strip_decoration(subject);
+        let decorated = match status_glyph(status) {
+            Some(glyph) => format!("{glyph} {clean}"),
+            None => clean.to_string(),
+        };
+        if decorated == subject {
+            continue; // already correct — no write, no mtime churn
+        }
+        value["subject"] = serde_json::Value::String(decorated);
+        if let Ok(rendered) = serde_json::to_string_pretty(&value) {
+            let _ = atomic_write(fs, &path, &rendered);
+        }
+    }
+}
 
 /// Strip leading status/priority decoration a caller baked into a subject
 /// string. Mirrors `session_init::strip_status_priority_prefix` (kept in the
@@ -1133,7 +1192,15 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
     // durability-gap guard above already returned on a missing one), so an
     // empty read here is a genuine "no live tasks", not a resolution failure.
     let tasks = match find_active_task_dir(ctx.fs, session_id) {
-        Some(dir) => read_tasks(ctx.fs, &dir),
+        Some(dir) => {
+            // Bake the status emoji into each native task subject on disk so
+            // Claude Code's own task panel renders it (🔄/⏳/✅ …). CC draws the
+            // `subject` text verbatim, and this is the only lever a hook has to
+            // decorate that native widget. Idempotent (strip-first), atomic,
+            // and only rewrites a file whose subject actually changed.
+            decorate_native_task_subjects(ctx.fs, &dir);
+            read_tasks(ctx.fs, &dir)
+        }
         None => Vec::new(),
     };
 
@@ -1632,6 +1699,143 @@ mod tests {
         std::fs::create_dir_all(&session_dir).unwrap();
         let fs = ScopedHomeFs { home };
         assert!(find_active_task_dir(&fs, "session-x").is_none());
+    }
+
+    // -- native-subject emoji decoration -------------------------------------
+
+    /// Read a native task file's `subject` back off disk.
+    fn subject_of(dir: &Path, file: &str) -> String {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
+        v["subject"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn decorate_bakes_status_glyph_into_native_subjects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join(".claude").join("tasks").join("sess-dec");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("1.json"),
+            r#"{"id":"1","subject":"Ship the thing","status":"in_progress"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("2.json"),
+            r#"{"id":"2","subject":"Plan the thing","status":"pending"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("3.json"),
+            r#"{"id":"3","subject":"Done thing","status":"completed"}"#,
+        )
+        .unwrap();
+
+        let fs = ScopedHomeFs { home };
+        decorate_native_task_subjects(&fs, &dir);
+
+        assert_eq!(subject_of(&dir, "1.json"), "🔄 Ship the thing");
+        assert_eq!(subject_of(&dir, "2.json"), "⏳ Plan the thing");
+        assert_eq!(subject_of(&dir, "3.json"), "✅ Done thing");
+    }
+
+    #[test]
+    fn decorate_is_idempotent_and_reglyphs_on_status_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join(".claude").join("tasks").join("sess-idem");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("1.json"),
+            r#"{"id":"1","subject":"Do X","status":"pending"}"#,
+        )
+        .unwrap();
+        let fs = ScopedHomeFs { home };
+
+        // First pass → ⏳. Second pass over the already-decorated file must NOT
+        // stack glyphs.
+        decorate_native_task_subjects(&fs, &dir);
+        decorate_native_task_subjects(&fs, &dir);
+        assert_eq!(subject_of(&dir, "1.json"), "⏳ Do X", "no glyph stacking");
+
+        // Simulate a status change: CC (or the agent) flips status to
+        // in_progress but the subject still carries the stale ⏳. Re-decorating
+        // strips ⏳ and applies 🔄.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("1.json")).unwrap()).unwrap();
+        v["status"] = serde_json::Value::String("in_progress".into());
+        std::fs::write(dir.join("1.json"), v.to_string()).unwrap();
+
+        decorate_native_task_subjects(&fs, &dir);
+        assert_eq!(subject_of(&dir, "1.json"), "🔄 Do X", "re-glyphed on change");
+    }
+
+    #[test]
+    fn decorate_preserves_all_other_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join(".claude").join("tasks").join("sess-fields");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("9.json"),
+            r#"{"id":"9","subject":"Keep fields","status":"in_progress","description":"long desc","activeForm":"Keeping fields","blockedBy":["3"],"checklist":[{"text":"a","done":false}]}"#,
+        )
+        .unwrap();
+        let fs = ScopedHomeFs { home };
+        decorate_native_task_subjects(&fs, &dir);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("9.json")).unwrap()).unwrap();
+        assert_eq!(v["subject"], "🔄 Keep fields");
+        // Every other field round-trips untouched.
+        assert_eq!(v["id"], "9");
+        assert_eq!(v["description"], "long desc");
+        assert_eq!(v["activeForm"], "Keeping fields");
+        assert_eq!(v["blockedBy"], serde_json::json!(["3"]));
+        assert_eq!(v["checklist"], serde_json::json!([{"text":"a","done":false}]));
+    }
+
+    #[test]
+    fn decorate_leaves_unknown_status_clean_and_skips_dotfiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join(".claude").join("tasks").join("sess-unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Unknown status → no glyph, but a previously-baked glyph is stripped.
+        std::fs::write(
+            dir.join("1.json"),
+            r#"{"id":"1","subject":"🔄 Weird one","status":"archived"}"#,
+        )
+        .unwrap();
+        // A .lock dotfile must be ignored entirely (not parsed/written).
+        std::fs::write(dir.join(".lock"), "not json").unwrap();
+
+        let fs = ScopedHomeFs { home };
+        decorate_native_task_subjects(&fs, &dir);
+
+        assert_eq!(
+            subject_of(&dir, "1.json"),
+            "Weird one",
+            "unknown status drops to a clean subject (no invented glyph)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".lock")).unwrap(),
+            "not json",
+            "dotfiles are untouched"
+        );
+    }
+
+    #[test]
+    fn decorate_is_noop_on_empty_or_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let empty = home.join(".claude").join("tasks").join("sess-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let fs = ScopedHomeFs { home };
+        // Neither an empty dir nor a nonexistent one must panic.
+        decorate_native_task_subjects(&fs, &empty);
+        decorate_native_task_subjects(&fs, &empty.join("nope"));
     }
 
     #[test]

@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Status emoji baked into native task subjects — Claude Code's own task panel now shows 🔄/⏳/✅** (2026-07-08). Claude Code's native task widget renders each task's `subject` text verbatim; a hook can't restyle that widget, but it *can* rewrite the subject on disk. `task_persist` now, on every task event (TaskCreated / TaskCompleted / Stop — the events where it already resolves the session's native task dir), rewrites each `~/.claude/tasks/{session}/*.json` `subject` to lead with its current status glyph: `🔄 Ship the thing`, `⏳ Plan the thing`, `✅ Done thing`. Idempotent (strips any existing decoration first, so re-runs never stack glyphs and a status change re-glyphs cleanly), non-destructive (parses as a generic JSON value and edits only `subject` — every other field round-trips untouched), atomic, and only rewrites a file whose subject actually changed (no mtime churn). Unknown statuses drop to a clean subject rather than inventing a glyph; dotfiles (`.lock` etc.) are skipped. Fulfils the standing "normalize baked-in decoration on task write" intent. The canonical stripper `strip_status_priority_prefix` was promoted from `session_init` to `sentinel_domain::task_decoration::strip_decoration` (single source of truth, shared with the CLAUDE.md Active Tasks renderer) — fixing a latent gap where the `session_init` copy omitted `🚫` (blocked) from its strip set. 6 decorator tests + 2 domain strip/round-trip tests.
+
+### Added
 - **Tasks as first-class citizens: a live TaskList status line on every turn** (2026-07-08). New `task_status_line` hook (UserPromptSubmit) injects the operator's **live native TaskList** — this session's tasks, each with its canonical emoji + id + subject — on *every* message, so in-flight work is always visible:
   ```
   📋 [Tasks] sentinel — 2 pending, 1 in progress, 8 done
