@@ -28,11 +28,24 @@ impl FileSystemPort for RealFileSystem {
     }
 
     fn claude_dir(&self) -> PathBuf {
+        // Sentinel's own test/override hook wins first.
         if let Ok(dir) = std::env::var("SENTINEL_CLAUDE_DIR") {
             if dir.is_empty() {
                 panic!("[sentinel] FATAL: SENTINEL_CLAUDE_DIR is set but empty");
             }
             return PathBuf::from(dir);
+        }
+        // Then honour Claude Code's own CLAUDE_CONFIG_DIR — CC roots ALL of its
+        // per-session state (tasks/, projects/, todos/, …) at
+        // `CLAUDE_CONFIG_DIR ?? ~/.claude`, and sandboxed launches set a custom
+        // one. A hook that hardcodes `~/.claude` reads the wrong tree entirely
+        // (e.g. it can't find this session's native task dir, which lives under
+        // the custom config dir). An empty value is ignored (fall through to
+        // the home default) rather than treated as fatal.
+        if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
         }
         self.home_dir()
             .expect(
@@ -428,6 +441,47 @@ mod tests {
     fn test_home_dir_exists() {
         let fs = RealFileSystem;
         assert!(fs.home_dir().is_some());
+    }
+
+    #[test]
+    fn claude_dir_honours_claude_config_dir() {
+        // Claude Code roots all per-session state (tasks/, todos/, …) at
+        // CLAUDE_CONFIG_DIR when set; a sandboxed launch uses a custom one. The
+        // fs port must follow it, or hooks read the wrong tree (e.g. can't find
+        // this session's native task dir). SENTINEL_CLAUDE_DIR still wins over it.
+        let fs = RealFileSystem;
+        let prev_cfg = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        let prev_sen = std::env::var("SENTINEL_CLAUDE_DIR").ok();
+        // Bare set_var/remove_var — matches the codebase convention (the
+        // workspace forbids `unsafe`). Single-threaded test; restored below.
+        std::env::remove_var("SENTINEL_CLAUDE_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", r"C:\custom\config-dir");
+        let got = fs.claude_dir();
+
+        // Empty CLAUDE_CONFIG_DIR must be ignored (fall through to home/.claude).
+        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        let got_empty = fs.claude_dir();
+
+        // Restore before asserting.
+        match &prev_cfg {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match &prev_sen {
+            Some(v) => std::env::set_var("SENTINEL_CLAUDE_DIR", v),
+            None => std::env::remove_var("SENTINEL_CLAUDE_DIR"),
+        }
+
+        assert_eq!(
+            got,
+            PathBuf::from(r"C:\custom\config-dir"),
+            "claude_dir must use CLAUDE_CONFIG_DIR when set"
+        );
+        assert_ne!(
+            got_empty,
+            PathBuf::from(""),
+            "an empty CLAUDE_CONFIG_DIR must be ignored, not used as the root"
+        );
     }
 
     #[test]

@@ -209,61 +209,153 @@ pub fn tasks_root(home: &std::path::Path) -> std::path::PathBuf {
 
 /// Canonical mapping from a hook's `session_id` to its on-disk task directory.
 ///
-/// Claude Code does **not** name the task dir uniformly: depending on how the
-/// session was started, the same `session_id` value passed to hooks (the full
-/// UUID, e.g. `e2ea5630-3c79-409c-9ca4-423975a5a5fb`) is stored under EITHER
-///   - `<tasks>/<session_id>/`                  (literal id), OR
-///   - `<tasks>/session-<first-uuid-group>/`    (e.g. `session-e2ea5630/`).
+/// Verified against the deobfuscated Claude Code 2.1.201 bundle (the exported
+/// `sessionTeamName` builder `PYc`): CC names the per-session task dir
+/// `session-<first-8-hex-of-session-UUID>` under `CLAUDE_CONFIG_DIR ?? ~/.claude`
+/// `/tasks/`. A `CLAUDE_CODE_TASK_LIST_ID` env value, if set, overrides the name
+/// outright (sanitised). CC migrated FROM the old `<tasks>/<full-uuid>/` form,
+/// so the literal-id form still appears for older sessions.
 ///
-/// Both forms are emitted concurrently (observed live on the same day), so this
-/// is not a migration that settled on one name — a hook must resolve whichever
-/// the harness actually wrote for this session.
+/// Resolution order (all session-scoped, cheapest first):
+///   1. `CLAUDE_CODE_TASK_LIST_ID` (sanitised) — the explicit override;
+///   2. `session-<first-8-hex>` — the current CC form;
+///   3. `<session_id>` literal — the pre-migration form;
+///   4. newest-mtime `session-*` dir under the tasks root that holds `*.json`
+///      — the fallback for the rare case where a mid-session `/clear` re-minted
+///      the underlying UUID (so the id a hook holds no longer matches the dir).
 ///
-/// Every task hook previously hard-coded `tasks_root().join(session_id)`, which
-/// silently missed the `session-…` form and made gates fail closed / coverage
-/// checks read nothing. This is the single source of truth: it returns the
-/// directory that EXISTS for this session, checked in a fixed, session-scoped
-/// order (no cross-session scan, no mtime guessing). If neither exists yet it
-/// returns the literal-id path so callers' own `is_dir` check still yields a
-/// definitive "no tasks here" for a genuinely fresh session.
+/// The root comes from `fs.claude_dir()` (which honours `CLAUDE_CONFIG_DIR`),
+/// **not** the passed `home` — sandboxed launches use a custom config dir, and
+/// reading `~/.claude/tasks` there finds nothing. `home` is retained for
+/// signature stability. If nothing resolves, returns the `session-<first-8-hex>`
+/// candidate so a caller's own `is_dir` check reports a definitive absence for a
+/// genuinely fresh session.
 ///
-/// Idempotent on an already-prefixed id (one that already starts `session-`):
-/// the prefixed candidate collapses to the same value, so passing either form
-/// resolves correctly.
+/// Idempotent on an already-prefixed id (one starting `session-`): the prefixed
+/// candidate collapses to the same value.
 pub fn session_task_dir(
     fs: &dyn FileSystemPort,
     home: &std::path::Path,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let root = tasks_root(home);
+    let _ = home; // root now derives from claude_dir() (honours CLAUDE_CONFIG_DIR)
+    let root = fs.claude_dir().join("tasks");
+
+    // 1. Explicit override wins.
+    if let Ok(id) = std::env::var("CLAUDE_CODE_TASK_LIST_ID") {
+        let sanitised = sanitize_task_dir_name(&id);
+        if !sanitised.is_empty() {
+            let dir = root.join(&sanitised);
+            if fs.is_dir(&dir) {
+                return dir;
+            }
+        }
+    }
+
+    // 2. Current CC form: session-<first-8-hex>.
+    let prefixed_name = session_prefixed_dir_name(session_id);
+    if let Some(name) = &prefixed_name {
+        let dir = root.join(name);
+        if fs.is_dir(&dir) {
+            return dir;
+        }
+    }
+
+    // 3. Pre-migration literal-id form.
     let literal = root.join(session_id);
     if fs.is_dir(&literal) {
         return literal;
     }
-    if let Some(prefixed_name) = session_prefixed_dir_name(session_id) {
-        let prefixed = root.join(&prefixed_name);
-        if fs.is_dir(&prefixed) {
-            return prefixed;
-        }
+
+    // 4. Fallback: a mid-session `/clear` re-mints the UUID, so the id a hook
+    //    holds may no longer name the dir. Pick the most-recently-modified
+    //    `session-*` dir that actually holds task files.
+    if let Some(active) = newest_active_session_dir(fs, &root) {
+        return active;
     }
-    // Neither form exists yet — return the literal path so the caller's own
-    // existence check reports a definitive absence (fresh session, no tasks).
-    literal
+
+    // Nothing resolved — return the current-form candidate for a definitive
+    // is_dir "absent" on a genuinely fresh session.
+    match prefixed_name {
+        Some(name) => root.join(name),
+        None => literal,
+    }
 }
 
-/// The `session-<first-uuid-group>` directory name for a `session_id`, or
-/// `None` when the id is unusable (empty) or already in prefixed form (so the
-/// resolver doesn't double-prefix). The "first group" is the substring before
-/// the first `-`, matching how Claude Code shortens the UUID.
+/// Sanitise a task-dir name exactly as Claude Code does (`r_t`):
+/// replace every char outside `[A-Za-z0-9_-]` with `-`.
+fn sanitize_task_dir_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Most-recently-modified `session-*` subdir of `root` that contains at least
+/// one `*.json` task file, or `None`. Used only as the last-resort fallback when
+/// the session-id-derived name doesn't resolve (post-`/clear` id drift).
+fn newest_active_session_dir(
+    fs: &dyn FileSystemPort,
+    root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let entries = fs.read_dir(root).ok()?;
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for dir in entries {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !name.starts_with("session-") || !fs.is_dir(&dir) {
+            continue;
+        }
+        // Must hold at least one .json task file to count as active.
+        let has_json = fs.read_dir(&dir).is_ok_and(|files| {
+            files.iter().any(|f| {
+                let fname = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                !fname.starts_with('.')
+                    && std::path::Path::new(&fname)
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            })
+        });
+        if !has_json {
+            continue;
+        }
+        let mtime = fs
+            .metadata(&dir)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(bt, _)| mtime > *bt) {
+            best = Some((mtime, dir));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// The `session-<first-8-hex>` directory name for a `session_id`, or `None`
+/// when the id is unusable (empty) or already in prefixed form (so the resolver
+/// doesn't double-prefix). Matches Claude Code's exported `sessionTeamName`
+/// builder verbatim: `"session-" + sessionId.slice(0, 8)` (the first 8
+/// characters of the session UUID — for a standard UUID this is exactly the
+/// first hyphen-group).
 fn session_prefixed_dir_name(session_id: &str) -> Option<String> {
     if session_id.is_empty() || session_id.starts_with("session-") {
         return None;
     }
-    let first_group = session_id.split('-').next().unwrap_or(session_id);
-    if first_group.is_empty() {
+    let short: String = session_id.chars().take(8).collect();
+    if short.is_empty() {
         return None;
     }
-    Some(format!("session-{first_group}"))
+    Some(format!("session-{short}"))
 }
 
 /// Return `<home>/.claude/sentinel/persistent-tasks`.
@@ -1049,7 +1141,7 @@ mod session_task_dir_tests {
     }
 
     #[test]
-    fn prefers_literal_over_prefixed_when_both_exist() {
+    fn prefers_session_prefixed_over_literal_when_both_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
         seed_dir(tmp.path(), id);
@@ -1057,25 +1149,85 @@ mod session_task_dir_tests {
         let fs = TmpHomeFs {
             home: tmp.path().to_path_buf(),
         };
+        // Decode-confirmed: `session-<first8>` is CC's CURRENT form (it migrated
+        // away from the full-uuid dir), so it wins when both are present.
         assert_eq!(
             session_task_dir(&fs, tmp.path(), id),
-            tasks_root(tmp.path()).join(id),
-            "literal id is the primary form and wins when both are present"
+            tasks_root(tmp.path()).join("session-e2ea5630"),
+            "the current session-<first8> form wins over the legacy full-uuid dir"
         );
     }
 
     #[test]
-    fn returns_literal_path_when_neither_exists() {
+    fn returns_session_prefixed_candidate_when_nothing_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let id = "ffffffff-0000-0000-0000-000000000000";
         let fs = TmpHomeFs {
             home: tmp.path().to_path_buf(),
         };
-        // No dir seeded — returns the literal path so the caller's is_dir check
+        // No dir seeded → the current-form candidate, so a caller's is_dir check
         // reports a definitive absence (fresh session).
         assert_eq!(
             session_task_dir(&fs, tmp.path(), id),
-            tasks_root(tmp.path()).join(id)
+            tasks_root(tmp.path()).join("session-ffffffff")
+        );
+    }
+
+    #[test]
+    fn task_list_id_override_wins_when_set_and_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "e2ea5630-3c79-409c-9ca4-423975a5a5fb";
+        seed_dir(tmp.path(), "session-e2ea5630"); // the id-derived form also exists
+        seed_dir(tmp.path(), "custom-team-list"); // the override target
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        // This test owns a unique override value; matches the codebase's
+        // bare-set_var test convention (no `unsafe` — the workspace forbids it).
+        std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", "custom-team-list");
+        let got = session_task_dir(&fs, tmp.path(), id);
+        std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID");
+        assert_eq!(
+            got,
+            tasks_root(tmp.path()).join("custom-team-list"),
+            "CLAUDE_CODE_TASK_LIST_ID overrides the id-derived dir name"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_newest_active_session_dir_on_id_drift() {
+        // The post-`/clear` case: the id a hook holds no longer names any dir,
+        // so resolution falls back to the most-recently-modified session-* dir
+        // that actually holds task files.
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000"; // session-aaaaaaaa absent
+        let root = tasks_root(tmp.path());
+
+        // Older active dir.
+        let old = root.join("session-old11111");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("1.json"), "{}").unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // Newer active dir (should win).
+        let new = root.join("session-new22222");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("1.json"), "{}").unwrap();
+
+        // A session-* dir with NO json must be ignored even if newest.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let empty = root.join("session-empty333");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join(".lock"), "").unwrap();
+
+        let fs = TmpHomeFs {
+            home: tmp.path().to_path_buf(),
+        };
+        assert_eq!(
+            session_task_dir(&fs, tmp.path(), id),
+            new,
+            "fallback picks the newest session-* dir holding task files, skipping empty ones"
         );
     }
 }
