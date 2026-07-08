@@ -262,9 +262,7 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
     })
 }
 
-use sentinel_domain::task_decoration::{
-    priority_from_decoration, status_from_glyph, DECOR_EMOJI,
-};
+use sentinel_domain::task_decoration::{priority_from_decoration, status_from_glyph, DECOR_EMOJI};
 
 /// Strip leading status/priority decoration a caller baked into a subject
 /// string. Mirrors `session_init::strip_status_priority_prefix` (kept in the
@@ -273,7 +271,9 @@ fn strip_subject_decoration(subject: &str) -> &str {
     let mut s = subject.trim_start();
     loop {
         let before = s;
-        s = s.trim_start_matches(|c| DECOR_EMOJI.contains(&c)).trim_start();
+        s = s
+            .trim_start_matches(|c| DECOR_EMOJI.contains(&c))
+            .trim_start();
         if let Some(rest) = s.strip_prefix('[') {
             if let Some(close) = rest.find(']') {
                 let inner = &rest[..close];
@@ -2012,7 +2012,10 @@ mod tests {
             strip_subject_decoration("🔄 🔴 1 [P0] — Fix memory-capture gate"),
             "Fix memory-capture gate"
         );
-        assert_eq!(strip_subject_decoration("✅ Ship the thing"), "Ship the thing");
+        assert_eq!(
+            strip_subject_decoration("✅ Ship the thing"),
+            "Ship the thing"
+        );
         assert_eq!(strip_subject_decoration("[P1] Do the work"), "Do the work");
         assert_eq!(strip_subject_decoration("2 - build it"), "build it");
         // Clean subject is untouched.
@@ -2021,7 +2024,10 @@ mod tests {
             "Restore mcpServers registrations"
         );
         // A glyph mid-subject is preserved (only leading decoration is stripped).
-        assert_eq!(strip_subject_decoration("Add 🔴 marker to UI"), "Add 🔴 marker to UI");
+        assert_eq!(
+            strip_subject_decoration("Add 🔴 marker to UI"),
+            "Add 🔴 marker to UI"
+        );
         // Idempotent.
         let once = strip_subject_decoration("🔴 [P0] — X");
         assert_eq!(strip_subject_decoration(once), once);
@@ -2037,7 +2043,10 @@ mod tests {
             "pending",
         ));
         assert_eq!(t.subject, "Fix memory-capture dual-judge gate");
-        assert_eq!(t.status, "pending", "explicit status field is authoritative");
+        assert_eq!(
+            t.status, "pending",
+            "explicit status field is authoritative"
+        );
         assert_eq!(
             t.metadata
                 .as_ref()
@@ -2074,7 +2083,11 @@ mod tests {
 
     #[test]
     fn normalize_task_clean_subject_is_noop() {
-        let t = normalize_task(bare_task("4", "Restore mcpServers registrations", "pending"));
+        let t = normalize_task(bare_task(
+            "4",
+            "Restore mcpServers registrations",
+            "pending",
+        ));
         assert_eq!(t.subject, "Restore mcpServers registrations");
         assert_eq!(t.status, "pending");
         assert!(t.metadata.is_none(), "no decoration → no priority backfill");
@@ -2095,7 +2108,10 @@ mod tests {
             .join(".claude/sentinel/persistent-tasks")
             .join(proj_hash)
             .join("tasks.json");
-        assert!(!p.exists(), "no snapshot must be created for a task-less project");
+        assert!(
+            !p.exists(),
+            "no snapshot must be created for a task-less project"
+        );
     }
 
     #[test]
@@ -2190,7 +2206,10 @@ mod tests {
             c: &[u8],
         ) -> Result<(), sentinel_domain::port_errors::FileSystemError> {
             use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?;
             f.write_all(c)?;
             Ok(())
         }
@@ -2248,7 +2267,13 @@ mod tests {
 
     /// Seed a non-empty snapshot for (project_hash, session_id) with a given
     /// task list, writing meta.json so ownership checks pass.
-    fn seed_snapshot(home: &Path, project_hash: &str, session_id: &str, cwd: &str, tasks_json: &str) {
+    fn seed_snapshot(
+        home: &Path,
+        project_hash: &str,
+        session_id: &str,
+        cwd: &str,
+        tasks_json: &str,
+    ) {
         let dir = home
             .join(".claude/sentinel/persistent-tasks")
             .join(project_hash);
@@ -2263,7 +2288,11 @@ mod tests {
             "incomplete_count": 1,
             "last_block_hash": ""
         });
-        std::fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
     }
 
     fn snapshot_tasks(home: &Path, project_hash: &str) -> String {
@@ -2277,7 +2306,9 @@ mod tests {
     #[test]
     fn ledger_records_and_reads_back_deduped() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = HomeFs { home: tmp.path().to_path_buf() };
+        let fs = HomeFs {
+            home: tmp.path().to_path_buf(),
+        };
         record_session_project(&fs, "sess-1", "projaaaa");
         record_session_project(&fs, "sess-1", "projbbbb");
         record_session_project(&fs, "sess-1", "projaaaa"); // dup — ignored
@@ -2289,7 +2320,9 @@ mod tests {
     fn clear_bled_truncates_other_projects_of_same_session_not_current() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        let fs = HomeFs { home: home.to_path_buf() };
+        let fs = HomeFs {
+            home: home.to_path_buf(),
+        };
         let git = NoGit;
         let sid = "sess-bleed";
         let ghost = r#"[{"id":"1","subject":"global task","status":"in_progress"}]"#;
@@ -2305,8 +2338,16 @@ mod tests {
         // Now persisting for projC clears A and B (the bled copies), keeps C.
         clear_bled_snapshots(&fs, &git, "/repo/c", "projcccc", sid);
 
-        assert_eq!(snapshot_tasks(home, "projaaaa").trim(), "[]", "projA bled copy cleared");
-        assert_eq!(snapshot_tasks(home, "projbbbb").trim(), "[]", "projB bled copy cleared");
+        assert_eq!(
+            snapshot_tasks(home, "projaaaa").trim(),
+            "[]",
+            "projA bled copy cleared"
+        );
+        assert_eq!(
+            snapshot_tasks(home, "projbbbb").trim(),
+            "[]",
+            "projB bled copy cleared"
+        );
         assert!(
             snapshot_tasks(home, "projcccc").contains("global task"),
             "current projC snapshot preserved"
@@ -2317,7 +2358,9 @@ mod tests {
     fn clear_bled_never_touches_another_sessions_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        let fs = HomeFs { home: home.to_path_buf() };
+        let fs = HomeFs {
+            home: home.to_path_buf(),
+        };
         let git = NoGit;
         let mine = "sess-mine";
         let theirs = "sess-theirs";

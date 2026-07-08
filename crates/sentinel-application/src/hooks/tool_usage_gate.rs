@@ -253,6 +253,11 @@ pub struct ToolUsageEvaluation {
     pub transcript_authority_read: bool,
     pub transcript_authority_error: Option<String>,
     pub sequential_thinking_used: bool,
+    /// Whether the `sequential-thinking` MCP server is registered this session
+    /// (`~/.claude.json`), i.e. whether the seq-thinking demand is enforceable.
+    /// When false the gate fails open on a missing seq-thinking signal (the
+    /// deadlock guard below) and the LangGraph replica must model the same.
+    pub sequential_thinking_requirable: bool,
     pub plan_state: PlanState,
     pub task_authority_read: bool,
     pub task_authority_error: Option<String>,
@@ -362,6 +367,7 @@ pub fn evaluate(
         transcript_authority_read: false,
         transcript_authority_error: None,
         sequential_thinking_used: false,
+        sequential_thinking_requirable: false,
         plan_state: PlanState::Missing,
         task_authority_read: false,
         task_authority_error: None,
@@ -451,34 +457,29 @@ pub fn evaluate(
     evaluation.in_progress_task_present = tasks.iter().any(|task| task.status == "in_progress");
     evaluation.pending_task_hint = pending_task_hint(&tasks);
 
-    // DEADLOCK GUARD: only demand sequential thinking when the
-    // `sequential-thinking` MCP server is actually registered in
-    // `~/.claude.json` (so `mcp__sequential-thinking__sequentialthinking` can be
-    // called and the transcript signal can be earned). When it is NOT
-    // registered, the tool does not exist this session — denying on its absence
-    // bricks every code edit with no fix path (the exact self-bricking class the
-    // task_decomposition_gate had). When the server is absent we record the skip
-    // and allow rather than demand a tool that cannot be called.
+    // DEADLOCK GUARD: only demand sequential thinking when the check is
+    // enabled by operator config AND the `sequential-thinking` MCP server is
+    // actually registered in `~/.claude.json` (so
+    // `mcp__sequential-thinking__sequentialthinking` can be called and the
+    // transcript signal can be earned). When it is NOT registered, the tool
+    // does not exist this session — denying on its absence bricks every code
+    // edit with no fix path (the exact self-bricking class the
+    // task_decomposition_gate had). Both fail-open legs live in
+    // `sequential_thinking_requirable` so the LangGraph replica can model the
+    // same policy instead of mismatching on either leg.
+    evaluation.sequential_thinking_requirable =
+        load_config(fs).sequential_thinking_check && sequential_thinking_mcp_registered(fs);
     if !transcript.sequential_thinking_used {
-        if !load_config(fs).sequential_thinking_check {
-            // Operator opted out of Check 1 via
-            // ~/.claude/sentinel/config/tool-usage-gate.toml
-            // (sequential_thinking_check = false). Checks below still enforce.
-            eprintln!(
-                "[sentinel] tool_usage_gate: sequential-thinking check disabled by \
-                 operator config — skipping Check 1 (task/plan/active-task checks still enforced)."
-            );
-        } else if sequential_thinking_mcp_registered(fs) {
+        if evaluation.sequential_thinking_requirable {
             evaluation.should_deny = true;
             evaluation.decision = ToolUsageDecision::DenyMissingSequentialThinking;
             return evaluation;
-        } else {
-            eprintln!(
-                "[sentinel] tool_usage_gate: sequential-thinking MCP not registered in \
-                 ~/.claude.json — skipping the seq-thinking requirement (cannot demand a \
-                 tool that does not exist this session)."
-            );
         }
+        eprintln!(
+            "[sentinel] tool_usage_gate: seq-thinking requirement skipped — disabled by \
+             operator config or MCP server not registered in ~/.claude.json (cannot \
+             demand a signal that cannot be produced this session)."
+        );
     }
 
     if tasks.is_empty() {

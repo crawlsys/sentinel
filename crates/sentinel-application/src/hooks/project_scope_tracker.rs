@@ -68,20 +68,27 @@ fn session_project_file(home: &Path, session_key: &str) -> PathBuf {
         .join(format!("session-{session_key}.project"))
 }
 
+/// Last path component of a path string, agnostic to separator style. The
+/// values parsed here (git repo roots, `CLAUDE_CONFIG_DIR`) are produced on
+/// whatever OS the session runs on — the fleet includes Windows runners — and
+/// `Path::file_name` cannot split `C:\...` paths on Unix, so split on both
+/// separators explicitly. The result never contains a separator, and `.`/`..`
+/// are rejected so the derived name can't be a traversal component.
+fn last_path_component(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_end_matches(['/', '\\']);
+    let name = trimmed.rsplit(['/', '\\']).next()?.trim();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// Derive the session key from `CLAUDE_CONFIG_DIR`'s basename — the same value
 /// vulcan-hookdeck falls back to. Sanitized to a single path component so it
 /// can't escape the hookdeck dir.
 fn session_key(ctx: &super::HookContext<'_>) -> Option<String> {
     let dir = ctx.env.var("CLAUDE_CONFIG_DIR")?;
-    let base = Path::new(dir.trim())
-        .file_name()?
-        .to_string_lossy()
-        .to_string();
-    let base = base.trim();
-    if base.is_empty() || base.contains(['/', '\\']) {
-        return None;
-    }
-    Some(base.to_string())
+    last_path_component(&dir)
 }
 
 /// `PostToolUse` entry point. Fast + best-effort: resolve the repo the tool
@@ -141,16 +148,7 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
 /// path of the dir containing `.git`; the last component is the repo name the
 /// GitHub webhook payload's `repository.full_name` also ends with.
 fn repo_name_from_root(root: &str) -> Option<String> {
-    let name = Path::new(root.trim())
-        .file_name()?
-        .to_string_lossy()
-        .to_string();
-    let name = name.trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
+    last_path_component(root)
 }
 
 #[cfg(test)]

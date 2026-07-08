@@ -184,9 +184,10 @@ mod tests {
             session_id: Some("idle-sess-1".to_string()),
             ..Default::default()
         };
-        input
-            .extra
-            .insert("teammate_name".to_string(), serde_json::json!("backend-dev"));
+        input.extra.insert(
+            "teammate_name".to_string(),
+            serde_json::json!("backend-dev"),
+        );
         input
             .extra
             .insert("team_name".to_string(), serde_json::json!("my-team"));
@@ -197,8 +198,7 @@ mod tests {
         process(&input, &ctx);
         let output = process(&input, &ctx);
 
-        let pending =
-            crate::channel_events::pending_events_for_session(&fs, Some("idle-sess-1"));
+        let pending = crate::channel_events::pending_events_for_session(&fs, Some("idle-sess-1"));
         assert_eq!(pending.len(), 1, "idle emits must be debounced");
 
         // The quality-gate context injection itself is NOT debounced.
@@ -224,8 +224,11 @@ mod tests {
             process(&input, &ctx);
         }
 
-        let pending =
-            crate::channel_events::pending_events_for_session(&fs, Some("idle-sess-2"));
-        assert_eq!(pending.len(), 2, "each teammate gets its own debounce window");
+        let pending = crate::channel_events::pending_events_for_session(&fs, Some("idle-sess-2"));
+        assert_eq!(
+            pending.len(),
+            2,
+            "each teammate gets its own debounce window"
+        );
     }
 }

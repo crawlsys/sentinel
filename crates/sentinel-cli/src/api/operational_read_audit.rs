@@ -8,11 +8,49 @@ pub(super) async fn attach_operational_api_read_graph_audit(
     surface: OperationalApiReadSurface,
     response: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    let graph =
-        sentinel_infrastructure::operational_api_read_graph::build_operational_api_read_graph()
-            .await
-            .map_err(|e| format!("build operational API read graph: {e}"))?;
+    let graph = build_audit_graph()
+        .await
+        .map_err(|e| format!("build operational API read graph: {e}"))?;
     attach_operational_api_read_graph_audit_with_graph(&graph, surface, response).await
+}
+
+/// The durable audit-trail sink for API read decisions.
+///
+/// Test builds write to a per-process temp file instead: `sentinel_root()`
+/// follows `SENTINEL_HOME`, and other tests in this binary point that at
+/// short-lived tempdirs — racing their `Drop` turns this append into a
+/// spurious audit failure (surfacing as a 500 from an otherwise-correct
+/// handler). It also keeps unit tests from appending rows to the operator's
+/// live metrics JSONL.
+#[cfg(not(test))]
+fn graph_runs_path() -> std::path::PathBuf {
+    sentinel_infrastructure::paths::sentinel_root()
+        .join("metrics")
+        .join("operational-api-read.graph-runs.jsonl")
+}
+
+#[cfg(test)]
+fn graph_runs_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "sentinel-test-{}-operational-api-read.graph-runs.jsonl",
+        std::process::id()
+    ))
+}
+
+/// Test seam: unit tests audit through an ephemeral in-memory checkpointer so
+/// they never contend on the operator's live decision-graph sqlite (a running
+/// daemon/session shares it; parallel openers flake with lock errors, turning
+/// e.g. a 503-mapping assertion into a spurious 500).
+#[cfg(not(test))]
+async fn build_audit_graph() -> std::result::Result<OperationalApiReadGraph, String> {
+    sentinel_infrastructure::operational_api_read_graph::build_operational_api_read_graph().await
+}
+
+#[cfg(test)]
+async fn build_audit_graph() -> std::result::Result<OperationalApiReadGraph, String> {
+    sentinel_infrastructure::operational_api_read_graph::build_operational_api_read_graph_ephemeral(
+    )
+    .await
 }
 
 async fn attach_operational_api_read_graph_audit_with_graph(
@@ -57,9 +95,7 @@ async fn run_operational_api_read_graph_audit(
         .operational_api_read_authorization()
         .map_err(|e| format!("operational API read graph authorization failed: {e}"))?
         .ok_or_else(|| "operational API read graph produced no terminal checkpoint".to_string())?;
-    let graph_runs = sentinel_infrastructure::paths::sentinel_root()
-        .join("metrics")
-        .join("operational-api-read.graph-runs.jsonl");
+    let graph_runs = graph_runs_path();
     if let Some(parent) = graph_runs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             format!(

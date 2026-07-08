@@ -290,11 +290,23 @@ mod tests {
         std::env::set_var(key, "http://127.0.0.1:1");
 
         let resp = health_proxy().await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let status = resp.status();
 
+        // Restore BEFORE any assertion so a failure doesn't leak the
+        // override into later tests in this process.
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
+        }
+
+        if status != StatusCode::SERVICE_UNAVAILABLE {
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap_or_default();
+            panic!(
+                "expected 503 from unreachable daemon, got {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
     }
 }

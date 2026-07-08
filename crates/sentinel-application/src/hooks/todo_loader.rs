@@ -325,7 +325,11 @@ mod tests {
             None,
         )];
         let filtered = filter_project_todos(&todos, "C:/Users/garys/Documents/GitHub/sentinel");
-        assert_eq!(filtered.len(), 1, "separator spelling must not break equality");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "separator spelling must not break equality"
+        );
     }
 
     #[test]
@@ -351,7 +355,11 @@ mod tests {
                 r#"{{"content":"Elsewhere","status":"pending","priority":0,"project":"/repo/beta","session_id":"todo-sess-4","updated_at":"{now}"}}"#
             ),
         ];
-        let todos_path = tmp.path().join(".claude").join("todos").join("active.jsonl");
+        let todos_path = tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl");
         std::fs::create_dir_all(todos_path.parent().unwrap()).unwrap();
         std::fs::write(&todos_path, rows.join("\n")).unwrap();
 
@@ -390,7 +398,11 @@ mod tests {
         let rows = [
             r#"{"content":"Ancient","status":"pending","priority":0,"project":"/repo/alpha","session_id":"dead-sess","updated_at":"2026-01-01T00:00:00Z"}"#,
         ];
-        let todos_path = tmp.path().join(".claude").join("todos").join("active.jsonl");
+        let todos_path = tmp
+            .path()
+            .join(".claude")
+            .join("todos")
+            .join("active.jsonl");
         std::fs::create_dir_all(todos_path.parent().unwrap()).unwrap();
         std::fs::write(&todos_path, rows.join("\n")).unwrap();
 

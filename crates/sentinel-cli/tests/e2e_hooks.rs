@@ -175,6 +175,15 @@ description = "Claim"
             .env("SENTINEL_ALLOW_TERMINAL", "1")
             .env("CLAUDE_CODE_ENTRY_POINT", "cli")
             .env("CLAUDE_SESSION_ID", &self.session_id)
+            // Scrub the higher-precedence session-id channels: the dispatcher
+            // resolves VULCAN_SESSION_ID / CLAUDE_CODE_SESSION_ID / SESSION_ID
+            // before CLAUDE_SESSION_ID, and a test run started from inside a
+            // Claude Code session leaks CLAUDE_CODE_SESSION_ID into child
+            // processes — hooks would silently operate on the OPERATOR's live
+            // session instead of this test's.
+            .env_remove("VULCAN_SESSION_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("SESSION_ID")
             // Satisfy enterprise router/scorer construction without using real
             // credentials. These tests do not exercise live A3/A13 model calls.
             .env("OPENROUTER_API_KEY", "test-openrouter-key")
@@ -381,8 +390,11 @@ fn unknown_event_is_rejected() {
 
 #[test]
 fn missing_session_id_is_safe_noop() {
-    // No sessionId in JSON and no CLAUDE_SESSION_ID → safe {} (no-op), per the
-    // 2026-05-06 fix (no synthetic 'unknown' session).
+    // No sessionId in JSON and none of the env fallbacks (VULCAN_SESSION_ID /
+    // CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID / SESSION_ID) → safe {}
+    // (no-op), per the 2026-05-06 fix (no synthetic 'unknown' session). The
+    // whole chain must be scrubbed: running tests from inside a Claude Code
+    // session leaks CLAUDE_CODE_SESSION_ID into child processes.
     let t = HookTest::new();
     // Build a payload with NO sessionId, and clear the env fallback.
     let payload = "{}";
@@ -396,7 +408,10 @@ fn missing_session_id_is_safe_noop() {
         .env("SENTINEL_CLAUDE_DIR", t.claude_dir())
         .env("SENTINEL_ALLOW_TERMINAL", "1")
         .env("CLAUDE_CODE_ENTRY_POINT", "cli")
+        .env_remove("VULCAN_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("SESSION_ID")
         .spawn()
         .expect("spawn");
     child

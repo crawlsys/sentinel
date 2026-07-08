@@ -47,8 +47,8 @@ fn resolve_agent_identity(input: &HookInput) -> (&str, Option<&str>) {
                 .filter(|s| !s.is_empty())
         })
     }
-    let agent_type =
-        typed_or_extra(input.agent_type.as_deref(), &input.extra, "agent_type").unwrap_or("unknown");
+    let agent_type = typed_or_extra(input.agent_type.as_deref(), &input.extra, "agent_type")
+        .unwrap_or("unknown");
     let agent_id = typed_or_extra(input.agent_id.as_deref(), &input.extra, "agent_id");
     (agent_type, agent_id)
 }
@@ -144,9 +144,10 @@ mod tests {
         // Typed field is authoritative; a stale `extra` copy does not override.
         let mut input = HookInput::default();
         input.agent_type = Some("code-reviewer".to_string());
-        input
-            .extra
-            .insert("agent_type".to_string(), serde_json::json!("stale-debugger"));
+        input.extra.insert(
+            "agent_type".to_string(),
+            serde_json::json!("stale-debugger"),
+        );
         let (ty, _) = resolve_agent_identity(&input);
         assert_eq!(ty, "code-reviewer");
     }
@@ -190,7 +191,10 @@ mod tests {
         process(&input, &ctx);
 
         let pending = crate::channel_events::pending_events_for_session(&fs, Some("sub-sess-1"));
-        assert!(pending.is_empty(), "unknown-identity completions must not push channel spam");
+        assert!(
+            pending.is_empty(),
+            "unknown-identity completions must not push channel spam"
+        );
     }
 
     #[test]
@@ -212,7 +216,10 @@ mod tests {
         let pending = crate::channel_events::pending_events_for_session(&fs, Some("sub-sess-2"));
         assert_eq!(pending.len(), 1);
         let event = crate::channel_events::read_event(&fs, &pending[0]).expect("channel event");
-        assert_eq!(event.summary, "✅ Agent \"Explore\" (agent-42) has finished.");
+        assert_eq!(
+            event.summary,
+            "✅ Agent \"Explore\" (agent-42) has finished."
+        );
         assert_eq!(event.source_agent.as_deref(), Some("Explore"));
     }
 

@@ -60,6 +60,7 @@ pub struct ToolUsageState {
     pub transcript_authority_error_present: bool,
     pub transcript_authority_error_sha256: Option<String>,
     pub sequential_thinking_used: bool,
+    pub sequential_thinking_requirable: bool,
     pub plan_state: PlanState,
     pub task_authority_read: bool,
     pub task_authority_error_present: bool,
@@ -97,6 +98,7 @@ impl ToolUsageState {
             transcript_authority_error_present: evaluation.transcript_authority_error.is_some(),
             transcript_authority_error_sha256,
             sequential_thinking_used: evaluation.sequential_thinking_used,
+            sequential_thinking_requirable: evaluation.sequential_thinking_requirable,
             plan_state: evaluation.plan_state,
             task_authority_read: evaluation.task_authority_read,
             task_authority_error_present: evaluation.task_authority_error.is_some(),
@@ -258,7 +260,7 @@ fn expected_decision(state: &ToolUsageState) -> ToolUsageDecision {
     if state.task_authority_error_present {
         return ToolUsageDecision::DenyTaskListAuthority;
     }
-    if !state.sequential_thinking_used {
+    if state.sequential_thinking_requirable && !state.sequential_thinking_used {
         return ToolUsageDecision::DenyMissingSequentialThinking;
     }
     if state.task_count == 0 {
@@ -347,6 +349,7 @@ fn tool_usage_state_schema() -> StateSchema<ToolUsageState> {
                 "transcript_authority_error_present",
                 "transcript_authority_error_sha256",
                 "sequential_thinking_used",
+                "sequential_thinking_requirable",
                 "plan_state",
                 "task_authority_read",
                 "task_authority_error_present",
@@ -396,6 +399,7 @@ fn tool_usage_state_schema() -> StateSchema<ToolUsageState> {
                     ]
                 },
                 "sequential_thinking_used": { "type": "boolean" },
+                "sequential_thinking_requirable": { "type": "boolean" },
                 "plan_state": {
                     "type": "string",
                     "enum": ["Missing", "InPlanMode", "Approved"]
@@ -969,6 +973,7 @@ mod tests {
             transcript_authority_read: true,
             transcript_authority_error: None,
             sequential_thinking_used: true,
+            sequential_thinking_requirable: true,
             plan_state: PlanState::Approved,
             task_authority_read: true,
             task_authority_error: None,
@@ -1018,6 +1023,21 @@ mod tests {
             run.state.decision,
             ToolUsageDecision::DenyMissingTranscriptPath
         );
+    }
+
+    #[tokio::test]
+    async fn graph_authorizes_allow_when_sequential_thinking_not_requirable() {
+        // The gate's deadlock guard: when the sequential-thinking MCP server is
+        // not registered this session, a missing seq-thinking signal must NOT
+        // deny (the tool cannot be called, so the demand is unsatisfiable).
+        let graph = build_tool_usage_graph_with_ephemeral_sqlite()
+            .await
+            .unwrap();
+        let mut state = base_state(AppToolUsageDecision::Allow);
+        state.sequential_thinking_used = false;
+        state.sequential_thinking_requirable = false;
+        let run = run_tool_usage_decision_report(&graph, state).await.unwrap();
+        assert_eq!(run.state.decision, ToolUsageDecision::Allow);
     }
 
     #[tokio::test]

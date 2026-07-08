@@ -56,13 +56,15 @@ pub fn priority_from_decoration(subject: &str) -> Option<String> {
             return Some(tok.trim_matches(['[', ']']).to_string());
         }
     }
-    Some(match s.chars().find(|c| ['🔴', '🟠', '🟡', '🟢'].contains(c))? {
-        '🔴' => "P0".into(),
-        '🟠' => "P1".into(),
-        '🟡' => "P2".into(),
-        '🟢' => "P3".into(),
-        _ => return None,
-    })
+    Some(
+        match s.chars().find(|c| ['🔴', '🟠', '🟡', '🟢'].contains(c))? {
+            '🔴' => "P0".into(),
+            '🟠' => "P1".into(),
+            '🟡' => "P2".into(),
+            '🟢' => "P3".into(),
+            _ => return None,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -82,9 +84,18 @@ mod tests {
         // The stripper set MUST contain every glyph a renderer can emit, or
         // strip stops cleaning that glyph. This is the exact drift the shared
         // module prevents.
-        for status in ["in_progress", "pending", "completed", "blocked", "cancelled"] {
+        for status in [
+            "in_progress",
+            "pending",
+            "completed",
+            "blocked",
+            "cancelled",
+        ] {
             let g = status_glyph(status).unwrap().chars().next().unwrap();
-            assert!(DECOR_EMOJI.contains(&g), "render glyph {g} missing from DECOR_EMOJI");
+            assert!(
+                DECOR_EMOJI.contains(&g),
+                "render glyph {g} missing from DECOR_EMOJI"
+            );
         }
         for g in ['🔴', '🟠', '🟡', '🟢'] {
             assert!(DECOR_EMOJI.contains(&g), "priority glyph {g} missing");
@@ -99,7 +110,10 @@ mod tests {
 
     #[test]
     fn priority_token_beats_glyph() {
-        assert_eq!(priority_from_decoration("[P1] 🔴 do it").as_deref(), Some("P1"));
+        assert_eq!(
+            priority_from_decoration("[P1] 🔴 do it").as_deref(),
+            Some("P1")
+        );
         assert_eq!(priority_from_decoration("🔴 do it").as_deref(), Some("P0"));
         assert_eq!(priority_from_decoration("no decoration"), None);
     }

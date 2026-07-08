@@ -2002,7 +2002,9 @@ fn build_startup_context(
         SyncResult::Synced { files, pulled } => {
             let pull_tag = if *pulled { " (pulled)" } else { "" };
             if *files > 0 {
-                parts.push(format!("📦 [Marketplace Sync] {files} files synced{pull_tag}"));
+                parts.push(format!(
+                    "📦 [Marketplace Sync] {files} files synced{pull_tag}"
+                ));
             } else {
                 parts.push("📦 [Marketplace Sync] No changes".to_string());
             }
@@ -2049,7 +2051,10 @@ fn build_startup_context(
                 .iter()
                 .map(|(f, e)| format!("{}: {}", f.path(), e))
                 .collect();
-            parts.push(format!("📁 [Project Init] Errors: {}", err_names.join("; ")));
+            parts.push(format!(
+                "📁 [Project Init] Errors: {}",
+                err_names.join("; ")
+            ));
         }
     }
 

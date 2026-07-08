@@ -67,8 +67,11 @@ impl TaskDecompositionState {
             .as_deref()
             .filter(|_| evaluation.bash_command_present)
             .map(sha256);
-        let should_block =
-            expected_should_block(evaluation.mutating_tool, evaluation.task_list_confirmed);
+        let should_block = expected_should_block(
+            evaluation.mutating_tool,
+            evaluation.task_state_readable,
+            evaluation.task_list_confirmed,
+        );
         Self {
             identifier: identifier.into(),
             tool: evaluation.tool.clone(),
@@ -166,8 +169,17 @@ pub fn sha256(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn expected_should_block(mutating_tool: bool, task_list_confirmed: bool) -> bool {
-    mutating_tool && !task_list_confirmed
+// Mirrors the hook policy in `task_decomposition_gate::evaluate`: block ONLY on
+// readable-but-empty task state. Unreadable/unconfirmable state (`None` from
+// `has_live_task_list`) FAILS OPEN there, so the graph must fail open too or
+// every mutating tool call in an environment without a resolvable task store
+// (e.g. sandboxed bench containers) dies on an authority mismatch.
+fn expected_should_block(
+    mutating_tool: bool,
+    task_state_readable: bool,
+    task_list_confirmed: bool,
+) -> bool {
+    mutating_tool && task_state_readable && !task_list_confirmed
 }
 
 fn expected_decision(state: &TaskDecompositionState) -> TaskDecompositionDecision {
@@ -356,8 +368,11 @@ fn task_decomposition_state_schema() -> StateSchema<TaskDecompositionState> {
                 )));
             }
 
-            let expected_should_block =
-                expected_should_block(state.mutating_tool, state.task_list_confirmed);
+            let expected_should_block = expected_should_block(
+                state.mutating_tool,
+                state.task_state_readable,
+                state.task_list_confirmed,
+            );
             if state.should_block != expected_should_block {
                 return Err(StateError::ValidationFailed(format!(
                     "task_decomposition should_block must match decomposition policy: expected \
@@ -582,8 +597,8 @@ mod tests {
             task_state_readable: false,
             task_list_confirmed: false,
             unreadable_task_state: true,
-            should_block: true,
-            decision: AppDecision::Block,
+            should_block: false,
+            decision: AppDecision::Allow,
         }
     }
 
@@ -599,8 +614,8 @@ mod tests {
             task_state_readable: false,
             task_list_confirmed: false,
             unreadable_task_state: true,
-            should_block: true,
-            decision: AppDecision::Block,
+            should_block: false,
+            decision: AppDecision::Allow,
         }
     }
 
@@ -644,7 +659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graph_authorizes_missing_session_block_with_absent_session_hash() {
+    async fn graph_authorizes_missing_session_allow_with_absent_session_hash() {
         let graph = build_task_decomposition_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
@@ -656,12 +671,12 @@ mod tests {
         let run = run_task_decomposition_decision_report(&graph, state)
             .await
             .unwrap();
-        assert_eq!(run.state.decision, TaskDecompositionDecision::Block);
+        assert_eq!(run.state.decision, TaskDecompositionDecision::Allow);
         assert!(run.state.unreadable_task_state);
     }
 
     #[tokio::test]
-    async fn graph_authorizes_unreadable_task_state_block() {
+    async fn graph_authorizes_unreadable_task_state_allow() {
         let graph = build_task_decomposition_graph_with_ephemeral_sqlite()
             .await
             .unwrap();
@@ -675,7 +690,7 @@ mod tests {
         let run = run_task_decomposition_decision_report(&graph, state)
             .await
             .unwrap();
-        assert_eq!(run.state.decision, TaskDecompositionDecision::Block);
+        assert_eq!(run.state.decision, TaskDecompositionDecision::Allow);
         assert!(run.state.unreadable_task_state);
     }
 

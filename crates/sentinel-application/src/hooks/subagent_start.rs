@@ -90,7 +90,10 @@ mod tests {
             "agent_type": "debugger"
         });
         let input: HookInput = serde_json::from_value(payload).unwrap();
-        assert!(input.extra.get("agent_type").is_none(), "typed field is not in extra");
+        assert!(
+            input.extra.get("agent_type").is_none(),
+            "typed field is not in extra"
+        );
         let ctx = crate::hooks::test_support::stub_ctx();
         let body = process(&input, &ctx)
             .hook_specific_output

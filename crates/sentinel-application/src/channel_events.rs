@@ -84,9 +84,10 @@ pub const SESSION_ID_ENV_VARS: [&str; 4] = [
 
 /// Detect the current session ID from the env adapter.
 fn detect_session_id(env: &dyn EnvPort) -> Option<String> {
-    SESSION_ID_ENV_VARS
-        .iter()
-        .find_map(|key| env.var(key).and_then(|s| concrete_session_id(&s).map(str::to_string)))
+    SESSION_ID_ENV_VARS.iter().find_map(|key| {
+        env.var(key)
+            .and_then(|s| concrete_session_id(&s).map(str::to_string))
+    })
 }
 
 /// Derive a project name from a cwd path (uses the last path component).
@@ -157,11 +158,20 @@ pub fn emit(
     }
 
     let now = Utc::now();
-    let filename = format!(
-        "{}_{}.json",
-        now.timestamp_millis(),
-        event.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
-    );
+    let safe_event = event.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+    // Filename contract: `<timestamp_millis>_<event>.json` — consumers parse
+    // the first `_` token as the event's ms timestamp (staleness sweep), so
+    // uniqueness must come from the timestamp itself. Two same-type events for
+    // one session in the same millisecond (e.g. two teammates going idle
+    // together) would otherwise collide and the second write silently
+    // OVERWRITES the first — a lost event. Bump the ms until the name is free;
+    // a shift of a few ms is harmless to ordering and staleness.
+    let mut ts_ms = now.timestamp_millis();
+    let mut path = dir.join(format!("{ts_ms}_{safe_event}.json"));
+    while fs.exists(&path) {
+        ts_ms += 1;
+        path = dir.join(format!("{ts_ms}_{safe_event}.json"));
+    }
 
     let channel_event = ChannelEvent {
         summary: decorate_summary(event, summary),
@@ -173,7 +183,6 @@ pub fn emit(
         meta,
     };
 
-    let path = dir.join(&filename);
     match serde_json::to_string(&channel_event) {
         Ok(json) => {
             if let Err(e) = fs.write(&path, json.as_bytes()) {
@@ -741,7 +750,10 @@ mod tests {
             Some("tester"),
         );
 
-        assert_eq!(pending_events_for_session(&fs, Some("cc-session-1")).len(), 1);
+        assert_eq!(
+            pending_events_for_session(&fs, Some("cc-session-1")).len(),
+            1
+        );
     }
 
     #[test]
@@ -767,7 +779,10 @@ mod tests {
             Some("tester"),
         );
 
-        assert_eq!(pending_events_for_session(&fs, Some("vulcan-sess")).len(), 1);
+        assert_eq!(
+            pending_events_for_session(&fs, Some("vulcan-sess")).len(),
+            1
+        );
         assert!(pending_events_for_session(&fs, Some("cc-sess")).is_empty());
         assert!(pending_events_for_session(&fs, Some("generic-sess")).is_empty());
     }
@@ -798,10 +813,22 @@ mod tests {
 
     #[test]
     fn summary_with_existing_emoji_is_not_double_prefixed() {
-        assert_eq!(decorate_summary("agent_completed", "✅ already tagged"), "✅ already tagged");
-        assert_eq!(decorate_summary("teammate_idle", "plain text"), "💤 plain text");
-        assert_eq!(decorate_summary("hookdeck.linear", "[linear] Issue.update"), "🔔 [linear] Issue.update");
-        assert_eq!(decorate_summary("unmapped_kind", "plain text"), "plain text");
+        assert_eq!(
+            decorate_summary("agent_completed", "✅ already tagged"),
+            "✅ already tagged"
+        );
+        assert_eq!(
+            decorate_summary("teammate_idle", "plain text"),
+            "💤 plain text"
+        );
+        assert_eq!(
+            decorate_summary("hookdeck.linear", "[linear] Issue.update"),
+            "🔔 [linear] Issue.update"
+        );
+        assert_eq!(
+            decorate_summary("unmapped_kind", "plain text"),
+            "plain text"
+        );
     }
 
     #[test]
@@ -831,7 +858,10 @@ mod tests {
 
         assert!(!old.exists(), "stale event file must be removed");
         assert!(fresh.exists(), "fresh event file must be kept");
-        assert!(dir.exists(), "session dir must never be removed by file sweep");
+        assert!(
+            dir.exists(),
+            "session dir must never be removed by file sweep"
+        );
     }
 
     #[test]

@@ -154,9 +154,14 @@ async fn run_internal(event: &str, matcher: Option<&str>) -> Result<()> {
     // "unknown".
     let session_id_owned: String = match input.session_id.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => match ["VULCAN_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "SESSION_ID"]
-            .into_iter()
-            .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+        _ => match [
+            "VULCAN_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+            "SESSION_ID",
+        ]
+        .into_iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
         {
             Some(s) => s,
             None => {
@@ -2607,6 +2612,11 @@ fn authorize_tool_usage_with_graph(
             "sequential_thinking_used",
             graph_run.state.sequential_thinking_used,
             evaluation.sequential_thinking_used,
+        ),
+        (
+            "sequential_thinking_requirable",
+            graph_run.state.sequential_thinking_requirable,
+            evaluation.sequential_thinking_requirable,
         ),
         (
             "task_authority_read",

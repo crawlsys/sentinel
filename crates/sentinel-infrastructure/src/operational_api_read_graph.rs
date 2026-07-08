@@ -647,13 +647,23 @@ pub async fn build_operational_api_read_graph() -> Result<OperationalApiReadGrap
     build_operational_api_read_graph_with_checkpointer(checkpointer).await
 }
 
-#[cfg(test)]
-async fn build_operational_api_read_graph_with_ephemeral_sqlite(
-) -> Result<OperationalApiReadGraph, String> {
+/// In-memory-checkpointer variant for hermetic tests (including dependent
+/// crates' unit tests, which cannot see this crate's `#[cfg(test)]` items).
+/// Tests must not contend on the operator's live decision-graph sqlite under
+/// `~/.claude/sentinel/state/decision-graphs/` — a running daemon/session
+/// shares that file and parallel openers flake with lock errors. Never use
+/// outside tests: an ephemeral checkpointer leaves no durable audit trail.
+pub async fn build_operational_api_read_graph_ephemeral() -> Result<OperationalApiReadGraph, String>
+{
     build_operational_api_read_graph_with_database_path(":memory:").await
 }
 
 #[cfg(test)]
+async fn build_operational_api_read_graph_with_ephemeral_sqlite(
+) -> Result<OperationalApiReadGraph, String> {
+    build_operational_api_read_graph_ephemeral().await
+}
+
 async fn build_operational_api_read_graph_with_database_path(
     db_path: &str,
 ) -> Result<OperationalApiReadGraph, String> {

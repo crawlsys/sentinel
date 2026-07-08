@@ -815,7 +815,10 @@ mod persistent_tasks_root_tests {
         assert_eq!(session_path_component("has space"), None);
         // Oversized (> 128).
         assert_eq!(session_path_component(&"a".repeat(129)), None);
-        assert_eq!(session_path_component(&"a".repeat(128)).map(str::len), Some(128));
+        assert_eq!(
+            session_path_component(&"a".repeat(128)).map(str::len),
+            Some(128)
+        );
     }
 }
 
@@ -864,7 +867,7 @@ mod project_hash_tests {
         assert_eq!(normalize_path(r"C:\Users\g\repo"), "c:/Users/g/repo");
         assert_eq!(normalize_path("C:/Users/g/repo"), "c:/Users/g/repo");
         assert_eq!(normalize_path(r"c:/Users\g/repo"), "c:/Users/g/repo"); // mixed
-        // Non-Windows paths: only separator folding (no drive letter).
+                                                                           // Non-Windows paths: only separator folding (no drive letter).
         assert_eq!(normalize_path("/home/g/repo"), "/home/g/repo");
         // Path casing below the drive is preserved (not folded).
         assert_eq!(normalize_path(r"C:\Users\MixedCase"), "c:/Users/MixedCase");
@@ -883,8 +886,7 @@ mod project_hash_tests {
         assert_eq!(fwd, lower, "drive-letter case must not matter");
         assert_eq!(lower, mixed, "mixed separators must match");
         // And a worktree of it collapses to the same hash too.
-        let wt =
-            project_hash(r"C:\Users\garys\Documents\GitHub\sentinel\.claude\worktrees\feat-x");
+        let wt = project_hash(r"C:\Users\garys\Documents\GitHub\sentinel\.claude\worktrees\feat-x");
         assert_eq!(back, wt, "worktree collapses to the same project hash");
     }
 

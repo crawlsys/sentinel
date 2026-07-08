@@ -97,8 +97,9 @@ fn is_allowed_command(command: &str) -> bool {
     }
     // No path separators, no shell metacharacters, no whitespace — a bare
     // program name only. (Args live in the separate `args` array.)
-    if cmd.contains(['/', '\\', ' ', '\t', ';', '&', '|', '>', '<', '$', '`', '"', '\'', '%'])
-    {
+    if cmd.contains([
+        '/', '\\', ' ', '\t', ';', '&', '|', '>', '<', '$', '`', '"', '\'', '%',
+    ]) {
         return false;
     }
     if ALLOWED_LAUNCHERS.contains(&cmd) {
@@ -364,13 +365,7 @@ fn heal_registry(
     // 1. Preferred source: marketplace declaration (REGISTRY CONTRACT v1).
     let mut source = HealSource::Marketplace;
     let mut desired = marketplace_repo.and_then(|repo| {
-        desired_from_marketplace(
-            process,
-            repo,
-            &mut retired,
-            &mut unresolved_env,
-            warnings,
-        )
+        desired_from_marketplace(process, repo, &mut retired, &mut unresolved_env, warnings)
     });
 
     // 2. Fallback: newest known-good snapshot.
@@ -507,7 +502,10 @@ fn desired_from_marketplace(
             continue;
         }
 
-        let args = entry.get("args").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let args = entry
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
         let transport = entry
             .get("transport")
             .and_then(Value::as_str)
@@ -594,7 +592,9 @@ fn resolve_doppler_ref(process: &dyn ProcessPort, reference: &str) -> Option<Str
     for bin in ["doppler-rs", "doppler"] {
         let result = process.run(
             bin,
-            &["secrets", "get", secret, "--plain", "-p", project, "-c", config],
+            &[
+                "secrets", "get", secret, "--plain", "-p", project, "-c", config,
+            ],
             None,
         );
         if let Ok(out) = result {
@@ -623,8 +623,7 @@ fn merge_registry_into_file(
     let _lock = FileLock::acquire(path);
 
     let mut root = if path.exists() {
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
+        let content = fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
         match serde_json::from_str::<Value>(&content) {
             Ok(Value::Object(map)) => map,
             // Never merge over a file we cannot faithfully round-trip.
@@ -884,7 +883,9 @@ mod tests {
         write_marketplace(&repo, CONTRACT_FIXTURE);
 
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &StubEnv::new(),
             home,
             &claude_dir,
@@ -942,7 +943,9 @@ mod tests {
         );
 
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &StubEnv::new(),
             home,
             &claude_dir,
@@ -956,8 +959,14 @@ mod tests {
         let json = read_json(&home.join(".claude.json"));
         let servers = json["mcpServers"].as_object().unwrap();
         assert!(servers.contains_key("linear"), "clean entry must heal");
-        assert!(!servers.contains_key("evil"), "shell-interpreter command must be rejected");
-        assert!(!servers.contains_key("evil2"), "abs-path exe command must be rejected");
+        assert!(
+            !servers.contains_key("evil"),
+            "shell-interpreter command must be rejected"
+        );
+        assert!(
+            !servers.contains_key("evil2"),
+            "abs-path exe command must be rejected"
+        );
         assert_eq!(heal.entries, 1);
         assert!(report
             .warnings
@@ -1044,7 +1053,9 @@ mod tests {
         .unwrap();
 
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &StubEnv::new(),
             home,
             &home.join(".claude"),
@@ -1080,7 +1091,9 @@ mod tests {
 
         let env = StubEnv::with(&[("CLAUDE_CONFIG_DIR", session_dir.to_str().unwrap())]);
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &env,
             home,
             &home.join(".claude"),
@@ -1165,7 +1178,9 @@ mod tests {
         write_marketplace(&repo, CONTRACT_FIXTURE);
 
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &StubEnv::new(),
             home,
             &home.join(".claude"),
@@ -1177,7 +1192,10 @@ mod tests {
 
         assert!(report.tripwire);
         assert!(report.heal.is_none(), "must not merge over corrupt JSON");
-        assert_eq!(std::fs::read_to_string(home.join(".claude.json")).unwrap(), "{ corrupt");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+            "{ corrupt"
+        );
         assert!(report.warnings.iter().any(|w| w.contains("unreadable")));
     }
 
@@ -1185,12 +1203,18 @@ mod tests {
     fn empty_registry_with_repos_trips_and_heals() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        std::fs::write(home.join(".claude.json"), r#"{"mcpServers": {}, "keep": true}"#).unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers": {}, "keep": true}"#,
+        )
+        .unwrap();
         let repo = home.join("marketplace");
         write_marketplace(&repo, CONTRACT_FIXTURE);
 
         let report = run_with_state(
-            &DopplerProcess { binary: "doppler-rs" },
+            &DopplerProcess {
+                binary: "doppler-rs",
+            },
             &StubEnv::new(),
             home,
             &home.join(".claude"),
@@ -1332,15 +1356,30 @@ mod tests {
     #[test]
     fn malformed_doppler_ref_is_unresolved() {
         assert_eq!(
-            resolve_doppler_ref(&DopplerProcess { binary: "doppler-rs" }, "$doppler:only-two/parts"),
+            resolve_doppler_ref(
+                &DopplerProcess {
+                    binary: "doppler-rs"
+                },
+                "$doppler:only-two/parts"
+            ),
             None
         );
         assert_eq!(
-            resolve_doppler_ref(&DopplerProcess { binary: "doppler-rs" }, "not-a-ref"),
+            resolve_doppler_ref(
+                &DopplerProcess {
+                    binary: "doppler-rs"
+                },
+                "not-a-ref"
+            ),
             None
         );
         assert_eq!(
-            resolve_doppler_ref(&DopplerProcess { binary: "doppler-rs" }, "$doppler://x"),
+            resolve_doppler_ref(
+                &DopplerProcess {
+                    binary: "doppler-rs"
+                },
+                "$doppler://x"
+            ),
             None
         );
     }

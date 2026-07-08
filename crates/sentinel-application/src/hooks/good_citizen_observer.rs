@@ -573,7 +573,10 @@ mod tests {
         // Primary assertion: must not panic on the multibyte byte-120 boundary.
         process_post_tool(&input, &ctx);
         let writes = fs.appends.lock().unwrap();
-        assert!(!writes.is_empty(), "expected an observation for the FAILED line");
+        assert!(
+            !writes.is_empty(),
+            "expected an observation for the FAILED line"
+        );
         // Parse the persisted observation and confirm the excerpt was truncated
         // to 120 chars + ellipsis (the `…` is JSON-escaped in the raw bytes, so
         // decode the record rather than substring-matching the wire form).
