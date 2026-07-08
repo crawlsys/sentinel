@@ -546,6 +546,100 @@ mod tests {
         }
     }
 
+    /// A `GitStatusPort` whose fallible methods all return `Err` — used to pin
+    /// git_hygiene's behavior when git itself is broken/unavailable.
+    struct FailingGit;
+
+    impl GitStatusPort for FailingGit {
+        fn has_uncommitted_changes(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+        }
+        fn changed_files(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
+            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+        }
+        fn current_branch(
+            &self,
+            _: &str,
+        ) -> Result<String, sentinel_domain::port_errors::GitError> {
+            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+        }
+        fn is_worktree(&self, _: &str) -> bool {
+            false
+        }
+        fn has_unpushed_commits(
+            &self,
+            _: &str,
+        ) -> Result<bool, sentinel_domain::port_errors::GitError> {
+            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+        }
+        fn repo_root(&self, _: &str) -> Option<String> {
+            Some("/repo".to_string())
+        }
+        fn list_worktree_names(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn rev_list_count(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn rev_list_count_range(&self, _: &str, _: &str) -> Option<u32> {
+            None
+        }
+        fn diff_names(&self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+        fn merged_local_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn merged_remote_branches(&self, _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn head_sha(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// CURRENT BEHAVIOR PIN (not an endorsement): when the `GitStatusPort`
+    /// errors, git_hygiene degrades to ALLOW — `current_branch().ok()` →
+    /// `None` → `branch_known = false` disables the protected-branch block, and
+    /// `has_uncommitted_changes`/`changed_files` errors disable the file-limit
+    /// block. So an `Edit` that would be blocked on `main` is NOT blocked when
+    /// git is broken. This is a deliberate availability trade-off (don't brick
+    /// every edit because git hiccuped), but it means the gate is fail-OPEN on
+    /// git error, contrary to a "fail-closed everywhere" reading. This test
+    /// exists so the choice is explicit and a *future* change to it is caught;
+    /// flipping git_hygiene to fail-closed on git error is a policy decision,
+    /// not a silent refactor.
+    #[test]
+    fn git_hygiene_is_fail_open_when_git_port_errors() {
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            cwd: Some("/repo".to_string()),
+            file_path: Some("/repo/src/main.rs".to_string()),
+            ..Default::default()
+        };
+        let output = process(
+            &input,
+            &FailingGit,
+            &crate::hooks::test_support::StubFs,
+            &nb(),
+        );
+        assert!(
+            output.blocked.is_none(),
+            "git_hygiene currently fails OPEN on a GitStatusPort error (documented \
+             availability trade-off); if this assertion changes, it is a deliberate \
+             policy flip to fail-closed and must be reviewed as such"
+        );
+    }
+
     /// Stub that returns a different branch (+ worktree status + repo_root)
     /// depending on the path. Used to regression-test that git_hygiene
     /// resolves the branch from the *target file's* repo root rather than

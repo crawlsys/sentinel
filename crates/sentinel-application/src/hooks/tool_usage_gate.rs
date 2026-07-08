@@ -769,6 +769,83 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_transcript_denies_transcript_authority() {
+        // Fail CLOSED: if the transcript path is present but the file cannot be
+        // read, the gate cannot verify sequential-thinking / plan authority, so
+        // it must DENY — not silently allow. Pins the fail-closed behavior so a
+        // refactor can't flip this read error into an allow.
+        let tmp = TempDir::new().unwrap();
+        let fs = RealFs::new(tmp.path().to_path_buf());
+        // A transcript_path that points at a file which does not exist →
+        // RealFs::read_to_string returns Err → DenyTranscriptAuthority.
+        let missing = tmp.path().join("does-not-exist.jsonl");
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            session_id: Some("sess".to_string()),
+            transcript_path: Some(missing.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "an unreadable transcript must DENY (fail closed), not allow"
+        );
+        assert!(
+            deny_reason(&output).contains("Transcript authority"),
+            "deny reason should name the transcript-authority failure, got: {}",
+            deny_reason(&output)
+        );
+    }
+
+    #[test]
+    fn unreadable_task_dir_denies_tasklist_authority() {
+        // Fail CLOSED: once past the transcript check, if the active-session
+        // task directory cannot be read/parsed, the gate cannot confirm an
+        // in_progress task exists, so it must DENY rather than allow the edit.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let fs = RealFs::new(home.to_path_buf());
+        // A well-formed transcript that satisfies the sequential-thinking check
+        // so evaluation proceeds to the task-authority read.
+        let transcript = write_transcript(&[
+            assistant_tool_use("mcp__sequential-thinking__sequentialthinking"),
+            assistant_tool_use("EnterPlanMode"),
+            assistant_tool_use("ExitPlanMode"),
+        ]);
+        // Seed a valid task then poison the task dir with an unparseable file so
+        // read_active_session_tasks returns Err → DenyTaskListAuthority.
+        seed_task(home, "sess", "1", "First", "in_progress");
+        fs::write(home.join(".claude/tasks/sess/bad.json"), "not-json").unwrap();
+
+        let input = edit_input("sess", &transcript);
+        let output = process(
+            &input,
+            &fs,
+            &crate::hooks::test_support::StubEnv::new(),
+            &permissive_classifier(),
+            false,
+        );
+        assert_eq!(
+            output.blocked,
+            Some(true),
+            "an unreadable/garbage task dir must DENY (fail closed), not allow"
+        );
+        assert!(
+            deny_reason(&output).contains("TaskList authority"),
+            "deny reason should name the TaskList-authority failure, got: {}",
+            deny_reason(&output)
+        );
+    }
+
+    #[test]
     fn transcript_signals_track_sequential_and_latest_plan_state() {
         let tmp = TempDir::new().unwrap();
         let fs = RealFs::new(tmp.path().to_path_buf());
