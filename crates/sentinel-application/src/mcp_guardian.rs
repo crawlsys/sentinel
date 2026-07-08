@@ -673,6 +673,13 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         file.write_all(content)?;
         file.sync_all()?;
     }
+    // These files carry plaintext secrets (resolved env values in the MCP
+    // registry snapshots, and the full mcpServers block — API keys/tokens — in
+    // a healed .claude.json). Restrict to owner-only BEFORE the rename so the
+    // secret material is never world-readable, not even for the window between
+    // create and a post-write chmod (TOCTOU-free, matching daemon_cmd's token
+    // write). Best-effort: a permission failure must not abort the heal/snapshot.
+    restrict_to_owner(&tmp);
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -689,6 +696,66 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     // (`unsafe_code = "forbid"`), and heals are rare, best-effort, and re-run
     // every session start, so the durability gap is accepted rather than
     // reaching for unsafe FFI. Documented deliberately.
+}
+
+/// Restrict a file to owner-only access (Unix `0600`, Windows owner-only ACL).
+///
+/// Best-effort and self-contained: `sentinel-application` does not depend on
+/// `sentinel-infrastructure`, so this replicates the same owner-only policy the
+/// state-store uses for the HMAC secret and `daemon_cmd` uses for the API token,
+/// rather than sharing across the layer boundary. Any failure is logged and
+/// swallowed — hardening a secret file must never break a heal or snapshot.
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        // Strip inheritance so the file does not keep the parent dir's ACEs,
+        // then grant the current user Full control and remove everyone else.
+        // `icacls` is used (not PowerShell) to keep the dependency surface
+        // minimal and match daemon_cmd's token-file hardening.
+        let path_str = path.to_string_lossy().to_string();
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        if username.is_empty() {
+            eprintln!(
+                "[sentinel] WARNING: USERNAME not set — cannot restrict permissions on {}",
+                path.display()
+            );
+            return;
+        }
+
+        // Reset to inheritance-off with no ACEs.
+        let strip = std::process::Command::new("icacls")
+            .args([&path_str, "/inheritance:r"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Err(e) = strip {
+            eprintln!(
+                "[sentinel] WARNING: could not strip inheritance on {}: {e}",
+                path.display()
+            );
+            return;
+        }
+
+        // Grant only the current user Full control.
+        let grant = std::process::Command::new("icacls")
+            .args([&path_str, "/grant:r", &format!("{username}:F")])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Err(e) = grant {
+            eprintln!(
+                "[sentinel] WARNING: could not grant owner-only ACL on {}: {e}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Exclusive advisory lock on a `<file>.sentinel-lock` sidecar, released on drop.
@@ -1349,6 +1416,40 @@ mod tests {
         assert!(dir.join("registry-20260620.json").exists());
         assert!(!dir.join("registry-20260607.json").exists());
         assert!(!dir.join("registry-20260601.json").exists());
+    }
+
+    #[test]
+    fn snapshot_is_written_owner_only() {
+        // The registry snapshot carries plaintext resolved secrets, so it must
+        // never be group/world-readable at rest.
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        let mut warnings = Vec::new();
+        let mut servers = Map::new();
+        servers.insert(
+            "hookdeck".to_string(),
+            serde_json::json!({ "env": { "HOOKDECK_API_KEY": "sk-secret-literal" } }),
+        );
+        let written = maybe_snapshot(
+            &claude_dir,
+            &servers,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            &mut warnings,
+        );
+        assert!(written, "snapshot should have been written");
+
+        let snap = snapshot_dir(&claude_dir).join("registry-20260621.json");
+        assert!(snap.exists(), "snapshot file should exist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&snap).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "snapshot with plaintext secrets must be 0600, got {mode:o}"
+            );
+        }
     }
 
     // -- doppler ref parsing ----------------------------------------------------
