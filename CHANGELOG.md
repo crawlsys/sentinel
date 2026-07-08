@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+- **MCP registry snapshots + healed `.claude.json` are now written owner-only** (2026-07-07, audit HIGH #2). `~/.claude/sentinel/state/mcp-registry/registry-*.json` (and a healed `~/.claude.json`) carry plaintext secrets — resolved env values like `HOOKDECK_API_KEY`/`DEPOT_TOKEN`/`GOODDATA_TOKEN`/`NYLAS_API_KEY` and the full `mcpServers` block — but were written `-rw-r--r--` (world/group-readable), ×14 daily via snapshot rotation. `write_atomic` now restricts the tmp file to owner-only **before** the rename (Unix `0600`; Windows `icacls /inheritance:r` + a single owner Full grant) — TOCTOU-free, matching `daemon_cmd`'s token-file hardening. Best-effort: a permission failure is logged and never aborts a heal/snapshot. Local-only and not git-tracked, so not a new exfil surface, but the multiplied secret material is no longer left group/world-readable. Replicated as a local `restrict_to_owner` helper because `sentinel-application` (correctly) does not depend on `sentinel-infrastructure`. Test pins `0600` on Unix.
+
+### Changed
+- **Stopped reading CC's deprecated `team_name` payload field** (2026-07-07, audit DRIFT). CC 2.1.201 marks `team_name` `@deprecated` ("single implicit team… will be removed"). Sentinel read it in `task_created`/`task_completed`/`teammate_idle`, but every read fed only decorative label strings + one write-only channel-event meta stamp no consumer reads back — nothing functional depended on it (the `teammate_idle` debounce key is `(session_id, teammate)`, unaffected). Dropped all reads + the stamp; tests now assert a stray `team_name` does **not** leak into injected context even when the upstream still sends it. `cc-boundary-contract.tsv`: removed the `team_name_present` dependency row, kept `team_name_deprecated` as the WARN tripwire for when CC actually removes the field.
+
+### Tested
+- **Pinned error-behavior for `tool_usage_gate` (fail-closed) and `git_hygiene` (fail-open)** (2026-07-07, audit follow-up). The audit's "gates fail closed but untested" premise narrowed to two gates on inspection (`provenance_validate`/`spec_challenge_gate` already cover their error paths; `db_ops_gate`/`pr_merge_gate` do no IO; `phase_gate`'s block isn't IO-gated). Added process()-level `tool_usage_gate` tests that an unreadable transcript → DENY and an unreadable/garbage task dir → DENY (previously only helper-level). For `git_hygiene`, added `FailingGit` + a test documenting that on a `GitStatusPort` error the gate degrades to **ALLOW** (`current_branch().ok()`→`None` disables the protected-branch block; uncommitted/changed_files errors disable the file limit) — contrary to a "fail-closed everywhere" reading. This is a deliberate availability trade-off (a hygiene reminder, not the commit gate — `pr_merge_gate`/`commit_message_validator` are); the test makes the choice explicit and catches any future silent flip in either direction.
+
 ### Fixed
 - **`hygiene_reminders` never offers `rm -rf` through a junction** (2026-07-07).
   The Worktree Cleanup reminder flagged every deregistered directory under
