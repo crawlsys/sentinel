@@ -33,6 +33,49 @@ pub fn decorated_status(status: &str) -> String {
     status_glyph(status).map_or_else(|| status.to_string(), |g| format!("{g} {status}"))
 }
 
+/// Compose the canonical decorated subject from a task's fields: a leading
+/// glyph run — status, then priority colour, then a `🚫` blocked marker — in
+/// front of the cleaned subject. This is the single render used by BOTH the
+/// on-disk subject decorator and the status-line renderer, so a subject can be
+/// decorated once, re-decorated idempotently (the input is always stripped
+/// first), and never accretes doubled glyphs.
+///
+/// - `status`: native status word (`pending`/`in_progress`/`completed`); an
+///   unknown status contributes no status glyph.
+/// - `priority`: optional `metadata.priority` value (see [`priority_glyph`] for
+///   accepted forms); `None` or unrecognised contributes no colour.
+/// - `blocked`: true when the task has a non-empty `blockedBy` — adds `🚫`.
+///   (Native status has no "blocked" variant, so this is derived separately.)
+///
+/// The returned string is `strip_decoration`-clean apart from the leading run
+/// this function adds, so `strip_decoration(decorate_subject(..)) == clean`.
+#[must_use]
+pub fn decorate_subject(
+    subject: &str,
+    status: &str,
+    priority: Option<&str>,
+    blocked: bool,
+) -> String {
+    let clean = strip_decoration(subject);
+    let mut prefix = String::new();
+    if let Some(g) = status_glyph(status) {
+        prefix.push_str(g);
+    }
+    if let Some(g) = priority.and_then(priority_glyph) {
+        prefix.push_str(g);
+    }
+    // Only add a standalone blocked marker when the status glyph isn't already
+    // the blocked glyph, to avoid `🚫🚫`.
+    if blocked && status_glyph(status) != Some("🚫") {
+        prefix.push('🚫');
+    }
+    if prefix.is_empty() {
+        clean.to_string()
+    } else {
+        format!("{prefix} {clean}")
+    }
+}
+
 /// Strip leading status/priority decoration a caller (or a previous decorate
 /// pass) baked into a task subject, returning just the description. Trims, in a
 /// loop until stable: a leading run of `DECOR_EMOJI` (status **and** priority
@@ -84,6 +127,26 @@ pub fn status_from_glyph(subject: &str) -> Option<&'static str> {
         '⏳' => "pending",
         '✅' => "completed",
         '❌' => "cancelled",
+        _ => return None,
+    })
+}
+
+/// Colour glyph for a priority (the render direction — inverse of the colour
+/// branch of [`priority_from_decoration`]). Accepts the canonical `P0`..`P3`
+/// tokens plus the common word aliases task tooling emits into `metadata`
+/// (`urgent`/`critical`→P0, `high`→P1, `medium`/`normal`→P2, `low`→P3), and the
+/// raw Linear-style numeric priority `1`..`4`. Case-insensitive. Returns `None`
+/// for an unrecognised value so callers render no colour rather than a wrong one.
+///
+/// `🔴`=P0 (urgent), `🟠`=P1 (high), `🟡`=P2 (medium), `🟢`=P3 (low).
+#[must_use]
+pub fn priority_glyph(priority: &str) -> Option<&'static str> {
+    let p = priority.trim().to_ascii_lowercase();
+    Some(match p.as_str() {
+        "p0" | "0" | "1" | "urgent" | "critical" | "highest" => "🔴",
+        "p1" | "2" | "high" => "🟠",
+        "p2" | "3" | "medium" | "normal" | "med" => "🟡",
+        "p3" | "4" | "low" | "lowest" => "🟢",
         _ => return None,
     })
 }
@@ -190,5 +253,59 @@ mod tests {
             let decorated = format!("{glyph} Do the work");
             assert_eq!(strip_decoration(&decorated), "Do the work", "{status}");
         }
+    }
+
+    #[test]
+    fn priority_glyph_accepts_tokens_words_and_numbers() {
+        assert_eq!(priority_glyph("P0"), Some("🔴"));
+        assert_eq!(priority_glyph("urgent"), Some("🔴"));
+        assert_eq!(priority_glyph("1"), Some("🔴")); // Linear numeric
+        assert_eq!(priority_glyph("HIGH"), Some("🟠")); // case-insensitive
+        assert_eq!(priority_glyph("medium"), Some("🟡"));
+        assert_eq!(priority_glyph("p3"), Some("🟢"));
+        assert_eq!(priority_glyph("low"), Some("🟢"));
+        assert_eq!(priority_glyph("nonsense"), None);
+        assert_eq!(priority_glyph(""), None);
+        // Forward/back consistency: the glyph priority_glyph emits maps back to
+        // the same Pn via priority_from_decoration.
+        for (word, pn) in [("urgent", "P0"), ("high", "P1"), ("medium", "P2"), ("low", "P3")] {
+            let g = priority_glyph(word).unwrap();
+            assert_eq!(priority_from_decoration(g).as_deref(), Some(pn), "{word}");
+        }
+    }
+
+    #[test]
+    fn decorate_subject_composes_status_priority_blocked() {
+        // status only
+        assert_eq!(decorate_subject("Do it", "in_progress", None, false), "🔄 Do it");
+        // status + priority
+        assert_eq!(
+            decorate_subject("Do it", "pending", Some("high"), false),
+            "⏳🟠 Do it"
+        );
+        // status + priority + blocked
+        assert_eq!(
+            decorate_subject("Do it", "pending", Some("P0"), true),
+            "⏳🔴🚫 Do it"
+        );
+        // blocked but no known status/priority → just the marker
+        assert_eq!(decorate_subject("Do it", "weird", None, true), "🚫 Do it");
+        // nothing to add → clean subject unchanged
+        assert_eq!(decorate_subject("Do it", "weird", None, false), "Do it");
+    }
+
+    #[test]
+    fn decorate_subject_is_idempotent_and_strips_clean() {
+        // Re-decorating an already-decorated subject must not accrete glyphs,
+        // and stripping the result recovers the clean subject — this is the
+        // invariant that kills the doubled-glyph bug by construction.
+        let once = decorate_subject("Fix the gate", "in_progress", Some("P1"), true);
+        let twice = decorate_subject(&once, "in_progress", Some("P1"), true);
+        assert_eq!(once, twice, "re-decoration is idempotent");
+        assert_eq!(strip_decoration(&once), "Fix the gate");
+        // Even if the status/priority CHANGE, re-decorating from the old
+        // decorated form yields only the new decoration (old glyphs stripped).
+        let changed = decorate_subject(&once, "completed", None, false);
+        assert_eq!(changed, "✅ Fix the gate");
     }
 }

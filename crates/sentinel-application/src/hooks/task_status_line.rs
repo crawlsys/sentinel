@@ -7,9 +7,16 @@
 //!
 //! ```text
 //! 📋 [Tasks] sentinel — 2 pending, 1 in progress, 8 done
-//!   🔄 #34 Make tasks first-class: every-turn TaskList emoji status line
-//!   ⏳ #35 Wire the next thing
+//!   🔄🟠 #34 Make tasks first-class: every-turn status line (2/5)
+//!   ⏳🔴🚫 #35 Wire the next thing →blocks 1
 //! ```
+//!
+//! Each line's leading glyph run is composed from the task's REAL fields:
+//! status colour, then `metadata.priority` colour (`🔴`P0 … `🟢`P3), then a `🚫`
+//! blocked marker when `blockedBy` is non-empty. Trailing hints show
+//! `metadata.checklist` progress `(done/total)` and a `→blocks N` fan-out. The
+//! subject is stripped of any baked-in decoration first, so a glyph the on-disk
+//! decorator (`task_persist`) already applied is never doubled.
 //!
 //! Unlike `todo_loader` (which reads the `TodoWrite` store `active.jsonl` and
 //! loads once per session), this hook reads the durable **TaskList** the
@@ -33,7 +40,7 @@
 use std::path::{Path, PathBuf};
 
 use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
-use sentinel_domain::task_decoration::status_glyph;
+use sentinel_domain::task_decoration::{priority_glyph, status_glyph, strip_decoration};
 
 use super::{concrete_input_session_id, FileSystemPort, HookContext};
 
@@ -45,8 +52,10 @@ const MAX_LISTED: usize = 10;
 /// safe) so one verbose task can't blow out the line width.
 const MAX_SUBJECT_CHARS: usize = 80;
 
-/// A single native TaskList entry. Deliberately minimal — only the fields this
-/// line needs — so it deserializes any TaskList row shape.
+/// A single native TaskList entry. Only the fields this line needs, so it
+/// deserializes any TaskList row shape. Priority + checklist live in the
+/// free-form `metadata` record — the native Task schema (recovered from
+/// decompiled 2.1.206) carries neither as a first-class field.
 #[derive(Debug, serde::Deserialize)]
 struct TaskRow {
     #[serde(default)]
@@ -55,6 +64,55 @@ struct TaskRow {
     subject: String,
     #[serde(default)]
     status: String,
+    /// Task IDs blocking this one — non-empty means "blocked" (there is no
+    /// blocked status variant, so this is the sole blocked signal).
+    #[serde(default, rename = "blockedBy")]
+    blocked_by: Vec<String>,
+    /// Task IDs this one blocks (rendered as a `→N` fan-out hint).
+    #[serde(default)]
+    blocks: Vec<String>,
+    #[serde(default)]
+    metadata: TaskMetadata,
+}
+
+/// The subset of a task's `metadata` record the status line surfaces.
+#[derive(Debug, Default, serde::Deserialize)]
+struct TaskMetadata {
+    /// Priority, as a string (`"P0"`, `"high"`, …) or a number (Linear 1..4).
+    #[serde(default)]
+    priority: Option<serde_json::Value>,
+    /// Checklist progress, either a `"3/5"` string or a `{done, total}` object.
+    #[serde(default)]
+    checklist: Option<serde_json::Value>,
+}
+
+impl TaskRow {
+    /// Priority as a display string (`metadata.priority` normalised to a `str`),
+    /// or `None` when absent/unrecognised shape.
+    fn priority_str(&self) -> Option<String> {
+        match self.metadata.priority.as_ref()? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+
+    /// `(done, total)` checklist progress from `metadata.checklist`, accepting
+    /// either `"3/5"` or `{"done":3,"total":5}`. `None` when absent/unparseable.
+    fn checklist_progress(&self) -> Option<(u64, u64)> {
+        match self.metadata.checklist.as_ref()? {
+            serde_json::Value::String(s) => {
+                let (d, t) = s.split_once('/')?;
+                Some((d.trim().parse().ok()?, t.trim().parse().ok()?))
+            }
+            serde_json::Value::Object(o) => {
+                let done = o.get("done").and_then(serde_json::Value::as_u64)?;
+                let total = o.get("total").and_then(serde_json::Value::as_u64)?;
+                Some((done, total))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Resolve this session's native TaskList directory (literal `{session_id}` or
@@ -141,12 +199,34 @@ fn render_block(tasks: &[TaskRow], project_name: &str) -> Option<String> {
         "📋 [Tasks] {project_name} — {pending} pending, {in_progress} in progress, {done} done"
     );
     for t in active.iter().take(MAX_LISTED) {
-        let glyph = status_glyph(&t.status).unwrap_or("•");
+        // Build the leading glyph run from the task's REAL fields — status,
+        // then priority colour, then a blocked marker. The subject is stripped
+        // first so a glyph already baked into it on disk (by task_persist's
+        // decorator) is not doubled: this was the "🔄 🔄 #38" bug.
+        let mut glyphs = String::new();
+        glyphs.push_str(status_glyph(&t.status).unwrap_or("•"));
+        if let Some(g) = t.priority_str().as_deref().and_then(priority_glyph) {
+            glyphs.push_str(g);
+        }
+        let blocked = !t.blocked_by.is_empty();
+        if blocked && status_glyph(&t.status) != Some("🚫") {
+            glyphs.push('🚫');
+        }
+
+        // Trailing hints: checklist progress and fan-out (how many this blocks).
+        let mut hints = String::new();
+        if let Some((done, total)) = t.checklist_progress() {
+            let _ = write!(hints, " ({done}/{total})");
+        }
+        if !t.blocks.is_empty() {
+            let _ = write!(hints, " →blocks {}", t.blocks.len());
+        }
+
         let _ = write!(
             block,
-            "\n  {glyph} #{} {}",
+            "\n  {glyphs} #{} {}{hints}",
             t.id,
-            truncate_subject(&t.subject)
+            truncate_subject(strip_decoration(&t.subject))
         );
     }
     let overflow = active.len().saturating_sub(MAX_LISTED);
@@ -194,7 +274,16 @@ mod tests {
             id: id.into(),
             status: status.into(),
             subject: subject.into(),
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            metadata: TaskMetadata::default(),
         }
+    }
+
+    /// Deserialize a `TaskRow` from a raw JSON object literal — exercises the
+    /// real `metadata`/`blockedBy`/`blocks` parsing the on-disk files use.
+    fn row_json(v: serde_json::Value) -> TaskRow {
+        serde_json::from_value(v).expect("valid TaskRow json")
     }
 
     #[test]
@@ -351,5 +440,70 @@ mod tests {
         let out = process(&input, &ctx);
         assert!(out.blocked.is_none());
         assert!(out.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn already_decorated_subject_is_not_doubled() {
+        // The bug: task_persist bakes "🔄 Fix it" into the on-disk subject, and
+        // the status line used to prefix its own 🔄 → "🔄 🔄". The line must
+        // strip first, so exactly one status glyph appears.
+        let tasks = vec![row("38", "in_progress", "🔄 Fix the gate")];
+        let block = render_block(&tasks, "sentinel").expect("block");
+        assert!(block.contains("🔄 #38 Fix the gate"), "{block}");
+        assert!(!block.contains("🔄 🔄"), "no doubled glyph: {block}");
+        // And the baked subject's glyph doesn't leak into the text.
+        assert!(!block.contains("#38 🔄"), "{block}");
+    }
+
+    #[test]
+    fn priority_colour_from_metadata_is_rendered() {
+        let t = row_json(serde_json::json!({
+            "id": "5", "status": "in_progress", "subject": "urgent work",
+            "metadata": {"priority": "P0"}
+        }));
+        let block = render_block(&[t], "p").expect("block");
+        // status 🔄 then priority 🔴, then id + subject.
+        assert!(block.contains("🔄🔴 #5 urgent work"), "{block}");
+    }
+
+    #[test]
+    fn blocked_marker_from_blocked_by() {
+        let t = row_json(serde_json::json!({
+            "id": "6", "status": "pending", "subject": "waiting",
+            "blockedBy": ["3", "4"]
+        }));
+        let block = render_block(&[t], "p").expect("block");
+        assert!(block.contains("⏳🚫 #6 waiting"), "{block}");
+    }
+
+    #[test]
+    fn checklist_and_blocks_hints() {
+        let t = row_json(serde_json::json!({
+            "id": "7", "status": "in_progress", "subject": "big task",
+            "blocks": ["8", "9"],
+            "metadata": {"checklist": "3/5"}
+        }));
+        let block = render_block(&[t], "p").expect("block");
+        assert!(block.contains("#7 big task (3/5) →blocks 2"), "{block}");
+
+        // Object-shaped checklist works too.
+        let t2 = row_json(serde_json::json!({
+            "id": "8", "status": "pending", "subject": "obj checklist",
+            "metadata": {"checklist": {"done": 1, "total": 4}}
+        }));
+        let block2 = render_block(&[t2], "p").expect("block");
+        assert!(block2.contains("#8 obj checklist (1/4)"), "{block2}");
+    }
+
+    #[test]
+    fn numeric_linear_priority_maps_to_colour() {
+        // Linear stores priority as 1..4; metadata may carry the raw number.
+        let t = row_json(serde_json::json!({
+            "id": "9", "status": "pending", "subject": "num pri",
+            "metadata": {"priority": 2}
+        }));
+        let block = render_block(&[t], "p").expect("block");
+        // 2 → high → 🟠.
+        assert!(block.contains("⏳🟠 #9 num pri"), "{block}");
     }
 }

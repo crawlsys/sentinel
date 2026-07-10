@@ -263,7 +263,7 @@ fn has_task_files(fs: &dyn FileSystemPort, dir: &PathBuf) -> bool {
 }
 
 use sentinel_domain::task_decoration::{
-    priority_from_decoration, status_from_glyph, status_glyph, strip_decoration, DECOR_EMOJI,
+    decorate_subject, priority_from_decoration, status_from_glyph, DECOR_EMOJI,
 };
 
 /// Bake the current status emoji into each native task file's `subject` so
@@ -308,11 +308,25 @@ fn decorate_native_task_subjects(fs: &dyn FileSystemPort, dir: &Path) {
         ) else {
             continue;
         };
-        let clean = strip_decoration(subject);
-        let decorated = match status_glyph(status) {
-            Some(glyph) => format!("{glyph} {clean}"),
-            None => clean.to_string(),
-        };
+        // Priority lives in `metadata.priority` — the native Task schema (recovered
+        // from decompiled 2.1.206) has no priority field of its own; task tooling
+        // stashes it in the free-form `metadata` record. Accept a string or a
+        // number (Linear-style 1..4).
+        let priority: Option<String> = value
+            .get("metadata")
+            .and_then(|m| m.get("priority"))
+            .and_then(|p| match p {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            });
+        // A task is "blocked" when it has a non-empty `blockedBy` — a real native
+        // field (the status enum itself has no blocked variant).
+        let blocked = value
+            .get("blockedBy")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let decorated = decorate_subject(subject, status, priority.as_deref(), blocked);
         if decorated == subject {
             continue; // already correct — no write, no mtime churn
         }
@@ -1769,6 +1783,36 @@ mod tests {
 
         decorate_native_task_subjects(&fs, &dir);
         assert_eq!(subject_of(&dir, "1.json"), "🔄 Do X", "re-glyphed on change");
+    }
+
+    #[test]
+    fn decorate_bakes_priority_and_blocked_from_metadata_and_blocked_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join(".claude").join("tasks").join("sess-enrich");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Priority in metadata + a blockedBy entry → status + colour + 🚫.
+        std::fs::write(
+            dir.join("1.json"),
+            r#"{"id":"1","subject":"Urgent blocked","status":"pending","metadata":{"priority":"P0"},"blockedBy":["9"]}"#,
+        )
+        .unwrap();
+        // Priority only.
+        std::fs::write(
+            dir.join("2.json"),
+            r#"{"id":"2","subject":"High pri","status":"in_progress","metadata":{"priority":"high"}}"#,
+        )
+        .unwrap();
+        let fs = ScopedHomeFs { home };
+
+        decorate_native_task_subjects(&fs, &dir);
+        assert_eq!(subject_of(&dir, "1.json"), "⏳🔴🚫 Urgent blocked");
+        assert_eq!(subject_of(&dir, "2.json"), "🔄🟠 High pri");
+
+        // Idempotent: a second pass over the enriched subjects must not stack.
+        decorate_native_task_subjects(&fs, &dir);
+        assert_eq!(subject_of(&dir, "1.json"), "⏳🔴🚫 Urgent blocked");
+        assert_eq!(subject_of(&dir, "2.json"), "🔄🟠 High pri");
     }
 
     #[test]
