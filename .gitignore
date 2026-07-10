@@ -13,3 +13,6 @@
 /BLOCKED.md
 
 .commit-msg.tmp
+
+# Transient build-log redirects (e.g. `cargo build … > eng-build.log`)
+*.log
