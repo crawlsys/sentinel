@@ -1420,6 +1420,15 @@ fn handle_pre_tool_use(
     });
     output.merge(&task_decomp_output);
 
+    // Task enforcement gate — helpful-block Edit/Write/NotebookEdit when the
+    // session has no in_progress task. Fails open on any read error / missing
+    // task dir / non-repo; kill switch SENTINEL_TASK_GATE=off. The deny message
+    // guides the agent to create+start a task (or ask the operator).
+    let task_enforcement_output = time_and_record(ctx.fs, &mk_ctx("task_enforcement_gate"), || {
+        hooks::task_enforcement_gate::process(input, ctx)
+    });
+    output.merge(&task_enforcement_output);
+
     // Skill invocation gate — block tools when a skill was detected
     // by skill_router but not yet invoked. Allowlists Read/Glob/Grep/
     // Skill/Task* so the gate doesn't refuse to let Claude clear it.
