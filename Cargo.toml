@@ -211,7 +211,16 @@ option_as_ref_cloned = "allow"
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+# Thin LTO + parallel codegen. Fat LTO (`lto = true`) with `codegen-units = 1`
+# runs a single-threaded LTO pass over the large `sentinel-cli` crate. Thin LTO
+# keeps ~90% of fat-LTO's runtime benefit (negligible for an IO-bound hook
+# engine) while `codegen-units = 16` restores parallel codegen, making the
+# LTO/link stage cheaper and multi-core. NOTE: this does NOT fix the multi-minute
+# engine rebuild — that cost is dominated by cold compilation of ~500 dependency
+# crates in a fresh worktree's empty target/, not the LTO link. The real fix for
+# iterative rebuild time is a shared CARGO_TARGET_DIR (deferred; has concurrency
+# tradeoffs to validate).
+lto = "thin"
+codegen-units = 16
 strip = true
 panic = "abort"

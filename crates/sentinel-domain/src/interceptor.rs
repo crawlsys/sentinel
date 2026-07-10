@@ -360,8 +360,20 @@ pub fn evaluate_git_args(args: &[String]) -> InterceptorPolicy {
 /// arg vector should prefer [`evaluate_git_args`] which strips commit-message
 /// content first to avoid false positives like `commit -m "fix --force bug"`.
 pub fn evaluate_git_command(args_joined: &str) -> InterceptorPolicy {
-    // Exception: prune is ok when used with `worktree prune`
-    let is_prune = args_joined.contains("prune") && !args_joined.contains("worktree prune");
+    // "prune" only affects repository recovery when it deletes unreachable
+    // OBJECTS — the plumbing `git prune`, `git gc --prune`, or a reflog
+    // expiry that prunes. The far more common REF-pruning forms
+    // (`git fetch --prune`/`-p`, `git remote prune`, `git remote update
+    // --prune`, `git worktree prune`) only drop stale remote-tracking or
+    // worktree refs: no data is lost and the state is fully recoverable by
+    // re-fetching. Blocking those was a false positive that silently let a
+    // session's remote-tracking refs drift months out of date. So treat prune
+    // as dangerous ONLY when it is NOT one of the safe ref-pruning forms.
+    let safe_ref_prune = args_joined.contains("fetch")
+        || args_joined.contains("remote prune")
+        || args_joined.contains("remote update")
+        || args_joined.contains("worktree prune");
+    let is_dangerous_prune = args_joined.contains("prune") && !safe_ref_prune;
 
     // Check all blocked rules
     for rule in GIT_BLOCKED_RULES {
@@ -374,11 +386,14 @@ pub fn evaluate_git_command(args_joined: &str) -> InterceptorPolicy {
         }
     }
 
-    // Special case: prune without worktree context
-    if is_prune {
+    // Object-pruning form without a safe ref-prune context.
+    if is_dangerous_prune {
         return InterceptorPolicy::Block {
             reason: "Affects repository recovery".to_string(),
-            alternatives: vec![],
+            alternatives: vec![
+                "git fetch --prune       # Prune stale remote-tracking refs (safe)".to_string(),
+                "git worktree prune      # Prune stale worktree refs (safe)".to_string(),
+            ],
             risk: RiskLevel::Medium,
         };
     }
@@ -587,9 +602,47 @@ mod tests {
 
     #[test]
     fn test_plain_prune_blocked() {
+        // Bare `git prune` (plumbing: deletes unreachable OBJECTS) still blocks.
         match evaluate_git_command("prune") {
             InterceptorPolicy::Block { .. } => {}
             other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ref_pruning_forms_are_allowed() {
+        // These prune only remote-tracking / worktree REFS — no object loss,
+        // fully recoverable. They must NOT be blocked (the regression that
+        // silently let a session's remote-tracking refs drift months stale).
+        for cmd in [
+            "fetch --prune",
+            "fetch -p",
+            "fetch --prune origin",
+            "remote prune origin",
+            "remote update --prune",
+            "worktree prune",
+        ] {
+            assert_eq!(
+                evaluate_git_command(cmd),
+                InterceptorPolicy::Allow,
+                "ref-pruning form must be allowed: `git {cmd}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_object_pruning_forms_still_blocked() {
+        // Object-pruning / recovery-affecting forms remain blocked.
+        for cmd in ["prune", "prune --expire=now", "gc --prune=now"] {
+            match evaluate_git_command(cmd) {
+                InterceptorPolicy::Block { .. } => {}
+                other => panic!("expected Block for `git {cmd}`, got {other:?}"),
+            }
+        }
+        // `gc --aggressive` is caught by its own rule (unchanged).
+        match evaluate_git_command("gc --aggressive") {
+            InterceptorPolicy::Block { .. } => {}
+            other => panic!("expected Block for gc --aggressive, got {other:?}"),
         }
     }
 

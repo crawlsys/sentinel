@@ -47,12 +47,23 @@ const OBSERVATION_PATTERNS: &[(&str, &str)] = &[
         "unused symbol",
     ),
     (r"warning:\s+\S+\s+is\s+deprecated", "deprecated API"),
-    (r"\bdead_code\b", "dead code"),
+    // NOTE: a bare `\bdead_code\b` token pattern was removed here — it matched
+    // any prose mentioning `dead_code` (e.g. quoting a `#[warn(dead_code)]`
+    // note, or a CHANGELOG line), false-firing on text that describes an
+    // already-fixed warning. The `warning: function ... is never used` pattern
+    // above is the real rustc dead-code diagnostic and is sufficient.
     // Generic linters / typecheckers
     (r"\bTS\d{4,5}\b", "TypeScript error"),
     (r"\bES\d{3,5}\b", "ESLint error"),
-    // Test failures
-    (r"\b(FAILED|FAIL)\b", "test failure"),
+    // Test failures — match the ACTUAL cargo/test output shapes, not a bare
+    // "FAIL" word (which fires on prose like "PASS/WARN/FAIL" or "CI gate red").
+    (r"test\s+result:\s+FAILED", "test failure"),
+    (r"test\s+\S+\s+\.\.\.\s+FAILED", "test failure"),
+    (r"^\s*FAILED\b", "test failure"),
+    // Bracketed status line from a checker (e.g. the CC contract checker prints
+    // `[ FAIL ]` / `[FAIL]` on real drift) — a genuine signal, kept precisely so
+    // the tightening above doesn't drop it.
+    (r"\[\s*FAIL\s*\]", "check failure"),
     (r"\bpanicked at\b", "panic"),
     (r"thread\s+'[^']+'\s+panicked", "panic"),
     // Inline markers in output
@@ -442,6 +453,37 @@ mod tests {
         assert_eq!(writes.len(), 1, "expected one observation appended");
         let line = std::str::from_utf8(&writes[0].1).unwrap();
         assert!(line.contains("dead code"), "got: {line}");
+    }
+
+    #[test]
+    fn prose_fail_and_dead_code_token_do_not_false_fire() {
+        // Regression: bare "FAIL" in prose (a CHANGELOG line, a commit message)
+        // and a quoted `dead_code` token must NOT be recorded as issues — only
+        // real cargo/rustc diagnostics should.
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = CapturingFs::new(tmp.path().to_path_buf());
+        let ctx = ctx_with_fs(&fs);
+        let input = HookInput {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": "cat CHANGELOG.md"})),
+            tool_result: Some(serde_json::json!({
+                "stdout": "greps each manifest pattern, PASS/WARN/FAIL, exit 1 on drift\n\
+                           the `#[warn(dead_code)]` note fired on already-fixed code\n\
+                           CI fmt gate red on the last 5 main pushes"
+            })),
+            session_id: Some("s-citizen-prose".into()),
+            ..Default::default()
+        };
+        process_post_tool(&input, &ctx);
+        let writes = fs.appends.lock().unwrap();
+        assert!(
+            writes.is_empty(),
+            "prose mentioning FAIL / dead_code must not be flagged, got: {:?}",
+            writes
+                .iter()
+                .map(|(_, b)| String::from_utf8_lossy(b).to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
