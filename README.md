@@ -26,7 +26,7 @@ docker run -e LOKI_URL=http://loki:3100 \
            -e OLLAMA_URL=http://ollama:11434 \
            -e OLLAMA_MODEL=qwen3:32b-q4_K_M \
            -e ALERTMANAGER_URL=http://alertmanager:9093 \
-           ghcr.io/kvncrw/sentinel:latest
+           ghcr.io/crawlsys/sentinel:latest
 ```
 
 ## Configuration
