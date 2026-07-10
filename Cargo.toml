@@ -224,3 +224,28 @@ lto = "thin"
 codegen-units = 16
 strip = true
 panic = "abort"
+
+# Fast-ish iterative profile for rebuilding the hook engine during development.
+# The `release` profile runs LTO on every build (thin LTO's `-C linker-plugin-lto`),
+# which re-optimizes the crate graph even for a one-line change. This profile turns
+# LTO OFF so a WARM rebuild (deps already compiled) skips that pass. It inherits
+# everything else from `release` — crucially `opt-level = 3`: overriding it to a
+# lower value perturbs cc-rs's cl.exe invocation and breaks aws-lc-sys's C11
+# feature probe (`stdalign.h` C1083) on this MSVC toolchain. `codegen-units = 16`
+# (not higher) keeps per-crate LLVM/linker memory bounded — on Windows MSVC very
+# high codegen-units multiply peak RAM and can get large crates OOM-killed.
+#
+# HONEST SCOPE: this only helps WARM rebuilds. A COLD build is dominated by
+# compiling ~500 dependency crates + heavy workspace crates (sentinel-infrastructure
+# alone pulls sqlx/redis/opentelemetry/rig-core) — a 20-40 min job on a loaded box
+# regardless of LTO. The profile is a modest iteration aid, not a cold-build fix.
+#
+# Usage:  cargo build --profile quick --bin sentinel-engine
+#         sentinel stage --binary target/quick/sentinel-engine.exe
+#
+# Additive and local-only: `cargo build --release` and CI (which builds release)
+# are completely unaffected — this profile has its own `target/quick/` output.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16

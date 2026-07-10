@@ -6,13 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 cargo build --release                              Build optimized binary (requires Rust 1.87+)
+cargo build --profile quick --bin sentinel-engine  Fast-ish engine rebuild (LTO off) for iteration
 cargo clippy --workspace                           Lint (pedantic + nursery enabled)
 cargo test --workspace                             Run all tests
 cargo test -p sentinel-cli -- test_extract_skill   Run a single test by name substring
 cargo test -p sentinel-application                 Run tests for one crate
 ```
 
-Release profile: LTO, single codegen unit, binary stripping, panic=abort.
+Release profile: **thin** LTO, `codegen-units = 16`, binary stripping, panic=abort.
+`[profile.quick]` (LTO off, own `target/quick/`) skips the LTO pass for faster warm engine
+rebuilds during iteration — stage it with `sentinel stage --binary target/quick/sentinel-engine.exe`.
+Note: a *cold* build is dominated by compiling ~500 deps + heavy workspace crates (20–40 min on a
+loaded box); the profile only helps once deps are warm. CI still builds `--release`.
 
 ## CLI Commands
 
