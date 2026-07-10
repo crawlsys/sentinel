@@ -53,7 +53,11 @@ pub fn process(input: &HookInput, ctx: &HookContext<'_>) -> HookOutput {
         return HookOutput::allow();
     };
 
-    let projects_dir = home.join(".claude").join("projects");
+    // Canonical project-config location. The legacy `~/.claude/projects/` is
+    // Claude Code's conversation-transcript store (no config frontmatter), so
+    // reading it here found no mappings and the cascade silently no-op'd for
+    // configured accounts (e.g. firefly-pro).
+    let projects_dir = super::sentinel_dir(&home).join("projects");
 
     if tool_name.ends_with("project_switch") {
         // project_switch already returns instructions — enhance with auto-execute directive
@@ -309,7 +313,7 @@ fn build_cascade_instructions(
     instructions
 }
 
-/// Load all project configs from `~/.claude/projects/*.md` as flat key-value maps.
+/// Load all project configs from `~/.claude/sentinel/projects/*.md` as flat key-value maps.
 /// Only parses YAML frontmatter (between --- fences).
 fn load_project_configs(fs: &dyn FileSystemPort, dir: &Path) -> Vec<HashMap<String, String>> {
     let mut configs = Vec::new();

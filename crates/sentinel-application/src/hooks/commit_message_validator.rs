@@ -74,7 +74,12 @@ fn extract_commit_message(command: &str) -> Option<String> {
 }
 
 fn projects_dir(fs: &dyn super::FileSystemPort) -> Option<PathBuf> {
-    Some(fs.home_dir()?.join(".claude").join("projects"))
+    // Project configs live under `~/.claude/sentinel/projects/` (the canonical
+    // location `session_init` writes and reads). The legacy `~/.claude/projects/`
+    // is Claude Code's conversation-transcript store — it holds no config
+    // frontmatter, so reading it here silently found nothing and the Linear-ref
+    // enforcement never fired for configured projects (e.g. firefly-pro).
+    Some(super::sentinel_dir(&fs.home_dir()?).join("projects"))
 }
 
 fn extract_frontmatter(content: &str) -> Option<&str> {
@@ -781,5 +786,53 @@ mod tests {
     fn test_effective_cwd_not_cd_prefixed_command() {
         // `cdk deploy && git commit` must NOT match — command doesn't start with `cd ` or `cd\t`.
         assert_eq!(effective_cwd_from_command("cdk deploy && git commit"), None);
+    }
+
+    /// Regression guard for the projects-dir path fix: project configs live at
+    /// `~/.claude/sentinel/projects/`, NOT the legacy `~/.claude/projects/`
+    /// (which is Claude Code's conversation-transcript store). Before the fix,
+    /// `detect_prefixes_for_cwd` read the legacy dir, found no config, and the
+    /// Linear-ref enforcement silently never fired for configured projects.
+    #[test]
+    fn test_detect_prefixes_reads_sentinel_projects_dir() {
+        use crate::hooks::test_support::TestHomeFs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = TestHomeFs::new(tmp.path());
+
+        // Seed the CANONICAL location with a firefly config carrying prefixes.
+        let canonical = tmp
+            .path()
+            .join(".claude")
+            .join("sentinel")
+            .join("projects");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(
+            canonical.join("firefly-pro.md"),
+            "---\nname: firefly-pro\naliases: [\"firefly\", \"crm\", \"fir\"]\nissue_prefix: FPCRM\nlinear_teams:\n  - key: FPCRM\n  - key: FPFIELD\n---\nbody\n",
+        )
+        .unwrap();
+
+        // Also seed the LEGACY dir with a DECOY config that must be ignored —
+        // if the reader regressed to the old path it would surface WRONG-PREFIX.
+        let legacy = tmp.path().join(".claude").join("projects");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("firefly-pro.md"),
+            "---\nname: firefly-pro\naliases: [\"firefly\"]\nissue_prefix: WRONGPREFIX\n---\n",
+        )
+        .unwrap();
+
+        // A firefly cwd must resolve the firefly project + its FPCRM/FPFIELD
+        // prefixes from the CANONICAL config.
+        let got = detect_prefixes_for_cwd(&fs, "/c/Users/garys/Documents/GitHub/firefly");
+        let (project, prefixes) = got.expect("firefly config in sentinel/projects must be found");
+        assert_eq!(project, "firefly-pro");
+        assert!(prefixes.contains(&"FPCRM".to_string()), "{prefixes:?}");
+        assert!(prefixes.contains(&"FPFIELD".to_string()), "{prefixes:?}");
+        assert!(
+            !prefixes.contains(&"WRONGPREFIX".to_string()),
+            "the legacy ~/.claude/projects/ decoy must NOT be read: {prefixes:?}"
+        );
     }
 }
