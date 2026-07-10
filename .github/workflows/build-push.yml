@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: crawlsys-linux
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -39,7 +39,7 @@ jobs:
 
   deploy:
     needs: [build]
-    runs-on: crawlsys-linux
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout homelab
         uses: actions/checkout@v4
