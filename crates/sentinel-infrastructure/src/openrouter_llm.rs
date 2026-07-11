@@ -12,18 +12,14 @@
 //!   - `Haiku`  → `openai/gpt-5.4-nano`
 
 use anyhow::{Context, Result};
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::openrouter;
-use std::sync::Arc;
 
+use crate::llm_http::ChatClient;
 use sentinel_domain::ports::{LlmModel, LlmPort, LlmRequest};
 
 /// OpenRouter-backed LLM client implementing the domain `LlmPort`.
 #[derive(Clone)]
 pub struct OpenRouterLlm {
-    client: Arc<openrouter::Client>,
+    client: ChatClient,
 }
 
 impl OpenRouterLlm {
@@ -31,11 +27,9 @@ impl OpenRouterLlm {
     /// fail closed or disable LLM-backed behavior explicitly.
     pub fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-        let client = openrouter::Client::new(&key)
+        let client = ChatClient::openrouter(key)
             .map_err(|e| anyhow::anyhow!("failed to build OpenRouter client: {e}"))?;
-        Ok(Self {
-            client: Arc::new(client),
-        })
+        Ok(Self { client })
     }
 
     /// Map a domain `LlmModel` tier to its `OpenRouter` model ID.
@@ -64,22 +58,21 @@ impl LlmPort for OpenRouterLlm {
         request: LlmRequest,
     ) -> Result<String, sentinel_domain::port_errors::LlmError> {
         let model_id = Self::model_id(request.model);
-        // rig 0.38's OpenRouter request struct omits `max_tokens`, so inject it
-        // via the `#[serde(flatten)]`ed additional_params — without it a
-        // reasoning model (gpt-5.5-pro) runs unbounded and the call stalls.
-        // Floor at 16: OpenAI rejects `max_output_tokens < 16` with a 400
-        // (e.g. gpt-5.5-pro as LlmModel::Codex), which would error every call
-        // on that leg. 16 is OpenAI's documented minimum.
+        // Bound output tokens — without a cap a reasoning model (gpt-5.5-pro)
+        // runs unbounded and the call stalls. Floor at 16: OpenAI rejects
+        // `max_output_tokens < 16` with a 400 (e.g. gpt-5.5-pro as
+        // LlmModel::Codex), which would error every call on that leg. 16 is
+        // OpenAI's documented minimum. No system message — the whole prompt is
+        // the user turn (matches prior behavior).
         let max_tokens = request.max_tokens.max(16);
-        let agent = AgentBuilder::new(self.client.completion_model(model_id))
-            .temperature(0.0)
-            .additional_params(serde_json::json!({ "max_tokens": max_tokens }))
-            .build();
-        agent.prompt(request.prompt).await.map_err(|e| {
-            sentinel_domain::port_errors::LlmError::Backend(format!(
-                "OpenRouter completion ({model_id}): {e}"
-            ))
-        })
+        self.client
+            .complete(model_id, None, &request.prompt, Some(max_tokens), Some(0.0))
+            .await
+            .map_err(|e| {
+                sentinel_domain::port_errors::LlmError::Backend(format!(
+                    "OpenRouter completion ({model_id}): {e}"
+                ))
+            })
     }
 }
 

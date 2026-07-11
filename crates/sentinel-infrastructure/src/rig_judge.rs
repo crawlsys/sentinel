@@ -16,12 +16,10 @@
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+use crate::llm_http::ChatClient;
 
 use sentinel_domain::evidence::Evidence;
 use sentinel_domain::judge::{JudgeModel, JudgeVerdict};
@@ -74,19 +72,16 @@ impl JudgeProvider {
     /// Initialize from `OPENROUTER_API_KEY` env var.
     fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-        let client = Arc::new(
-            openrouter::Client::new(&key)
-                .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter judge client: {e}"))?,
-        );
+        let client = ChatClient::openrouter(key)
+            .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter judge client: {e}"))?;
         Ok(Self {
             prompt_fn: Arc::new(move |model_id, system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(&model_id))
-                        .preamble(&system)
-                        .build();
-                    let result: Result<String, _> = agent.prompt(user_msg).await;
-                    result.map_err(|e| anyhow::anyhow!("OpenRouter judge ({model_id}): {e}"))
+                    client
+                        .complete(&model_id, Some(&system), &user_msg, None, None)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("OpenRouter judge ({model_id}): {e}"))
                 })
             }),
         })

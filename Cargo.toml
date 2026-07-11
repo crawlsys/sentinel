@@ -66,14 +66,13 @@ hex = "0.4"
 
 # HTTP client (OpenRouter/A2-routed LLM calls + the sync legatus_client that
 # hooks use to POST escalations to the local sentinel daemon).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "blocking", "http2", "charset", "macos-system-configuration"] }
-
-# LLM framework (adversarial Codex judge + Opus skill router).
-# 0.38.1 (latest) — uses reqwest 0.13; OpenRouter gzip-compresses responses, so
-# sentinel-infrastructure declares reqwest 0.13 with gzip/brotli to unify the
-# decompression feature onto rig's instance (else the body read fails with
-# "error decoding response body" — the self-heal LLM hang on gpt-5.5-pro).
-rig-core = { version = "0.38", package = "rig-core" }
+# `gzip`: OpenRouter gzip-compresses chat responses; the house LLM client
+# (sentinel-infrastructure::llm_http) relies on reqwest auto-decoding them, else
+# the body read fails with "error decoding response body" (the old self-heal
+# hang on gpt-5.5-pro). This is the single HTTP+TLS stack for all LLM calls —
+# rig-core (which brought its own reqwest 0.13 + aws-lc-rs C build) was removed
+# 2026-07-11 in favor of the thin llm_http::ChatClient over this reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "blocking", "http2", "charset", "macos-system-configuration", "gzip"] }
 
 # HTTP server (local API)
 axum = { version = "0.8", features = ["ws"] }

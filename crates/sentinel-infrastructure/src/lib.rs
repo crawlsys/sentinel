@@ -46,6 +46,7 @@ pub mod linear_enforcer;
 pub mod linear_health_graph;
 pub mod linear_lookup;
 pub mod linear_pm_graph;
+pub mod llm_http;
 pub mod llm_scorer_runtime;
 pub mod mcp_proof_read_graph;
 pub mod mcp_transport;

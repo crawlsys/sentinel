@@ -6,12 +6,10 @@
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::openrouter;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+use crate::llm_http::ChatClient;
 
 /// Claude Opus 4.7 (latest) via `OpenRouter`
 const OPENROUTER_MODEL: &str = "anthropic/claude-opus-4-7";
@@ -43,19 +41,14 @@ impl RigClassifier {
 
     fn openrouter() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
-        let client = Arc::new(
-            openrouter::Client::new(&key)
-                .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter client: {e}"))?,
-        );
+        let client = ChatClient::openrouter(key)
+            .map_err(|e| anyhow::anyhow!("Failed to build OpenRouter client: {e}"))?;
         Ok(Self {
             prompt_fn: Arc::new(move |system, user_msg| {
                 let client = client.clone();
                 Box::pin(async move {
-                    let agent = AgentBuilder::new(client.completion_model(OPENROUTER_MODEL))
-                        .preamble(&system)
-                        .build();
-                    agent
-                        .prompt(user_msg)
+                    client
+                        .complete(OPENROUTER_MODEL, Some(&system), &user_msg, None, None)
                         .await
                         .map_err(|e| anyhow::anyhow!("OpenRouter classifier: {e}"))
                 })

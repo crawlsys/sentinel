@@ -40,10 +40,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::future::BoxFuture;
-use rig_core::agent::AgentBuilder;
-use rig_core::completion::Prompt;
-use rig_core::prelude::CompletionClient;
-use rig_core::providers::{openai, openrouter};
+use crate::llm_http::ChatClient;
 use tracing::warn;
 
 /// Output-token bound for OpenRouter scorer/auditor calls. A reasoning model
@@ -262,24 +259,24 @@ pub fn build_openrouter_prompt_fn(
     key: &str,
     scorer_label: &'static str,
 ) -> Result<(PromptFn, String)> {
-    let client = Arc::new(
-        openrouter::Client::new(key)
-            .map_err(|e| anyhow::anyhow!("failed to build OpenRouter client: {e}"))?,
-    );
+    let client = ChatClient::openrouter(key)
+        .map_err(|e| anyhow::anyhow!("failed to build OpenRouter client: {e}"))?;
     let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
         let client = client.clone();
         Box::pin(async move {
             // Bound output tokens — a reasoning model (gpt-5.5-pro) otherwise
             // runs unbounded and stalls; OpenAI also 400s `max_output_tokens`
             // below 16. See OPENROUTER_SCORER_MAX_TOKENS.
-            let agent = AgentBuilder::new(client.completion_model(&model_id))
-                .preamble(&system)
-                .additional_params(serde_json::json!({
-                    "max_tokens": OPENROUTER_SCORER_MAX_TOKENS,
-                }))
-                .build();
-            let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-            result.map_err(|e| anyhow::anyhow!("openrouter {scorer_label} ({model_id}): {e}"))
+            client
+                .complete(
+                    &model_id,
+                    Some(&system),
+                    &user_msg,
+                    Some(OPENROUTER_SCORER_MAX_TOKENS),
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("openrouter {scorer_label} ({model_id}): {e}"))
         })
     });
     Ok((prompt_fn, "openrouter".to_string()))
@@ -323,25 +320,18 @@ where
         },
     );
 
-    let client = Arc::new(
-        openai::Client::builder()
-            .api_key(&api_key)
-            .base_url(&base_url)
-            .build()
-            .map_err(|e| {
-                anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
-            })?,
-    );
+    let client = ChatClient::openai_compat(&base_url, &api_key).map_err(|e| {
+        anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
+    })?;
     let provider_for_closure = provider_prefix.clone();
     let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
         let client = client.clone();
         let provider = provider_for_closure.clone();
         Box::pin(async move {
-            let agent = AgentBuilder::new(client.completion_model(&model_id))
-                .preamble(&system)
-                .build();
-            let result: anyhow::Result<String, _> = agent.prompt(user_msg).await;
-            result.map_err(|e| anyhow::anyhow!("{provider} {scorer_label} ({model_id}): {e}"))
+            client
+                .complete(&model_id, Some(&system), &user_msg, None, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("{provider} {scorer_label} ({model_id}): {e}"))
         })
     });
     Ok((prompt_fn, provider_prefix))
