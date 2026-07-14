@@ -25,6 +25,11 @@ on:
     - cron: "17 9 * * *"
   workflow_dispatch:
 
+# Cancel in-progress runs on the same ref when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # Several tests intentionally mutate process-global env such as
@@ -33,13 +38,73 @@ env:
   RUST_TEST_THREADS: "1"
 
 jobs:
-  # Full workspace gate — build (incl. test targets), clippy with the workspace
-  # lint policy, and the whole test suite.
-  # Catches the failure modes a `-p <crate> --lib`-only run misses:
-  #   - a test target that does not COMPILE (we --all-targets build first)
-  #   - clippy regressions anywhere in the workspace
-  #   - a crate whose tests were never run because it wasn't named
-  workspace:
+  # ── fmt (independent, ~30s) ──────────────────────────────────────────
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkout LangGraph Rust path dependency
+        uses: actions/checkout@v7
+        with:
+          repository: legatus-ai/langgraph-python-to-rust
+          path: langgraph-python-to-rust
+          token: ${{ secrets.LEGATUS_CI_GITHUB_TOKEN }}
+
+      - name: Link LangGraph Rust sibling path
+        run: ln -sfn "$GITHUB_WORKSPACE/langgraph-python-to-rust" "$GITHUB_WORKSPACE/../langgraph-python-to-rust"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+  # ── security: audit + deny (independent, ~1min with pre-built binaries) ─
+  # cargo-deny resolves path dependencies to read their Cargo.toml, so the
+  # LangGraph checkout is required. No compilation or build cache is needed.
+  # Pre-built binaries via taiki-e/install-action replace 6 min of
+  # `cargo install --locked` with a ~10 s download.
+  security:
+    name: audit + deny
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkout LangGraph Rust path dependency
+        uses: actions/checkout@v7
+        with:
+          repository: legatus-ai/langgraph-python-to-rust
+          path: langgraph-python-to-rust
+          token: ${{ secrets.LEGATUS_CI_GITHUB_TOKEN }}
+
+      - name: Link LangGraph Rust sibling path
+        run: ln -sfn "$GITHUB_WORKSPACE/langgraph-python-to-rust" "$GITHUB_WORKSPACE/../langgraph-python-to-rust"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit + cargo-deny (pre-built)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.0,cargo-deny@0.19.8
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo deny check
+        run: cargo deny check --hide-inclusion-graph
+
+  # ── build + clippy + test (critical path, ~11min) ────────────────────
+  # Build every target (lib, bins, tests, examples) so a test module
+  # that fails to compile is a hard failure here — the exact gap that
+  # let a non-compiling test suite ship "green" before.
+  build-test:
     name: build + clippy + test (workspace)
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
@@ -59,35 +124,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
-      - name: Install security tooling
-        run: |
-          cargo install --locked cargo-audit --version 0.22.0
-          cargo install --locked cargo-deny --version 0.19.8
-
-      - name: cargo fmt --all --check
-        run: cargo fmt --all --check
-
-      - name: cargo audit
-        run: cargo audit
-
-      - name: cargo deny check
-        run: cargo deny check --hide-inclusion-graph
-
-      # Build every target (lib, bins, tests, examples) so a test module
-      # that fails to compile is a hard failure here — the exact gap that
-      # let a non-compiling test suite ship "green" before. This is the
-      # real "non-compiling test suite" guard.
       - name: cargo build --workspace --all-targets
         run: cargo build --workspace --all-targets
 
-      # Clippy at the repo's maintained bar: `--workspace` (NOT --all-targets).
-      # The workspace lint policy carries the project-specific style allowances;
-      # the build step above already guarantees test targets COMPILE.
       - name: cargo clippy --workspace -D warnings
         run: cargo clippy --workspace -- -D warnings
 
@@ -97,12 +141,6 @@ jobs:
           mkdir -p target
           cargo test --workspace -- --test-threads=1 | tee target/workspace-test.log
 
-      - name: enterprise LangGraph decision graph guard
-        run: cargo test -p sentinel-infrastructure --test enterprise_langgraph_decision_graphs
-
-      - name: enterprise LangGraph runtime feature guard
-        run: cargo test -p sentinel --test enterprise_langgraph_features
-
       - name: enterprise LangGraph MCP checkpoint evidence guard
         run: |
           set -euo pipefail
@@ -111,6 +149,47 @@ jobs:
             echo "workspace test log did not show ${test_name} passing" >&2
             exit 1
           fi
+
+  # ── enterprise guards (2 matrix jobs, parallel with build-test) ──────
+  # These compile only their specific package + test target, not the full
+  # workspace. With rust-cache from a prior run they finish in ~2 min;
+  # on a cold cache they compile from scratch in parallel (~7-10 min),
+  # still well under the build-test critical path.
+  enterprise-guards:
+    name: enterprise guard – ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CI_ENABLED == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: decision graph
+            package: sentinel-infrastructure
+            test: enterprise_langgraph_decision_graphs
+          - name: runtime features
+            package: sentinel
+            test: enterprise_langgraph_features
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkout LangGraph Rust path dependency
+        uses: actions/checkout@v7
+        with:
+          repository: legatus-ai/langgraph-python-to-rust
+          path: langgraph-python-to-rust
+          token: ${{ secrets.LEGATUS_CI_GITHUB_TOKEN }}
+
+      - name: Link LangGraph Rust sibling path
+        run: ln -sfn "$GITHUB_WORKSPACE/langgraph-python-to-rust" "$GITHUB_WORKSPACE/../langgraph-python-to-rust"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test – ${{ matrix.name }}
+        run: cargo test -p ${{ matrix.package }} --test ${{ matrix.test }}
 
   # NOTE: there are currently NO detached-workspace crates on main (the only
   # [workspace] table is the repo root). If a `tools/*` crate with its own
