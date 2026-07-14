@@ -888,10 +888,7 @@ mod tests {
             !ctx.contains("auth-team"),
             "deprecated team_name must not appear in the completion gate context"
         );
-        assert!(
-            !ctx.contains("team:"),
-            "the (team: …) clause must be gone"
-        );
+        assert!(!ctx.contains("team:"), "the (team: …) clause must be gone");
     }
 
     #[test]

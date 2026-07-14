@@ -83,9 +83,15 @@ impl ChatClient {
     ) -> Result<String> {
         let mut messages: Vec<Message<'_>> = Vec::with_capacity(2);
         if let Some(sys) = system {
-            messages.push(Message { role: "system", content: sys });
+            messages.push(Message {
+                role: "system",
+                content: sys,
+            });
         }
-        messages.push(Message { role: "user", content: user });
+        messages.push(Message {
+            role: "user",
+            content: user,
+        });
 
         let mut body = serde_json::json!({ "model": model, "messages": messages });
         if let Some(mt) = max_tokens {
@@ -182,9 +188,15 @@ mod tests {
         // mirror complete()'s body assembly
         let system: Option<&str> = None;
         if let Some(sys) = system {
-            msgs.push(Message { role: "system", content: sys });
+            msgs.push(Message {
+                role: "system",
+                content: sys,
+            });
         }
-        msgs.push(Message { role: "user", content: "hi" });
+        msgs.push(Message {
+            role: "user",
+            content: "hi",
+        });
         let mut body = serde_json::json!({ "model": "m", "messages": msgs });
         body["max_tokens"] = serde_json::json!(16u32);
         let arr = body["messages"].as_array().unwrap();
@@ -198,9 +210,15 @@ mod tests {
         let mut msgs: Vec<Message<'_>> = Vec::new();
         let system: Option<&str> = Some("you are a judge");
         if let Some(sys) = system {
-            msgs.push(Message { role: "system", content: sys });
+            msgs.push(Message {
+                role: "system",
+                content: sys,
+            });
         }
-        msgs.push(Message { role: "user", content: "verdict?" });
+        msgs.push(Message {
+            role: "user",
+            content: "verdict?",
+        });
         let body = serde_json::json!({ "model": "m", "messages": msgs });
         let arr = body["messages"].as_array().unwrap();
         assert_eq!(arr.len(), 2);

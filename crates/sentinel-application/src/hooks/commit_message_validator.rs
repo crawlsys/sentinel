@@ -801,11 +801,7 @@ mod tests {
         let fs = TestHomeFs::new(tmp.path());
 
         // Seed the CANONICAL location with a firefly config carrying prefixes.
-        let canonical = tmp
-            .path()
-            .join(".claude")
-            .join("sentinel")
-            .join("projects");
+        let canonical = tmp.path().join(".claude").join("sentinel").join("projects");
         std::fs::create_dir_all(&canonical).unwrap();
         std::fs::write(
             canonical.join("firefly-pro.md"),

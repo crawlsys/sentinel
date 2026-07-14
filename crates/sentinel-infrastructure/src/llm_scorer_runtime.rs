@@ -38,9 +38,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::llm_http::ChatClient;
 use anyhow::Result;
 use futures::future::BoxFuture;
-use crate::llm_http::ChatClient;
 use tracing::warn;
 
 /// Output-token bound for OpenRouter scorer/auditor calls. A reasoning model
@@ -320,9 +320,8 @@ where
         },
     );
 
-    let client = ChatClient::openai_compat(&base_url, &api_key).map_err(|e| {
-        anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}")
-    })?;
+    let client = ChatClient::openai_compat(&base_url, &api_key)
+        .map_err(|e| anyhow::anyhow!("failed to build ollama client (base_url={base_url}): {e}"))?;
     let provider_for_closure = provider_prefix.clone();
     let prompt_fn: PromptFn = Arc::new(move |model_id, system, user_msg| {
         let client = client.clone();

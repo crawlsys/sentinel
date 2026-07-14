@@ -771,7 +771,9 @@ mod tests {
             "a stale cross-session mirror must not be rehydrated"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("tasks.json")).unwrap().trim(),
+            std::fs::read_to_string(dir.join("tasks.json"))
+                .unwrap()
+                .trim(),
             "[]",
             "the stale mirror must be truncated so it stops re-injecting/rendering"
         );

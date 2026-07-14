@@ -464,10 +464,7 @@ fn truncate_subject(subject: &str) -> String {
 /// there is nothing active to show. Pure so it can be unit-tested directly.
 fn render_block(tasks: &[TaskRow], project_name: &str) -> Option<String> {
     let pending = tasks.iter().filter(|t| t.status == "pending").count();
-    let in_progress = tasks
-        .iter()
-        .filter(|t| t.status == "in_progress")
-        .count();
+    let in_progress = tasks.iter().filter(|t| t.status == "in_progress").count();
     let done = tasks.iter().filter(|t| t.status == "completed").count();
 
     // In-progress first (what you're doing now), then pending (what's next).
@@ -612,7 +609,10 @@ mod tests {
         // Ordering: the in_progress line precedes the pending line.
         let ip = block.find("🔄 #33").unwrap();
         let pd = block.find("⏳ #2").unwrap();
-        assert!(ip < pd, "in_progress must be listed before pending: {block}");
+        assert!(
+            ip < pd,
+            "in_progress must be listed before pending: {block}"
+        );
     }
 
     #[test]
@@ -849,12 +849,18 @@ mod tests {
             ]
         }));
         let block = render_linear_block(&cache, "firefly-pro").expect("active issues → block");
-        assert!(block.contains("📌 [Linear] Firefly Pro Beta — 5 active (1 in progress)"), "{block}");
+        assert!(
+            block.contains("📌 [Linear] Firefly Pro Beta — 5 active (1 in progress)"),
+            "{block}"
+        );
         assert!(block.contains("🔄 FP-1 in flight"), "{block}");
         assert!(block.contains("⏳ FP-2 queued"), "{block}");
         assert!(block.contains("🗄️ FP-3 later"), "{block}");
         assert!(block.contains("🔺 FP-4 needs triage"), "{block}");
-        assert!(block.contains("• FP-5 unknown non-terminal — shown"), "{block}");
+        assert!(
+            block.contains("• FP-5 unknown non-terminal — shown"),
+            "{block}"
+        );
         assert!(!block.contains("FP-6"), "completed hidden: {block}");
         assert!(!block.contains("FP-7"), "canceled hidden: {block}");
     }
@@ -875,7 +881,10 @@ mod tests {
         let u = block.find("U-1").unwrap();
         let b = block.find("B-1").unwrap();
         let t = block.find("T-1").unwrap();
-        assert!(s < u && u < b && b < t, "started → todo → backlog → triage: {block}");
+        assert!(
+            s < u && u < b && b < t,
+            "started → todo → backlog → triage: {block}"
+        );
     }
 
     #[test]
@@ -885,7 +894,10 @@ mod tests {
             "initiative": "Init",
             "issues": [issue("X-1", "completed", "done"), issue("X-2", "canceled", "gone")]
         }));
-        assert!(render_linear_block(&done, "p").is_none(), "all-inactive → silent");
+        assert!(
+            render_linear_block(&done, "p").is_none(),
+            "all-inactive → silent"
+        );
         // Empty issue list.
         let empty = cache_json(serde_json::json!({"initiative": "Init", "issues": []}));
         assert!(render_linear_block(&empty, "p").is_none(), "empty → silent");
@@ -901,8 +913,14 @@ mod tests {
             }]
         }));
         let block = render_linear_block(&cache, "firefly-pro").expect("block");
-        assert!(block.contains("📌 [Linear] firefly-pro —"), "header fallback: {block}");
-        assert!(block.contains("🔄 FP-9 sized work (5)"), "estimate hint: {block}");
+        assert!(
+            block.contains("📌 [Linear] firefly-pro —"),
+            "header fallback: {block}"
+        );
+        assert!(
+            block.contains("🔄 FP-9 sized work (5)"),
+            "estimate hint: {block}"
+        );
     }
 
     #[test]
@@ -955,7 +973,9 @@ mod tests {
         .unwrap();
         let cache = serde_json::json!({"initiative": "Firefly Pro Beta", "issues": cache_issues});
         std::fs::write(
-            tmp.join(".claude").join("sentinel").join("linear-assigned.json"),
+            tmp.join(".claude")
+                .join("sentinel")
+                .join("linear-assigned.json"),
             serde_json::to_string(&cache).unwrap(),
         )
         .unwrap();
@@ -993,10 +1013,16 @@ mod tests {
             .and_then(|h| h.additional_context)
             .expect("both blocks must inject");
         assert!(s.contains("📋 [Tasks]"), "task block present: {s}");
-        assert!(s.contains("📌 [Linear] Firefly Pro Beta"), "linear block present: {s}");
+        assert!(
+            s.contains("📌 [Linear] Firefly Pro Beta"),
+            "linear block present: {s}"
+        );
         assert!(s.contains("🔄 FPCRM-622 auto move deal"), "{s}");
         // Task block must precede the Linear block.
-        assert!(s.find("📋 [Tasks]").unwrap() < s.find("📌 [Linear]").unwrap(), "{s}");
+        assert!(
+            s.find("📋 [Tasks]").unwrap() < s.find("📌 [Linear]").unwrap(),
+            "{s}"
+        );
     }
 
     #[test]

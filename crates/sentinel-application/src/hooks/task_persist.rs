@@ -1782,7 +1782,11 @@ mod tests {
         std::fs::write(dir.join("1.json"), v.to_string()).unwrap();
 
         decorate_native_task_subjects(&fs, &dir);
-        assert_eq!(subject_of(&dir, "1.json"), "🔄 Do X", "re-glyphed on change");
+        assert_eq!(
+            subject_of(&dir, "1.json"),
+            "🔄 Do X",
+            "re-glyphed on change"
+        );
     }
 
     #[test]
@@ -1831,13 +1835,18 @@ mod tests {
 
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("9.json")).unwrap()).unwrap();
-        assert_eq!(v["subject"], "🔄 Keep fields");
+        // in_progress (🔄) + blocked marker (🚫, since blockedBy is non-empty),
+        // per the richer-decoration feature (f7f610ed). Test expectation was stale.
+        assert_eq!(v["subject"], "🔄🚫 Keep fields");
         // Every other field round-trips untouched.
         assert_eq!(v["id"], "9");
         assert_eq!(v["description"], "long desc");
         assert_eq!(v["activeForm"], "Keeping fields");
         assert_eq!(v["blockedBy"], serde_json::json!(["3"]));
-        assert_eq!(v["checklist"], serde_json::json!([{"text":"a","done":false}]));
+        assert_eq!(
+            v["checklist"],
+            serde_json::json!([{"text":"a","done":false}])
+        );
     }
 
     #[test]

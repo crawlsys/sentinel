@@ -91,7 +91,9 @@ pub fn strip_decoration(subject: &str) -> &str {
     loop {
         let before = s;
         // Leading decoration emoji (status + priority colours).
-        s = s.trim_start_matches(|c| DECOR_EMOJI.contains(&c)).trim_start();
+        s = s
+            .trim_start_matches(|c| DECOR_EMOJI.contains(&c))
+            .trim_start();
         // Leading [Pn] priority token.
         if let Some(rest) = s.strip_prefix('[') {
             if let Some(close) = rest.find(']') {
@@ -248,7 +250,13 @@ mod tests {
     fn decorate_then_strip_round_trips_to_clean() {
         // The core native-decorator invariant: strip(glyph + clean) == clean,
         // for every status, so re-decoration never accretes.
-        for status in ["in_progress", "pending", "completed", "blocked", "cancelled"] {
+        for status in [
+            "in_progress",
+            "pending",
+            "completed",
+            "blocked",
+            "cancelled",
+        ] {
             let glyph = status_glyph(status).unwrap();
             let decorated = format!("{glyph} Do the work");
             assert_eq!(strip_decoration(&decorated), "Do the work", "{status}");
@@ -268,7 +276,12 @@ mod tests {
         assert_eq!(priority_glyph(""), None);
         // Forward/back consistency: the glyph priority_glyph emits maps back to
         // the same Pn via priority_from_decoration.
-        for (word, pn) in [("urgent", "P0"), ("high", "P1"), ("medium", "P2"), ("low", "P3")] {
+        for (word, pn) in [
+            ("urgent", "P0"),
+            ("high", "P1"),
+            ("medium", "P2"),
+            ("low", "P3"),
+        ] {
             let g = priority_glyph(word).unwrap();
             assert_eq!(priority_from_decoration(g).as_deref(), Some(pn), "{word}");
         }
@@ -277,7 +290,10 @@ mod tests {
     #[test]
     fn decorate_subject_composes_status_priority_blocked() {
         // status only
-        assert_eq!(decorate_subject("Do it", "in_progress", None, false), "🔄 Do it");
+        assert_eq!(
+            decorate_subject("Do it", "in_progress", None, false),
+            "🔄 Do it"
+        );
         // status + priority
         assert_eq!(
             decorate_subject("Do it", "pending", Some("high"), false),

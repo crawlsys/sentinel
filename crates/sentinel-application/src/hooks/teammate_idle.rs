@@ -150,10 +150,7 @@ mod tests {
             !ctx.contains("my-project"),
             "deprecated team_name must not appear in the idle context"
         );
-        assert!(
-            !ctx.contains("team:"),
-            "the (team: …) clause must be gone"
-        );
+        assert!(!ctx.contains("team:"), "the (team: …) clause must be gone");
     }
 
     #[test]

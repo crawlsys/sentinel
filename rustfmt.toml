@@ -1,4 +1,8 @@
 newline_style = "Unix"
-group_imports = "StdExternalCrate"
-imports_granularity = "Crate"
 max_width = 100
+# NOTE: `group_imports` / `imports_granularity` are nightly-only rustfmt options.
+# rust-toolchain.toml deliberately pins stable (1.96 → rustfmt 1.9.0-stable), which
+# silently IGNORES them — so `cargo fmt --check` in CI drifted (the tree was never
+# actually formatted the way the config asked). Removed so the config matches the
+# stable pin. If import-grouping is wanted, add a dedicated `cargo +nightly fmt`
+# CI job rather than requesting nightly behavior on a stable pin.

@@ -555,19 +555,25 @@ mod tests {
             &self,
             _: &str,
         ) -> Result<bool, sentinel_domain::port_errors::GitError> {
-            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+            Err(sentinel_domain::port_errors::GitError::Backend(
+                "git unavailable".into(),
+            ))
         }
         fn changed_files(
             &self,
             _: &str,
         ) -> Result<Vec<String>, sentinel_domain::port_errors::GitError> {
-            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+            Err(sentinel_domain::port_errors::GitError::Backend(
+                "git unavailable".into(),
+            ))
         }
         fn current_branch(
             &self,
             _: &str,
         ) -> Result<String, sentinel_domain::port_errors::GitError> {
-            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+            Err(sentinel_domain::port_errors::GitError::Backend(
+                "git unavailable".into(),
+            ))
         }
         fn is_worktree(&self, _: &str) -> bool {
             false
@@ -576,7 +582,9 @@ mod tests {
             &self,
             _: &str,
         ) -> Result<bool, sentinel_domain::port_errors::GitError> {
-            Err(sentinel_domain::port_errors::GitError::Backend("git unavailable".into()))
+            Err(sentinel_domain::port_errors::GitError::Backend(
+                "git unavailable".into(),
+            ))
         }
         fn repo_root(&self, _: &str) -> Option<String> {
             Some("/repo".to_string())

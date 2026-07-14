@@ -282,13 +282,17 @@ mod tests {
         std::env::remove_var(KILL_SWITCH_ENV);
         let tmp = setup(&[("1.json", "pending"), ("2.json", "completed")]);
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         let input = input_for("Edit", tmp.path(), Some(SID));
 
         assert_eq!(
             evaluate(&input, &ctx),
-            GateDecision::Block { tool: "Edit".into() },
+            GateDecision::Block {
+                tool: "Edit".into()
+            },
             "tasks exist but none in_progress → block"
         );
         let out = process(&input, &ctx);
@@ -297,7 +301,10 @@ mod tests {
             .hook_specific_output
             .and_then(|h| h.permission_decision_reason)
             .expect("deny reason present");
-        assert!(reason.starts_with("[Sentinel-Authority] "), "authority prefix: {reason}");
+        assert!(
+            reason.starts_with("[Sentinel-Authority] "),
+            "authority prefix: {reason}"
+        );
         assert!(reason.contains("TaskCreate"), "actionable: {reason}");
         assert!(reason.contains("ASK the operator"), "supportive: {reason}");
     }
@@ -308,7 +315,9 @@ mod tests {
         std::env::remove_var(KILL_SWITCH_ENV);
         let tmp = setup(&[("1.json", "in_progress")]);
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         let input = input_for("Write", tmp.path(), Some(SID));
         assert_eq!(evaluate(&input, &ctx), GateDecision::Allow);
@@ -320,7 +329,9 @@ mod tests {
         std::env::set_var(KILL_SWITCH_ENV, "OFF");
         let tmp = setup(&[("1.json", "pending")]);
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         let input = input_for("Edit", tmp.path(), Some(SID));
         assert_eq!(evaluate(&input, &ctx), GateDecision::Allow, "off → allow");
@@ -333,7 +344,9 @@ mod tests {
         std::env::remove_var(KILL_SWITCH_ENV);
         let tmp = setup(&[("1.json", "pending")]);
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         for tool in ["Read", "TaskCreate", "TaskUpdate", "Bash", "Grep"] {
             let input = input_for(tool, tmp.path(), Some(SID));
@@ -350,7 +363,11 @@ mod tests {
         // Default StubGit → repo_root None → not in a repo → allow.
         let ctx = stub_ctx_with_fs(&fs);
         let input = input_for("Edit", tmp.path(), Some(SID));
-        assert_eq!(evaluate(&input, &ctx), GateDecision::Allow, "non-repo → allow");
+        assert_eq!(
+            evaluate(&input, &ctx),
+            GateDecision::Allow,
+            "non-repo → allow"
+        );
     }
 
     #[test]
@@ -360,10 +377,16 @@ mod tests {
         // Home tmp but NO task dir created → is_dir false → allow.
         let tmp = tempfile::tempdir().unwrap();
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         let input = input_for("Edit", tmp.path(), Some("no-such-sess"));
-        assert_eq!(evaluate(&input, &ctx), GateDecision::Allow, "no dir → allow");
+        assert_eq!(
+            evaluate(&input, &ctx),
+            GateDecision::Allow,
+            "no dir → allow"
+        );
     }
 
     #[test]
@@ -372,10 +395,16 @@ mod tests {
         std::env::remove_var(KILL_SWITCH_ENV);
         let tmp = setup(&[("1.json", "pending")]);
         let fs = TestHomeFs::new(tmp.path());
-        let git = RepoGit { root: tmp.path().to_string_lossy().to_string() };
+        let git = RepoGit {
+            root: tmp.path().to_string_lossy().to_string(),
+        };
         let ctx = ctx_with(&fs, &git);
         let input = input_for("Edit", tmp.path(), None);
-        assert_eq!(evaluate(&input, &ctx), GateDecision::Allow, "no sid → allow");
+        assert_eq!(
+            evaluate(&input, &ctx),
+            GateDecision::Allow,
+            "no sid → allow"
+        );
     }
 
     #[test]
