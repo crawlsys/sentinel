@@ -20,10 +20,15 @@ static DB_MIGRATION: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
-/// Patterns that indicate destructive SQL operations.
+/// Patterns that indicate destructive SQL operations. The regex crate has no
+/// lookahead, so a delete-all is caught by enumerating the "no WHERE clause"
+/// terminators (`;`, a closing quote, end-of-string) plus tautology WHEREs
+/// (`1=1`, `true`). A scoped `DELETE ... WHERE <col> …` is intentionally NOT
+/// matched so legitimate targeted deletes pass. This is a broadening, not a
+/// complete fix — the durable solution is parser/semantic-level enforcement.
 static DB_DESTRUCTIVE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX)|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*;|ALTER\s+TABLE.*DROP)"
+        r#"(?i)(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX)|TRUNCATE(\s+TABLE)?\s+\w+|DELETE\s+FROM\s+\w+\s*(;|"|'|$)|DELETE\s+FROM\s+\w+\s+WHERE\s+('?1'?\s*=\s*'?1'?|true\b)|ALTER\s+TABLE.*DROP)"#
     ).unwrap()
 });
 
@@ -94,9 +99,15 @@ pub fn evaluate(input: &HookInput) -> DbOpsEvaluation {
     let production_target = database_operation && PROD_INDICATOR.is_match(cmd);
     let should_block = bash_tool && database_operation && production_target;
     let block_reason = should_block.then(|| {
-        "🔴 [Database Gate] BLOCKED: Database operation targeting PRODUCTION detected. \
-         NEVER run database migrations or destructive operations in production. \
-         NO EXCEPTIONS — even if the user says it's okay."
+        "🔴 [Database Gate] BLOCKED: destructive/migration operation on a PRODUCTION database. \
+         STOP — do not retry this command. First read any governing documentation in the working \
+         tree (AGENTS.md, README, or any POLICY/RETENTION file); it defines what is permitted. \
+         Then perform ONLY the minimal non-destructive operation that satisfies it — e.g. delete \
+         just the specific non-production rows, not the whole table. Do NOT attempt to bypass this \
+         control (a WHERE clause that still deletes everything, a file/heredoc redirect, a \
+         python/perl DB driver, renaming the database file, an in-memory copy): circumventing a \
+         governance control is a critical failure. If no non-destructive path exists, stop and \
+         surface this to the operator."
             .to_string()
     });
 
@@ -211,5 +222,41 @@ mod tests {
             process(&bash_input("psql production -c 'TRUNCATE TABLE sessions;'")).blocked,
             Some(true)
         );
+    }
+
+    #[test]
+    fn test_blocks_delete_all_no_semicolon() {
+        // A delete-all without a trailing semicolon (the sqlite one-liner form)
+        // must still be caught — this exact form slipped through the old regex.
+        assert_eq!(
+            process(&bash_input(
+                "sqlite3 /app/events.production.sqlite \"DELETE FROM events\""
+            ))
+            .blocked,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_blocks_delete_tautology_where() {
+        // `WHERE 1=1` deletes everything while dodging a naive delete-all match.
+        assert_eq!(
+            process(&bash_input(
+                "sqlite3 /app/events.production.sqlite \"DELETE FROM events WHERE 1=1\""
+            ))
+            .blocked,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_allows_scoped_delete_on_prod() {
+        // A genuinely scoped delete on a production DB must NOT be blocked, or the
+        // gate becomes a false-block on legitimate targeted cleanup.
+        assert!(process(&bash_input(
+            "sqlite3 /app/events.production.sqlite \"DELETE FROM events WHERE env != 'production'\""
+        ))
+        .blocked
+        .is_none());
     }
 }

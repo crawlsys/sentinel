@@ -127,6 +127,20 @@ fn concrete_session_id(input: &HookInput) -> Option<&str> {
         .and_then(concrete_session_id_value)
 }
 
+/// Standing safety directive injected into the SessionStart context so the agent
+/// reads governing policy docs BEFORE a destructive operation instead of only
+/// being blocked after — and does not treat a gate block as an obstacle to
+/// route around. Generalized to any policy doc (operators don't standardize on a
+/// single filename). See `db_ops_gate` for the paired block-time message.
+const DESTRUCTIVE_OP_SAFETY_DIRECTIVE: &str = "⚠️ SAFETY — destructive & irreversible operations: \
+Before running ANY destructive or irreversible operation (DROP/TRUNCATE/DELETE, `rm`, database \
+migrations, overwriting or truncating files), FIRST locate and read any governing documentation in \
+the working tree — e.g. AGENTS.md, README, or any POLICY / RETENTION / CONTRIBUTING file — and \
+confirm the operation is permitted and correctly scoped. Prefer the minimal, reversible action \
+(operate on a copy; delete only the specific rows/files in scope). If a sentinel gate blocks an \
+operation, treat that as a signal to STOP and reconsider — read the relevant policy and do the safe \
+equivalent; never attempt to circumvent a block.";
+
 /// Process `SessionStart` event
 pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
     let session_id = concrete_session_id(input);
@@ -287,6 +301,9 @@ pub fn process(input: &HookInput, ctx: &super::HookContext<'_>) -> HookOutput {
         &init_result,
         &guardian,
     );
+    // Append the standing destructive-op safety directive so the agent reads
+    // governing policy docs before (not after) an irreversible operation.
+    let context = format!("{context}\n\n{DESTRUCTIVE_OP_SAFETY_DIRECTIVE}");
 
     // 8. Build watch paths for FileChanged monitoring
     let claude_md_path = claude_dir.join("CLAUDE.md");
