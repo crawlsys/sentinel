@@ -24,7 +24,7 @@
 //! signature validation (same scheme as hygiene + verification overrides).
 //! Auth0 mutations are NOT subject to this override.
 
-use sentinel_domain::events::{HookInput, HookOutput};
+use sentinel_domain::events::{HookInput, HookOutput, PermissionDecision};
 
 use super::{hygiene_override, EnvPort, HookContext};
 
@@ -322,6 +322,16 @@ pub fn output_from_evaluation(evaluation: &DopplerAuth0Evaluation) -> HookOutput
                 .unwrap_or_else(|| "Doppler/Auth0 gate blocked without a reason".to_string()),
         );
     }
+    // Autopilot downgrade: without SENTINEL_AUTOPILOT this mutation would
+    // have stopped and escalated to the operator ("ask the user first").
+    // Tag the effective allow with the raw ask-class verdict so the ledger
+    // records outcome=allow, raw_outcome=ask instead of losing the firing.
+    if matches!(
+        evaluation.decision,
+        DopplerAuth0Decision::AllowAutopilotNonProd
+    ) {
+        return HookOutput::allow().with_raw_permission_decision(PermissionDecision::Ask);
+    }
     HookOutput::allow()
 }
 
@@ -514,6 +524,21 @@ mod tests {
             out.blocked.is_none(),
             "autopilot + non-prod config should allow doppler mutation"
         );
+        assert_eq!(
+            out.raw_permission_decision,
+            Some(PermissionDecision::Ask),
+            "autopilot downgrade must preserve the raw ask-class verdict for the ledger"
+        );
+    }
+
+    #[test]
+    fn test_non_downgraded_outputs_carry_no_raw_permission_decision() {
+        // Read-only op (no downgrade in play): raw verdict must be untagged
+        // so the ledger records raw_outcome == outcome.
+        let ctx = ctx_autopilot_on();
+        let out = process(&input_with_tool("mcp__doppler__list_projects"), &ctx);
+        assert!(out.blocked.is_none());
+        assert_eq!(out.raw_permission_decision, None);
     }
 
     #[test]

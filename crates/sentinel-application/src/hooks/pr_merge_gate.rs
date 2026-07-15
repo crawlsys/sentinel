@@ -14,7 +14,7 @@
 //! requires in-conversation confirmation before hitting merge — this just
 //! prevents the harness-level dialog in autopilot mode.
 
-use sentinel_domain::events::{HookEvent, HookInput, HookOutput};
+use sentinel_domain::events::{HookEvent, HookInput, HookOutput, PermissionDecision};
 
 use super::EnvPort;
 
@@ -124,12 +124,16 @@ pub fn output_from_evaluation(evaluation: &PrMergeEvaluation) -> HookOutput {
         PrMergeDecision::Ask => HookOutput::ask(
             "[PR Merge Gate] Claude is attempting to merge/close a PR. Approve to proceed.",
         ),
+        // Autopilot downgrade of the ask verdict: tag the effective output
+        // with the raw `ask` so the ledger records raw_outcome=ask and the
+        // "would have escalated to a human" firing stays measurable.
         PrMergeDecision::AllowAutopilotReminder => HookOutput::inject_context(
             HookEvent::PreToolUse,
             "[PR Merge Gate] AUTOPILOT: allowing `gh pr merge/close` without a \
              Yes/No dialog. Verify the in-conversation confirmation was given before \
              proceeding.",
-        ),
+        )
+        .with_raw_permission_decision(PermissionDecision::Ask),
     }
 }
 
@@ -214,6 +218,23 @@ mod tests {
         assert!(process(&HookInput::default(), &no_autopilot())
             .blocked
             .is_none());
+    }
+
+    #[test]
+    fn test_autopilot_downgrade_preserves_raw_ask_verdict() {
+        // The downgrade must tag the effective output with the raw ask so
+        // the ledger records raw_outcome=ask alongside the effective outcome.
+        let out = process(&bash_input("gh pr merge 123 --squash"), &autopilot_on());
+        assert_eq!(out.raw_permission_decision, Some(PermissionDecision::Ask));
+
+        // Outside autopilot the verdict is a NATIVE ask, not a downgrade —
+        // no raw tag (the ledger canonicalizes native asks separately).
+        let out = process(&bash_input("gh pr merge 123 --squash"), &autopilot_off());
+        assert_eq!(out.raw_permission_decision, None);
+
+        // Non-merge commands carry no raw tag.
+        let out = process(&bash_input("git push"), &autopilot_on());
+        assert_eq!(out.raw_permission_decision, None);
     }
 
     #[test]

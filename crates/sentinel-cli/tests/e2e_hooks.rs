@@ -558,6 +558,91 @@ fn pr_merge_gate_asks_confirmation_when_not_autopilot() {
 }
 
 #[test]
+fn autopilot_downgraded_ask_writes_raw_outcome_ask_to_ledger() {
+    // Under SENTINEL_AUTOPILOT=1 a non-prod Doppler mutation is downgraded
+    // from its ask-class "stop and ask the user first" verdict to an
+    // effective allow BEFORE the ledger row is classified — which used to
+    // erase the "would have escalated to a human" signal entirely. The
+    // ledger row must now preserve both: `outcome=allow` (effective) and
+    // `raw_outcome=ask` (pre-downgrade).
+    let mut t = HookTest::new();
+    t.env("SENTINEL_AUTOPILOT", "1");
+    let res = t.run(
+        "PreToolUse",
+        json!({"tool_name":"mcp__doppler__set_secret",
+               "tool_input":{"project":"demo-app","config":"dev","name":"API_KEY"}}),
+    );
+    // The doppler gate itself must not surface a deny for a non-prod
+    // mutation in autopilot (other gates may still merge their own verdicts,
+    // so assert on the gate's reason, not the merged decision).
+    let merged_reason = res
+        .json
+        .pointer("/hookSpecificOutput/permissionDecisionReason")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !merged_reason.contains("[Doppler/Auth0 Gate]"),
+        "doppler gate must not block non-prod mutation in autopilot: {}",
+        res.json
+    );
+
+    let ledger = t
+        .claude_dir()
+        .join("sentinel")
+        .join("metrics")
+        .join("hook-invocations.jsonl");
+    let text = std::fs::read_to_string(&ledger).expect("hook-invocations.jsonl written");
+    let row = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|r| r["hook"] == "doppler_auth0_gate" && r["event"] == "PreToolUse")
+        .expect("doppler_auth0_gate ledger row present");
+    assert_eq!(
+        row["outcome"], "allow",
+        "effective outcome must stay allow under autopilot: {row}"
+    );
+    assert_eq!(
+        row["raw_outcome"], "ask",
+        "pre-downgrade ask-class verdict must be preserved as raw_outcome: {row}"
+    );
+}
+
+#[test]
+fn non_downgraded_ledger_rows_carry_raw_outcome_equal_to_outcome() {
+    // When no downgrade happened, every ledger row must satisfy
+    // raw_outcome == outcome (the field is always written).
+    let t = HookTest::new();
+    let res = t.run(
+        "PreToolUse",
+        json!({"tool_name":"Bash","tool_input":{"command":"git status --short"},
+               "cwd": t.home_path().to_string_lossy()}),
+    );
+    assert!(
+        res.json.pointer("/hookSpecificOutput/permissionDecision") != Some(&json!("deny")),
+        "read-only bash should not be denied: {}",
+        res.json
+    );
+    let ledger = t
+        .claude_dir()
+        .join("sentinel")
+        .join("metrics")
+        .join("hook-invocations.jsonl");
+    let text = std::fs::read_to_string(&ledger).expect("hook-invocations.jsonl written");
+    let mut rows = 0;
+    for row in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        rows += 1;
+        assert_eq!(
+            row["raw_outcome"], row["outcome"],
+            "no downgrade fired, raw_outcome must equal outcome: {row}"
+        );
+    }
+    assert!(rows > 0, "expected at least one ledger row");
+}
+
+#[test]
 fn readonly_bash_in_real_repo_is_allowed() {
     // A read-only Bash (`git status`) in a real repo must NOT be blocked: it's
     // not a mutating tool, so the task_decomposition_gate allows it and no

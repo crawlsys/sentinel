@@ -51,6 +51,30 @@ pub enum PermissionDecision {
     Defer,
 }
 
+impl PermissionDecision {
+    /// Canonical lowercase label (matches the serde wire format).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Ask => "ask",
+            Self::Defer => "defer",
+        }
+    }
+
+    /// Merge priority: deny > ask > defer > allow (higher = wins).
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::Deny => 3,
+            Self::Ask => 2,
+            Self::Defer => 1,
+            Self::Allow => 0,
+        }
+    }
+}
+
 impl HookEvent {
     /// Parse from CLI argument string
     #[must_use]
@@ -325,6 +349,20 @@ pub struct HookOutput {
     /// Simplified permission shorthand --- "approve" or "block"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
+
+    /// Pre-downgrade permission verdict — telemetry only, NEVER serialized.
+    ///
+    /// When a policy mode (e.g. `SENTINEL_AUTOPILOT=1`) downgrades a gate's
+    /// verdict (ask → allow/inject) before the output is returned, the hook
+    /// tags the effective output with the verdict it *would* have returned.
+    /// The ledger (`hook_metrics`) records this as `raw_outcome` alongside the
+    /// effective `outcome`, so "would have escalated to a human" firings stay
+    /// visible in autopilot/headless runs instead of being silently lost.
+    ///
+    /// `#[serde(skip)]` on both directions: this must never leak into the
+    /// stdout contract with Claude Code, and it is never read back.
+    #[serde(skip)]
+    pub raw_permission_decision: Option<PermissionDecision>,
 }
 
 /// Claude Code's hookSpecificOutput schema (v2.1.88).
@@ -468,6 +506,19 @@ impl HookOutput {
         }
     }
 
+    /// Tag this output with the pre-downgrade verdict it replaced.
+    ///
+    /// Used by autopilot-aware gates: when `SENTINEL_AUTOPILOT=1` converts an
+    /// ask-class verdict into an effective allow/inject, the gate calls e.g.
+    /// `HookOutput::allow().with_raw_permission_decision(PermissionDecision::Ask)`
+    /// so the ledger can record `raw_outcome=ask` next to the effective
+    /// `outcome`. Telemetry-only — never serialized to Claude Code.
+    #[must_use]
+    pub const fn with_raw_permission_decision(mut self, decision: PermissionDecision) -> Self {
+        self.raw_permission_decision = Some(decision);
+        self
+    }
+
     /// Modify tool input before execution (`PreToolUse` only)
     #[must_use]
     pub fn rewrite_input(updated: serde_json::Value) -> Self {
@@ -581,6 +632,16 @@ impl HookOutput {
     // into sub-methods would scatter tightly coupled policy logic without gaining clarity.
     #[allow(clippy::too_many_lines)]
     pub fn merge(&mut self, other: &Self) {
+        // Raw (pre-downgrade) verdict: keep the highest-priority raw verdict
+        // seen across merged hook outputs (deny > ask > defer > allow).
+        // Telemetry-only; never serialized.
+        if let Some(other_raw) = other.raw_permission_decision {
+            self.raw_permission_decision = Some(match self.raw_permission_decision {
+                Some(current) if current.priority() >= other_raw.priority() => current,
+                _ => other_raw,
+            });
+        }
+
         // Legacy blocked field merge (internal — transformed on output)
         if other.blocked == Some(true) {
             self.blocked = Some(true);
@@ -899,5 +960,52 @@ mod tests {
             .and_then(|h| h.additional_context)
             .unwrap();
         assert_eq!(ctx, "[Phase Gate] 🔴 load phase file before tools");
+    }
+
+    // --- raw_permission_decision (pre-downgrade verdict tag) ----------------
+
+    #[test]
+    fn raw_permission_decision_never_serializes_to_stdout() {
+        // The raw tag is telemetry-only: the stdout contract with Claude Code
+        // must be byte-identical with or without it.
+        let plain = HookOutput::allow();
+        let tagged = HookOutput::allow().with_raw_permission_decision(PermissionDecision::Ask);
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&tagged).unwrap()
+        );
+    }
+
+    #[test]
+    fn merge_keeps_highest_priority_raw_permission_decision() {
+        // deny > ask > defer > allow
+        let mut out = HookOutput::allow().with_raw_permission_decision(PermissionDecision::Ask);
+        out.merge(&HookOutput::allow().with_raw_permission_decision(PermissionDecision::Allow));
+        assert_eq!(out.raw_permission_decision, Some(PermissionDecision::Ask));
+
+        out.merge(&HookOutput::allow().with_raw_permission_decision(PermissionDecision::Deny));
+        assert_eq!(out.raw_permission_decision, Some(PermissionDecision::Deny));
+
+        // Absent on the other side leaves the current tag untouched.
+        out.merge(&HookOutput::allow());
+        assert_eq!(out.raw_permission_decision, Some(PermissionDecision::Deny));
+
+        // Absent on both sides stays absent.
+        let mut untagged = HookOutput::allow();
+        untagged.merge(&HookOutput::allow());
+        assert_eq!(untagged.raw_permission_decision, None);
+    }
+
+    #[test]
+    fn permission_decision_labels_and_priority_are_stable() {
+        assert_eq!(PermissionDecision::Allow.as_str(), "allow");
+        assert_eq!(PermissionDecision::Deny.as_str(), "deny");
+        assert_eq!(PermissionDecision::Ask.as_str(), "ask");
+        assert_eq!(PermissionDecision::Defer.as_str(), "defer");
+        assert!(
+            PermissionDecision::Deny.priority() > PermissionDecision::Ask.priority()
+                && PermissionDecision::Ask.priority() > PermissionDecision::Defer.priority()
+                && PermissionDecision::Defer.priority() > PermissionDecision::Allow.priority()
+        );
     }
 }

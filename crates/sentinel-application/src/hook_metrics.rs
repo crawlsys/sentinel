@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use sentinel_domain::events::HookOutput;
+use sentinel_domain::events::{HookOutput, PermissionDecision};
 
 use crate::hooks::{metrics_dir, FileSystemPort};
 
@@ -48,6 +48,18 @@ pub struct HookInvocation {
     pub duration_us: u128,
     /// Outcome class — see `Outcome::as_str` for the canonical values.
     pub outcome: String,
+    /// Raw (pre-downgrade) verdict class. Equals `outcome` unless a policy
+    /// mode (e.g. `SENTINEL_AUTOPILOT=1`) downgraded the gate's verdict
+    /// before the output was returned — then this preserves the original
+    /// class (e.g. `ask` while `outcome` is `allow`/`inject`), keeping
+    /// "would have escalated to a human" firings measurable in headless
+    /// runs. Genuine (non-downgraded) `ask` verdicts are also canonicalized
+    /// as `ask` here, while `outcome` keeps its historical `deny`
+    /// classification for reader compatibility. Historical rows written
+    /// before this field existed deserialize as "" — readers should fall
+    /// back to `outcome`.
+    #[serde(default)]
+    pub raw_outcome: String,
     /// First 120 chars of the block/deny reason, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -242,6 +254,31 @@ fn classify(output: &HookOutput) -> (Outcome, Option<String>) {
     (Outcome::Allow, None)
 }
 
+/// Compute the raw (pre-downgrade) verdict class for the ledger row.
+///
+/// Priority:
+/// 1. A hook-declared raw verdict (`HookOutput::with_raw_permission_decision`)
+///    — set by autopilot-aware gates at their downgrade site — wins.
+/// 2. A native (non-downgraded) `ask` is surfaced as `ask`: `classify`
+///    buckets it as `Deny` (any `permission_decision_reason` ⇒ deny), and
+///    that string is load-bearing for existing readers, so the truthful
+///    class lives here instead.
+/// 3. Otherwise the raw verdict equals the effective outcome.
+fn raw_outcome_of(output: &HookOutput, effective: &Outcome) -> String {
+    if let Some(raw) = output.raw_permission_decision {
+        return raw.as_str().to_string();
+    }
+    if output
+        .hook_specific_output
+        .as_ref()
+        .and_then(|h| h.permission_decision)
+        == Some(PermissionDecision::Ask)
+    {
+        return PermissionDecision::Ask.as_str().to_string();
+    }
+    effective.as_str().to_string()
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -298,6 +335,7 @@ where
     let output = f();
     let elapsed: Duration = started.elapsed();
     let (outcome, reason) = classify(&output);
+    let raw_outcome = raw_outcome_of(&output, &outcome);
 
     let row = HookInvocation {
         ts: chrono::Utc::now().to_rfc3339(),
@@ -308,6 +346,7 @@ where
         repo_root: ctx.repo_root.map(str::to_string),
         duration_us: elapsed.as_micros(),
         outcome: outcome.as_str().to_string(),
+        raw_outcome,
         reason,
         // Intrinsic per-harness attribution. The caller (e.g. the OpenCode
         // sentinel plugin) exports SENTINEL_SOURCE_HARNESS; default `claude`
@@ -417,6 +456,63 @@ mod tests {
             assert_eq!(hexpart.len(), 16);
             assert!(hexpart.bytes().all(|b| b.is_ascii_hexdigit()));
         }
+    }
+
+    // --- raw_outcome (pre-downgrade verdict preservation) --------------------
+
+    #[test]
+    fn raw_outcome_preserves_downgraded_ask_on_effective_allow() {
+        // The autopilot downgrade shape: gate would have asked, effective
+        // output is a plain allow. outcome=allow, raw_outcome=ask.
+        let output = HookOutput::allow().with_raw_permission_decision(PermissionDecision::Ask);
+        let (outcome, _) = classify(&output);
+        assert!(matches!(outcome, Outcome::Allow));
+        assert_eq!(raw_outcome_of(&output, &outcome), "ask");
+    }
+
+    #[test]
+    fn raw_outcome_preserves_downgraded_ask_on_effective_inject() {
+        // pr_merge_gate's autopilot shape: ask downgraded to a context-only
+        // reminder. outcome=inject, raw_outcome=ask.
+        let output = HookOutput::inject_context(HookEvent::PreToolUse, "AUTOPILOT: allowing merge")
+            .with_raw_permission_decision(PermissionDecision::Ask);
+        let (outcome, _) = classify(&output);
+        assert!(matches!(outcome, Outcome::Inject));
+        assert_eq!(raw_outcome_of(&output, &outcome), "ask");
+    }
+
+    #[test]
+    fn raw_outcome_equals_outcome_when_no_downgrade() {
+        for output in [HookOutput::allow(), HookOutput::deny("nope")] {
+            let (outcome, _) = classify(&output);
+            assert_eq!(raw_outcome_of(&output, &outcome), outcome.as_str());
+        }
+    }
+
+    #[test]
+    fn raw_outcome_canonicalizes_native_ask_while_outcome_stays_deny() {
+        // classify() buckets a genuine ask as Deny (reader-compat string);
+        // the truthful class must surface in raw_outcome.
+        let output = HookOutput::ask("confirm?");
+        let (outcome, _) = classify(&output);
+        assert!(matches!(outcome, Outcome::Deny));
+        assert_eq!(raw_outcome_of(&output, &outcome), "ask");
+    }
+
+    #[test]
+    fn historical_row_without_raw_outcome_deserializes_as_empty() {
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"phase_gate","duration_us":7,"outcome":"allow"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.raw_outcome, "");
+    }
+
+    #[test]
+    fn raw_outcome_round_trips_through_serde() {
+        let json = r#"{"ts":"2026-01-01T00:00:00Z","event":"PreToolUse","hook":"doppler_auth0_gate","duration_us":7,"outcome":"allow","raw_outcome":"ask"}"#;
+        let row: HookInvocation = serde_json::from_str(json).unwrap();
+        assert_eq!(row.raw_outcome, "ask");
+        let back = serde_json::to_string(&row).unwrap();
+        assert!(back.contains("\"raw_outcome\":\"ask\""));
     }
 
     #[test]

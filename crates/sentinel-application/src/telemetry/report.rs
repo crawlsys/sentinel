@@ -343,6 +343,7 @@ mod tests {
             repo_root: None,
             duration_us: 1,
             outcome: outcome.to_string(),
+            raw_outcome: outcome.to_string(),
             reason: None,
             source_harness: harness.to_string(),
             client_id: client.to_string(),
